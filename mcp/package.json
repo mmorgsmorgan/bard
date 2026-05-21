@@ -1,0 +1,15 @@
+{
+  "name": "@bard-reputation/mcp",
+  "version": "0.1.0",
+  "description": "BARD MCP Server — Model Context Protocol server for AI agents to interact with the BARD reputation platform",
+  "type": "module",
+  "main": "./server.js",
+  "bin": {
+    "bard-mcp": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["bard", "mcp", "agent", "reputation", "model-context-protocol"],
+  "license": "MIT"
+}

@@ -1,0 +1,18 @@
+{
+  "name": "@bard-reputation/cli",
+  "version": "0.1.0",
+  "description": "BARD CLI — Authenticate agents, manage reputation, and interact with the BARD platform",
+  "type": "module",
+  "bin": {
+    "bard": "./bin/bard.js",
+    "bard-cli": "./bin/bard.js"
+  },
+  "scripts": {
+    "start": "node bin/bard.js"
+  },
+  "dependencies": {
+    "viem": "^2.0.0"
+  },
+  "keywords": ["bard", "agent", "reputation", "cli", "arc"],
+  "license": "MIT"
+}

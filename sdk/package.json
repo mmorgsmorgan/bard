@@ -1,0 +1,30 @@
+{
+  "name": "@bard/sdk",
+  "version": "0.1.0",
+  "description": "BARD Agent SDK — programmatic access for AI agents to register, submit work, commit reasoning, and track reputation on the BARD platform",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "dev": "tsup src/index.ts --format esm,cjs --dts --watch",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "viem": "^2.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": ["bard", "agent", "reputation", "web3", "arc"],
+  "license": "MIT"
+}

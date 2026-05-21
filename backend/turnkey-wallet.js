@@ -1,0 +1,198 @@
+/**
+ * Turnkey Company Wallet Service
+ *
+ * Manages Turnkey-hosted wallets for BARD agents.
+ * Each agent gets a Turnkey wallet that can sign on-chain transactions
+ * (e.g. ERC-8004 IdentityRegistry.register) on Arc Testnet.
+ *
+ * Free tier: 100 wallets, 25 signatures/month
+ */
+
+import { Turnkey } from '@turnkey/sdk-server';
+import { createAccount } from '@turnkey/viem';
+import { createPublicClient, createWalletClient, http, encodeFunctionData } from 'viem';
+
+// ── Arc Testnet Chain Definition ──
+// Arc uses stablecoins (USDC) as gas, not ETH
+const arcTestnet = {
+  id: 5042002,
+  name: 'Arc Testnet',
+  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+  rpcUrls: {
+    default: { http: ['https://rpc.testnet.arc.network'] },
+  },
+  blockExplorers: {
+    default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' },
+  },
+};
+
+// ── ERC-8004 Contract Addresses ──
+const IDENTITY_REGISTRY = '0x8004A818BFB912233c491871b3d84c89A494BD9e';
+
+// Minimal ABI for register(string)
+const IDENTITY_REGISTRY_ABI = [
+  {
+    name: 'register',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'metadataURI', type: 'string' }],
+    outputs: [],
+  },
+];
+
+// ── Turnkey Client ──
+let turnkeyClient = null;
+
+function getTurnkey() {
+  if (turnkeyClient) return turnkeyClient;
+
+  const orgId = process.env.TURNKEY_ORGANIZATION_ID;
+  const apiPrivateKey = process.env.TURNKEY_API_PRIVATE_KEY;
+  const apiPublicKey = process.env.TURNKEY_API_PUBLIC_KEY;
+
+  if (!orgId || !apiPrivateKey || !apiPublicKey) {
+    return null; // Turnkey not configured — gracefully degrade
+  }
+
+  turnkeyClient = new Turnkey({
+    defaultOrganizationId: orgId,
+    apiBaseUrl: 'https://api.turnkey.com',
+    apiPrivateKey,
+    apiPublicKey,
+  });
+
+  return turnkeyClient;
+}
+
+/**
+ * Check if Turnkey is configured and available
+ */
+export function isTurnkeyEnabled() {
+  return !!getTurnkey();
+}
+
+/**
+ * Create a Turnkey wallet for an agent.
+ * Returns { walletId, address } or null if Turnkey is not configured.
+ */
+export async function createAgentWallet(agentId, agentName) {
+  const tk = getTurnkey();
+  if (!tk) return null;
+
+  const apiClient = tk.apiClient();
+
+  try {
+    // Create a wallet named after the agent
+    const walletResponse = await apiClient.createWallet({
+      walletName: `bard-agent-${agentId}`,
+      accounts: [
+        {
+          curve: 'CURVE_SECP256K1',
+          pathFormat: 'PATH_FORMAT_BIP32',
+          path: "m/44'/60'/0'/0/0",
+          addressFormat: 'ADDRESS_FORMAT_ETHEREUM',
+        },
+      ],
+    });
+
+    const walletId = walletResponse.walletId;
+    const address = walletResponse.addresses?.[0];
+
+    console.log(`  Turnkey wallet created for agent ${agentName}: ${address}`);
+    return { walletId, address };
+  } catch (err) {
+    console.error(`  Turnkey wallet creation failed for ${agentName}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Get or create a Turnkey wallet for an agent.
+ * Checks the DB first; creates one if missing.
+ */
+export async function getOrCreateAgentWallet(db, agentId, agentName) {
+  // Check if agent already has a Turnkey wallet
+  const agent = db.prepare('SELECT turnkey_wallet_id, turnkey_address FROM agents WHERE id = ?').get(agentId);
+
+  if (agent?.turnkey_wallet_id && agent?.turnkey_address) {
+    return { walletId: agent.turnkey_wallet_id, address: agent.turnkey_address };
+  }
+
+  // Create new wallet
+  const wallet = await createAgentWallet(agentId, agentName);
+  if (!wallet) return null;
+
+  // Store in DB
+  db.prepare('UPDATE agents SET turnkey_wallet_id = ?, turnkey_address = ? WHERE id = ?')
+    .run(wallet.walletId, wallet.address, agentId);
+
+  return wallet;
+}
+
+/**
+ * Sign and send an ERC-8004 IdentityRegistry.register(metadataURI) transaction.
+ * Returns { txHash, address } or throws.
+ */
+export async function mintERC8004Identity(db, agentId, agentName, metadataURI) {
+  const tk = getTurnkey();
+  if (!tk) throw new Error('Turnkey not configured. Set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PRIVATE_KEY, TURNKEY_API_PUBLIC_KEY in .env');
+
+  // Get or create wallet
+  const wallet = await getOrCreateAgentWallet(db, agentId, agentName);
+  if (!wallet) throw new Error('Failed to create Turnkey wallet for agent');
+
+  const apiClient = tk.apiClient();
+
+  // Create a viem-compatible Turnkey account
+  const turnkeyAccount = await createAccount({
+    client: apiClient,
+    organizationId: process.env.TURNKEY_ORGANIZATION_ID,
+    signWith: wallet.address,
+  });
+
+  // Create viem clients
+  const publicClient = createPublicClient({
+    chain: arcTestnet,
+    transport: http(),
+  });
+
+  const walletClient = createWalletClient({
+    account: turnkeyAccount,
+    chain: arcTestnet,
+    transport: http(),
+  });
+
+  // Encode the register(metadataURI) call
+  const data = encodeFunctionData({
+    abi: IDENTITY_REGISTRY_ABI,
+    functionName: 'register',
+    args: [metadataURI],
+  });
+
+  // Send the transaction
+  const txHash = await walletClient.sendTransaction({
+    to: IDENTITY_REGISTRY,
+    data,
+    value: 0n,
+  });
+
+  console.log(`  ERC-8004 mint tx sent by agent ${agentName}: ${txHash}`);
+
+  return {
+    txHash,
+    address: wallet.address,
+    explorer: `https://explorer.testnet.arc.network/tx/${txHash}`,
+  };
+}
+
+/**
+ * List all Turnkey wallets in the org (for admin/debugging).
+ */
+export async function listTurnkeyWallets() {
+  const tk = getTurnkey();
+  if (!tk) return [];
+
+  const apiClient = tk.apiClient();
+  const response = await apiClient.getWallets();
+  return response.wallets || [];
+}

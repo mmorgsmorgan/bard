@@ -1,0 +1,280 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useAccount } from 'wagmi';
+import {
+  fetchBounties, createBounty, acceptBounty, cancelBounty,
+  fetchAgentsByOwner,
+  type Bounty, type Agent,
+} from '@/lib/store';
+import { TierBadge } from '@/components/TierBadge';
+
+const BOUNTY_TYPES = [
+  { value: 'research', label: 'Research', icon: '◈' },
+  { value: 'code_review', label: 'Code Review', icon: '⟐' },
+  { value: 'data_analysis', label: 'Data Analysis', icon: '⬡' },
+  { value: 'content', label: 'Content', icon: '◎' },
+  { value: 'verification', label: 'Verification', icon: '◆' },
+  { value: 'other', label: 'Other', icon: '◇' },
+];
+
+const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }> = {
+  open: { label: 'Open', color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' },
+  assigned: { label: 'Assigned', color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20' },
+  submitted: { label: 'Submitted', color: 'text-yellow-400', bg: 'bg-yellow-500/10 border-yellow-500/20' },
+  verified: { label: 'Verified', color: 'text-[#ff8512]', bg: 'bg-[rgba(255,133,18,0.1)] border-[rgba(255,133,18,0.2)]' },
+  cancelled: { label: 'Cancelled', color: 'text-surface-500', bg: 'bg-surface-500/10 border-surface-500/20' },
+  expired: { label: 'Expired', color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/20' },
+};
+
+const USDC_AMOUNTS = ['0.50', '1.00', '2.00', '5.00', '10.00'];
+
+export default function BountiesPage() {
+  const { address, isConnected } = useAccount();
+  const [bounties, setBounties] = useState<Bounty[]>([]);
+  const [myAgents, setMyAgents] = useState<Agent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filterStatus, setFilterStatus] = useState<string>('');
+  const [showCreate, setShowCreate] = useState(false);
+  const [accepting, setAccepting] = useState<string | null>(null);
+
+  // Create form
+  const [form, setForm] = useState({
+    title: '', description: '', bountyType: 'research',
+    amountUsdc: '1.00', deadline: '', minReputation: 0,
+  });
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => { loadData(); }, [address, filterStatus]);
+
+  async function loadData() {
+    setLoading(true);
+    const [b, agents] = await Promise.all([
+      fetchBounties(filterStatus || undefined),
+      address ? fetchAgentsByOwner(address) : Promise.resolve([]),
+    ]);
+    setBounties(b);
+    setMyAgents(agents);
+    setLoading(false);
+  }
+
+  async function handleCreate() {
+    if (!address || !form.title || !form.deadline) return;
+    setCreating(true);
+    const bounty = await createBounty({
+      creatorWallet: address,
+      title: form.title,
+      description: form.description,
+      bountyType: form.bountyType,
+      amountUsdc: form.amountUsdc,
+      deadline: new Date(form.deadline).toISOString(),
+      minReputation: form.minReputation,
+    });
+    if (bounty) {
+      setBounties(prev => [bounty, ...prev]);
+      setShowCreate(false);
+      setForm({ title: '', description: '', bountyType: 'research', amountUsdc: '1.00', deadline: '', minReputation: 0 });
+    }
+    setCreating(false);
+  }
+
+  async function handleAccept(bountyId: string, agentId: string) {
+    setAccepting(bountyId);
+    const updated = await acceptBounty(bountyId, agentId);
+    if (updated) setBounties(prev => prev.map(b => b.id === bountyId ? updated : b));
+    setAccepting(null);
+  }
+
+  async function handleCancel(bountyId: string) {
+    if (!address) return;
+    const ok = await cancelBounty(bountyId, address);
+    if (ok) setBounties(prev => prev.map(b => b.id === bountyId ? { ...b, status: 'cancelled' } : b));
+  }
+
+  const openCount = bounties.filter(b => b.status === 'open').length;
+  const totalUsdc = bounties
+    .filter(b => b.status === 'open')
+    .reduce((s, b) => s + parseFloat(b.amountUsdc), 0)
+    .toFixed(2);
+
+  return (
+    <div className="max-w-5xl mx-auto px-6 py-16">
+      <div className="flex items-center gap-4 mb-4">
+        <div className="accent-line" />
+        <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">Bounty Market</span>
+      </div>
+      <div className="flex items-start justify-between mb-10">
+        <div>
+          <h1 className="text-3xl font-bold text-white mb-2">Bounties</h1>
+          <p className="text-surface-400 text-sm">Post tasks for agents. Agents earn USDC + reputation when work is verified.</p>
+        </div>
+        {isConnected && (
+          <button onClick={() => setShowCreate(!showCreate)} className="btn-primary text-xs shrink-0">
+            {showCreate ? 'Cancel' : '+ Post Bounty'}
+          </button>
+        )}
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-px mb-8">
+        {[
+          { label: 'Open Bounties', value: openCount, color: 'text-emerald-400' },
+          { label: 'USDC Available', value: `$${totalUsdc}`, color: 'text-[#ff8512]' },
+          { label: 'Total Posted', value: bounties.length, color: 'text-white' },
+        ].map(({ label, value, color }) => (
+          <div key={label} className="bg-[#0c0c0c] border border-[rgba(255,255,255,0.04)] p-4 text-center">
+            <div className={`font-mono text-xl font-bold ${color}`}>{value}</div>
+            <div className="font-mono text-[9px] text-surface-500 uppercase tracking-wider mt-1">{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Create Form */}
+      {showCreate && (
+        <div className="border border-[rgba(255,133,18,0.2)] bg-[rgba(255,133,18,0.03)] p-6 mb-8 animate-fade-in">
+          <div className="font-mono text-xs text-[#ff8512] tracking-wider uppercase mb-4">New Bounty</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div className="md:col-span-2">
+              <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Title</label>
+              <input value={form.title} onChange={e => setForm(p => ({ ...p, title: e.target.value }))}
+                placeholder="e.g. Analyze Arc ecosystem token sentiment" className="input-field w-full font-mono text-sm" />
+            </div>
+            <div>
+              <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Type</label>
+              <div className="flex gap-px flex-wrap">
+                {BOUNTY_TYPES.map(({ value, label, icon }) => (
+                  <button key={value} onClick={() => setForm(p => ({ ...p, bountyType: value }))}
+                    className={`flex-1 min-w-[80px] px-2 py-2 font-mono text-[9px] uppercase tracking-wider transition-colors ${
+                      form.bountyType === value ? 'bg-[#ff8512] text-[#050505]' : 'bg-[#0c0c0c] text-surface-400 hover:text-white border border-[rgba(255,255,255,0.06)]'
+                    }`}>
+                    {icon} {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">USDC Reward</label>
+              <div className="flex gap-px">
+                {USDC_AMOUNTS.map(amt => (
+                  <button key={amt} onClick={() => setForm(p => ({ ...p, amountUsdc: amt }))}
+                    className={`flex-1 py-2 font-mono text-xs transition-colors ${
+                      form.amountUsdc === amt ? 'bg-[#ff8512] text-[#050505]' : 'bg-[#0c0c0c] text-surface-400 hover:text-white border border-[rgba(255,255,255,0.06)]'
+                    }`}>
+                    ${amt}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Deadline</label>
+              <input type="datetime-local" value={form.deadline} onChange={e => setForm(p => ({ ...p, deadline: e.target.value }))}
+                className="input-field w-full font-mono text-sm" />
+            </div>
+            <div>
+              <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Min Reputation</label>
+              <input type="number" min={0} max={100} value={form.minReputation}
+                onChange={e => setForm(p => ({ ...p, minReputation: parseInt(e.target.value) || 0 }))}
+                className="input-field w-full font-mono text-sm" />
+              {form.minReputation > 0 && <TierBadge score={form.minReputation} size="xs" />}
+            </div>
+            <div className="md:col-span-2">
+              <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Description</label>
+              <textarea value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
+                rows={2} placeholder="Detailed requirements..." className="input-field w-full font-mono text-sm resize-none" />
+            </div>
+          </div>
+          <button onClick={handleCreate} disabled={creating || !form.title || !form.deadline}
+            className="btn-primary text-xs disabled:opacity-40">
+            {creating ? 'Creating...' : `Post Bounty — $${form.amountUsdc} USDC`}
+          </button>
+        </div>
+      )}
+
+      {/* Filter Tabs */}
+      <div className="flex gap-px mb-6 bg-[rgba(255,255,255,0.04)] w-fit">
+        {[['', 'All'], ['open', 'Open'], ['assigned', 'Assigned'], ['submitted', 'Submitted'], ['verified', 'Verified']].map(([val, label]) => (
+          <button key={val} onClick={() => setFilterStatus(val)}
+            className={`px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+              filterStatus === val ? 'bg-[#ff8512] text-[#050505]' : 'bg-[#050505] text-surface-400 hover:text-white'
+            }`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Bounties List */}
+      {loading ? (
+        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-16 text-center">
+          <div className="font-mono text-surface-500 text-sm animate-pulse-subtle">Loading...</div>
+        </div>
+      ) : bounties.length === 0 ? (
+        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-16 text-center">
+          <div className="font-mono text-surface-500 text-sm mb-4">No bounties yet</div>
+          {isConnected && <button onClick={() => setShowCreate(true)} className="btn-primary text-xs">Post First Bounty</button>}
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {bounties.map(bounty => {
+            const st = STATUS_STYLES[bounty.status] || STATUS_STYLES.cancelled;
+            const deadlinePast = new Date(bounty.deadline) < new Date();
+            const isCreator = address?.toLowerCase() === bounty.creatorWallet.toLowerCase();
+            const typeInfo = BOUNTY_TYPES.find(t => t.value === bounty.bountyType);
+            return (
+              <div key={bounty.id} className="border border-[rgba(255,255,255,0.04)] bg-[#0c0c0c] p-5 hover:border-[rgba(255,133,18,0.15)] transition-all">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <span className="font-mono text-xs text-surface-400">{typeInfo?.icon} {typeInfo?.label}</span>
+                      <span className={`font-mono text-[9px] px-1.5 py-0.5 border ${st.bg} ${st.color}`}>{st.label}</span>
+                      {deadlinePast && bounty.status === 'open' && (
+                        <span className="font-mono text-[9px] text-red-400">EXPIRED</span>
+                      )}
+                    </div>
+                    <div className="font-mono text-sm text-white font-bold mb-1">{bounty.title}</div>
+                    {bounty.description && (
+                      <div className="font-mono text-xs text-surface-400 mb-2 line-clamp-2">{bounty.description}</div>
+                    )}
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <span className="font-mono text-[10px] text-surface-500">by {bounty.creatorWallet.slice(0, 8)}...</span>
+                      <span className="font-mono text-[10px] text-surface-500">
+                        deadline: {new Date(bounty.deadline).toLocaleDateString()}
+                      </span>
+                      {bounty.minReputation > 0 && (
+                        <span className="font-mono text-[10px] text-surface-500 flex items-center gap-1">
+                          min: <TierBadge score={bounty.minReputation} size="xs" />
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <div className="font-mono text-2xl font-bold text-[#ff8512]">${bounty.amountUsdc}</div>
+                    <div className="font-mono text-[9px] text-surface-500">USDC</div>
+                    {/* Actions */}
+                    <div className="flex flex-col gap-1 mt-2">
+                      {bounty.status === 'open' && !isCreator && myAgents.length > 0 && (
+                        <select onChange={e => e.target.value && handleAccept(bounty.id, e.target.value)}
+                          className="font-mono text-[10px] bg-[#080808] border border-[rgba(255,133,18,0.3)] text-[#ff8512] px-2 py-1 cursor-pointer"
+                          defaultValue="">
+                          <option value="" disabled>Accept with…</option>
+                          {myAgents.map(a => (
+                            <option key={a.id} value={a.id}>{a.agentName}</option>
+                          ))}
+                        </select>
+                      )}
+                      {bounty.status === 'open' && isCreator && (
+                        <button onClick={() => handleCancel(bounty.id)}
+                          className="font-mono text-[10px] px-2 py-1 border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors">
+                          Cancel
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
