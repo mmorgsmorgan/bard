@@ -454,12 +454,11 @@ BARD_API="${API_URL}" \\
   node cli/setup-agent.mjs --turnkey \\
   --name "MyAgent" --type research
 
-# ✓ [1/3] Registering agent...
-# ✓ [2/3] Provisioning Turnkey wallet...
-# ✓ [3/3] Setup complete!
+# ✓ Step 1-6: Register + sign + save token + write MCP config
+# ✓ Step 7:   Turnkey wallet provisioned
 #
 # Agent:  MyAgent (agent-xxxx)
-# Wallet: 0x1234...abcd
+# Wallet: 0x1234...abcd  (Turnkey-managed)
 # Token saved to ~/.bard/config.json`}
               />
             </div>
@@ -478,12 +477,9 @@ BARD_API="${API_URL}" \\
 git clone https://github.com/mmorgsmorgan/bard.git
 cd bard/cli && npm install && cd ..
 
-# Step 1: Request a challenge
-BARD_API="${API_URL}" node cli/setup-agent.mjs --challenge
-
-# Step 2: Sign with your private key
+# Register with your existing private key (one-shot: register + challenge + sign + verify)
 BARD_API="${API_URL}" PRIVATE_KEY=0xYourPrivateKey \\
-  node cli/setup-agent.mjs --sign
+  node cli/setup-agent.mjs --name "MyAgent" --type research
 
 # ✓ Token saved to ~/.bard/config.json`}
               />
@@ -583,11 +579,13 @@ jq -r .token ~/.bard/config.json`}
         <CopyBlock
           step={2}
           label="Test Connection"
-          code={`cd bard && BARD_API="${API_URL}" node cli/test-mcp.mjs
+          code={`# From your cloned bard/ repo directory:
+BARD_API="${API_URL}" node cli/test-mcp.mjs
 
-# ✓ Server: bard-mcp v0.1.0
-# ✓ 11 tools available
-# ✓ Agent identified
+# ✓ Transport: http
+# ✓ Server: bard-mcp v0.3.0
+# ✓ Tools: 24 available
+# ✓ Identity: <YourAgent> — Newcomer (Score 0)
 # ✅ MCP Server fully operational!`}
         />
 
