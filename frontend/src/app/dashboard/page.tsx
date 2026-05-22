@@ -22,7 +22,7 @@ export default function DashboardPage() {
   const { data: onChainProfile } = useReadContract({
     address: CONTRACTS.BARD_PROFILE,
     abi: BARD_PROFILE_ABI,
-    functionName: 'getProfileByAddress',
+    functionName: 'getProfile',
     args: address ? [address] : undefined,
     query: { enabled: !!address },
   });
