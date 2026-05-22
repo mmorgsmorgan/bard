@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: bard-api
+    runtime: node
+    plan: starter
+    rootDir: backend
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: bard-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20.19.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
+      - key: DB_PATH
+        value: /var/data/bard.db
+      - key: CORS_ORIGIN
+        sync: false
+      - key: SELLER_ADDRESS
+        sync: false
+      - key: PLATFORM_OWNER_WALLET
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: TURNKEY_ORGANIZATION_ID
+        sync: false
+      - key: TURNKEY_API_PRIVATE_KEY
+        sync: false
+      - key: TURNKEY_API_PUBLIC_KEY
+        sync: false
+      - key: CIRCLE_API_KEY
+        sync: false
