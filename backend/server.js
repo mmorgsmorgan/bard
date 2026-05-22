@@ -26,17 +26,31 @@ const SELLER_ADDRESS = process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E1
 const PLATFORM_OWNER_WALLET = (process.env.PLATFORM_OWNER_WALLET || SELLER_ADDRESS).toLowerCase();
 
 // ── CORS ──
-app.use(cors({ origin: ['http://localhost:3000', 'http://127.0.0.1:3000'] }));
+const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowed = [...DEFAULT_ALLOWED_ORIGINS, ...ALLOWED_ORIGINS];
+    if (!origin || allowed.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS blocked origin: ${origin}`));
+  },
+}));
 app.use(express.json({ limit: '10mb' }));
 
 // ── Static file serving ──
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
+app.use('/uploads', express.static(UPLOADS_DIR));
 
 // ══════════════════════════════════════════════════════
 // ── SQLite Database ──
 // ══════════════════════════════════════════════════════
 
-const DB_PATH = path.join(__dirname, 'data', 'bard.db');
+const DB_PATH = process.env.DB_PATH || path.join(DATA_DIR, 'bard.db');
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 const db = new Database(DB_PATH);
@@ -857,7 +871,7 @@ const storage = multer.diskStorage({
     // Detect type from URL: /api/upload/pfp, /api/upload/portfolio, /api/upload/proof
     const urlType = req.originalUrl.split('/api/upload/')[1]?.split('?')[0] || '';
     const type = req.params.type || urlType || 'portfolio';
-    const dir = path.join(__dirname, 'uploads', type);
+    const dir = path.join(UPLOADS_DIR, type);
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
@@ -1199,7 +1213,7 @@ app.post('/api/upload/proof', upload.single('file'), (req, res) => {
       const oldest = walletVideos[0];
       if (oldest.file_url) {
         const filename = oldest.file_url.split('/').pop();
-        const filePath = path.join(__dirname, 'uploads', 'portfolio', filename);
+        const filePath = path.join(UPLOADS_DIR, 'portfolio', filename);
         try { fs.unlinkSync(filePath); } catch { /* file may already be gone */ }
         // Clear the file_url but keep the proof post
         db.prepare("UPDATE proofs SET file_url = '' WHERE id = ?").run(oldest.id);
@@ -1248,7 +1262,7 @@ app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), asy
         if (walletVideos.length >= 3) {
           const oldest = walletVideos[0];
           const filename = oldest.file_url.split('/').pop();
-          try { fs.unlinkSync(path.join(__dirname, 'uploads', 'portfolio', filename)); } catch {}
+          try { fs.unlinkSync(path.join(UPLOADS_DIR, 'portfolio', filename)); } catch {}
           db.prepare("UPDATE proofs SET file_url = '' WHERE id = ?").run(oldest.id);
         }
 
@@ -1259,7 +1273,7 @@ app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), asy
         if (agentVideos.length >= 3) {
           const oldest = agentVideos[0];
           const filename = oldest.file_url.split('/').pop();
-          try { fs.unlinkSync(path.join(__dirname, 'uploads', 'portfolio', filename)); } catch {}
+          try { fs.unlinkSync(path.join(UPLOADS_DIR, 'portfolio', filename)); } catch {}
           db.prepare("UPDATE proofs SET file_url = '' WHERE id = ?").run(oldest.id);
         }
       }
@@ -1313,7 +1327,7 @@ app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), asy
 
 app.get('/api/files/:wallet', (req, res) => {
   const wallet = req.params.wallet.toLowerCase().slice(0, 12);
-  const dir = path.join(__dirname, 'uploads', 'portfolio');
+  const dir = path.join(UPLOADS_DIR, 'portfolio');
   if (!fs.existsSync(dir)) return res.json({ files: [] });
   const files = fs.readdirSync(dir)
     .filter(f => f.startsWith(wallet))
@@ -1328,7 +1342,7 @@ app.get('/api/files/:wallet', (req, res) => {
 app.delete('/api/files/:type/:filename', (req, res) => {
   const { type, filename } = req.params;
   if (!['portfolio', 'pfp'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
-  const filePath = path.join(__dirname, 'uploads', type, filename);
+  const filePath = path.join(UPLOADS_DIR, type, filename);
   if (fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
     res.json({ success: true });
