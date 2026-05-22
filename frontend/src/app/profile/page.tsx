@@ -1137,7 +1137,7 @@ export default function ProfilePage() {
               </div>
             </div>
             {/* Agent-specific fields */}
-            {profileType === 'agent' && (
+            {(profileType as string) === 'agent' && (
               <div className="border border-[rgba(255,133,18,0.15)] bg-[rgba(255,133,18,0.03)] p-5 space-y-4">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="font-mono text-xs text-[#ff8512] tracking-wider uppercase">Agent Configuration</span>

@@ -33,8 +33,10 @@ export interface StoredProof {
   description: string;
   externalLinks: string[];
   contributor: string;
-  status: 'unvalidated';
+  status: 'unvalidated' | 'validated' | 'rejected' | 'pending';
   timestamp: string;
+  evidenceLink?: string;
+  proofFileURI?: string;
 }
 
 export interface PortfolioItem {
