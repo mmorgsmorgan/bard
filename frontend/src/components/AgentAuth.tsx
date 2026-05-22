@@ -323,9 +323,25 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
   const [token, setToken] = useState(tokenInput || '');
   const [client, setClient] = useState<MCPClient>('claude');
   const [authMode, setAuthMode] = useState<AuthMode>('turnkey');
+  const [transportMode, setTransportMode] = useState<'http' | 'stdio'>('http');
 
-  const mcpConfig = `// ${CLIENT_META[client].file}
+  const mcpConfigHttp = `// ${CLIENT_META[client].file}
 // Get your token: cat ~/.bard/config.json | jq -r .token
+
+{
+  "mcpServers": {
+    "bard": {
+      "url": "${API_URL}/mcp",
+      "headers": {
+        "Authorization": "Bearer <paste token from ~/.bard/config.json>"
+      }
+    }
+  }
+}`;
+
+  const mcpConfigStdio = `// ${CLIENT_META[client].file}
+// Advanced: run the MCP server as a local subprocess.
+// Requires git clone of https://github.com/mmorgsmorgan/bard.git on this machine.
 
 {
   "mcpServers": {
@@ -340,7 +356,24 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
   }
 }`;
 
-  const genericConfig = `// Any MCP-compatible client (Cline, Continue, etc.)
+  const mcpConfig = transportMode === 'http' ? mcpConfigHttp : mcpConfigStdio;
+
+  const genericConfigHttp = `// Any MCP-compatible client supporting Streamable HTTP transport.
+// Most clients (Claude Code, Claude Desktop, Cursor, Windsurf, VS Code Copilot) support this.
+
+{
+  "name": "bard",
+  "transport": "streamable-http",
+  "url": "${API_URL}/mcp",
+  "headers": {
+    "Authorization": "Bearer <paste token from ~/.bard/config.json>"
+  }
+}
+
+// Or via Claude Code CLI in one line:
+// claude mcp add --transport http bard ${API_URL}/mcp --header "Authorization: Bearer $(jq -r .token ~/.bard/config.json)"`;
+
+  const genericConfigStdio = `// Any MCP-compatible client (Cline, Continue, etc.)
 // Get your token: cat ~/.bard/config.json | jq -r .token
 
 {
@@ -356,6 +389,8 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
 
 // Or run directly:
 // BARD_TOKEN=$(jq -r .token ~/.bard/config.json) BARD_API="${API_URL}" node <path-to>/bard/mcp/server.js`;
+
+  const genericConfig = transportMode === 'http' ? genericConfigHttp : genericConfigStdio;
 
   return (
     <div className="border border-[rgba(255,133,18,0.15)] bg-[rgba(255,133,18,0.02)]">
@@ -489,6 +524,31 @@ jq -r .token ~/.bard/config.json`}
           <div className="flex items-center gap-2 mb-2">
             <span className="w-5 h-5 flex items-center justify-center bg-[#ff8512] text-[#050505] font-mono text-[10px] font-bold shrink-0">1</span>
             <span className="font-mono text-xs text-white tracking-wider uppercase">Configure MCP Client</span>
+          </div>
+
+          {/* Transport toggle */}
+          <div className="flex gap-px mb-3 bg-[rgba(255,255,255,0.06)] w-fit">
+            <button
+              onClick={() => setTransportMode('http')}
+              className={`px-4 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                transportMode === 'http' ? 'bg-[#ff8512] text-[#050505] font-bold' : 'bg-[#050505] text-surface-400 hover:text-white'
+              }`}
+            >
+              ◆ Hosted HTTP (Recommended)
+            </button>
+            <button
+              onClick={() => setTransportMode('stdio')}
+              className={`px-4 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                transportMode === 'stdio' ? 'bg-[#ff8512] text-[#050505] font-bold' : 'bg-[#050505] text-surface-400 hover:text-white'
+              }`}
+            >
+              ⟐ Local stdio (Advanced)
+            </button>
+          </div>
+          <div className="font-mono text-[9px] text-surface-500 mb-3">
+            {transportMode === 'http'
+              ? 'No clone, no local Node process. Just paste this config into your MCP client.'
+              : 'Runs the MCP server as a subprocess of your client. Requires git clone + Node locally.'}
           </div>
 
           {/* Client tabs */}

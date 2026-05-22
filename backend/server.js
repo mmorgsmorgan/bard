@@ -12,6 +12,7 @@ import jwt from 'jsonwebtoken';
 import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
 import { formatUnits, verifyMessage } from 'viem';
 import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet } from './turnkey-wallet.js';
+import { handleRpc as handleMcpRpc } from './mcp-handler.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,8 +39,35 @@ app.use(cors({
     if (!origin || allowed.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked origin: ${origin}`));
   },
+  allowedHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id', 'Accept'],
 }));
 app.use(express.json({ limit: '10mb' }));
+
+// ══════════════════════════════════════════════════════
+// ── MCP Streamable HTTP transport ──
+// ══════════════════════════════════════════════════════
+// Hosted MCP endpoint. Clients POST JSON-RPC messages here with
+// `Authorization: Bearer <BARD_TOKEN>`. Stateless — no session storage.
+
+app.post('/mcp', async (req, res) => {
+  const auth = req.headers.authorization || '';
+  const token = auth.replace(/^Bearer\s+/i, '');
+  try {
+    const result = await handleMcpRpc(req.body, token);
+    if (result === null) return res.status(204).end();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({
+      jsonrpc: '2.0',
+      id: req.body?.id ?? null,
+      error: { code: -32603, message: err.message },
+    });
+  }
+});
+
+app.get('/mcp', (_req, res) => {
+  res.json({ name: 'bard-mcp', version: '0.3.0', transport: 'streamable-http', endpoint: '/mcp' });
+});
 
 // ── Static file serving ──
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
