@@ -47,6 +47,7 @@ export interface PortfolioItem {
   category: 'design' | 'code' | 'art' | 'video' | 'writing' | 'other';
   imageDataURI?: string;     // backend URL for portfolio media
   externalLink?: string;
+  githubRepo?: string;
   tags: string[];
   createdAt: string;
   order: number;

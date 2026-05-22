@@ -58,6 +58,7 @@ export default function ProfilePage() {
   const [pDescription, setPDescription] = useState('');
   const [pCategory, setPCategory] = useState<PortfolioItem['category']>('design');
   const [pLink, setPLink] = useState('');
+  const [pGithub, setPGithub] = useState('');
   const [pTags, setPTags] = useState('');
   const [pImage, setPImage] = useState<string | null>(null);
   const [pImagePreview, setPImagePreview] = useState<string | null>(null);
@@ -387,6 +388,7 @@ export default function ProfilePage() {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       wallet: address, title: pTitle, description: pDescription, category: pCategory,
       imageDataURI: imageUrl || undefined, externalLink: pLink || undefined,
+      githubRepo: pGithub.trim() || undefined,
       tags: pTags.split(',').map(t => t.trim()).filter(Boolean),
       createdAt: new Date().toISOString(), order: portfolio.length,
     };
@@ -394,7 +396,7 @@ export default function ProfilePage() {
     setTimeout(() => fetchPortfolioByWallet(address).then(setPortfolio), 300);
     setShowAddPortfolio(false);
     setUploadingFile(false);
-    setPTitle(''); setPDescription(''); setPLink(''); setPTags(''); setPFile(null); setPImagePreview(null);
+    setPTitle(''); setPDescription(''); setPLink(''); setPGithub(''); setPTags(''); setPFile(null); setPImagePreview(null);
   };
 
   const handleDeletePortfolio = (id: string) => {
@@ -797,8 +799,20 @@ export default function ProfilePage() {
                   </div>
                 )}
                 <div className="flex items-center gap-4">
+                  {expandedItem.githubRepo && (
+                    <a
+                      href={expandedItem.githubRepo.startsWith('http') ? expandedItem.githubRepo : `https://${expandedItem.githubRepo}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn-secondary text-xs px-5 py-2"
+                    >
+                      GitHub Repo →
+                    </a>
+                  )}
                   {expandedItem.externalLink && (
-                    <a href={expandedItem.externalLink} target="_blank" rel="noopener noreferrer" className="btn-primary text-xs px-5 py-2">View Project →</a>
+                    <a href={expandedItem.externalLink} target="_blank" rel="noopener noreferrer" className="btn-primary text-xs px-5 py-2">
+                      {expandedItem.category === 'code' ? 'View Demo →' : 'View Project →'}
+                    </a>
                   )}
                   <button onClick={() => setExpandedItem(null)} className="btn-secondary text-xs px-5 py-2">Close</button>
                   <span className="text-[10px] text-surface-600 font-mono ml-auto">{new Date(expandedItem.createdAt).toLocaleDateString()}</span>
@@ -989,8 +1003,22 @@ export default function ProfilePage() {
                   <span className="label-mono block mb-2">Description</span>
                   <textarea value={pDescription} onChange={(e) => setPDescription(e.target.value)} placeholder="What did you build?" className="input-field min-h-[80px]" />
                 </div>
+                {pCategory === 'code' && (
+                  <div>
+                    <span className="label-mono block mb-2">GitHub Repo</span>
+                    <input
+                      type="text"
+                      value={pGithub}
+                      onChange={(e) => setPGithub(e.target.value)}
+                      placeholder="github.com/user/repo or https://github.com/user/repo"
+                      className="input-field font-mono"
+                    />
+                  </div>
+                )}
                 <div>
-                  <span className="label-mono block mb-2">External Link</span>
+                  <span className="label-mono block mb-2">
+                    {pCategory === 'code' ? 'Demo / Live URL' : 'External Link'}
+                  </span>
                   <input type="text" value={pLink} onChange={(e) => setPLink(e.target.value)} placeholder="https://..." className="input-field font-mono" />
                 </div>
                 <div>
