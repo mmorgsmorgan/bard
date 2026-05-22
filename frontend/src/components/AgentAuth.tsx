@@ -118,7 +118,7 @@ function HelpSection() {
           <p>Agent name and type are set during registration and currently cannot be changed via CLI.
           To update them, use the API directly:</p>
           <pre className="bg-[#080808] border border-[rgba(255,255,255,0.04)] p-2 text-[10px] text-surface-400 overflow-x-auto whitespace-pre-wrap">
-{`curl -X PUT http://localhost:4000/api/agents/<AGENT_ID> \\
+{`curl -X PUT ${API_URL}/api/agents/<AGENT_ID> \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer <TOKEN>" \\
   -d '{
@@ -295,11 +295,11 @@ BARD_TOKEN=$(jq -r .token ~/.bard/agent1.json) bard me`}
             </div>
             <div>
               <span className="text-surface-300">MCP server not connecting</span>
-              <div className="text-surface-600 ml-3">Ensure the backend is running at <span className="text-surface-400">http://localhost:4000</span> and BARD_TOKEN is set in your MCP config.</div>
+              <div className="text-surface-600 ml-3">Ensure BARD_API points to <span className="text-surface-400">{API_URL}</span> and BARD_TOKEN is set in your MCP config.</div>
             </div>
             <div>
               <span className="text-surface-300">Turnkey wallet creation failed</span>
-              <div className="text-surface-600 ml-3">Check that TURNKEY_* env vars are set in <span className="text-surface-400">~/bard/backend/.env</span> and the backend has been restarted.</div>
+              <div className="text-surface-600 ml-3">The platform operator must set TURNKEY_* env vars on the backend service. Contact the platform admin if this persists.</div>
             </div>
             <div>
               <span className="text-surface-300">ERC-8004 mint failed</span>
@@ -331,7 +331,7 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
   "mcpServers": {
     "bard": {
       "command": "node",
-      "args": ["/home/chief/bard/mcp/server.js"],
+      "args": ["<absolute path to>/bard/mcp/server.js"],
       "env": {
         "BARD_TOKEN": "<paste token from ~/.bard/config.json>",
         "BARD_API": "${API_URL}"
@@ -347,7 +347,7 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
   "name": "bard",
   "transport": "stdio",
   "command": "node",
-  "args": ["/home/chief/bard/mcp/server.js"],
+  "args": ["<absolute path to>/bard/mcp/server.js"],
   "env": {
     "BARD_TOKEN": "<paste token from ~/.bard/config.json>",
     "BARD_API": "${API_URL}"
@@ -355,7 +355,7 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
 }
 
 // Or run directly:
-// BARD_TOKEN=$(jq -r .token ~/.bard/config.json) node ~/bard/mcp/server.js`;
+// BARD_TOKEN=$(jq -r .token ~/.bard/config.json) BARD_API="${API_URL}" node <path-to>/bard/mcp/server.js`;
 
   return (
     <div className="border border-[rgba(255,133,18,0.15)] bg-[rgba(255,133,18,0.02)]">
@@ -410,10 +410,13 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
               </div>
               <CopyBlock
                 label=""
-                code={`cd ~/bard
+                code={`# Prerequisite: clone the BARD repo (one-time)
+git clone https://github.com/mmorgsmorgan/bard.git
+cd bard/cli && npm install && cd ..
 
 # Register + auto-provision Turnkey wallet
-bard auth --turnkey \\
+BARD_API="${API_URL}" \\
+  node cli/setup-agent.mjs --turnkey \\
   --name "MyAgent" --type research
 
 # ✓ [1/3] Registering agent...
@@ -436,18 +439,18 @@ bard auth --turnkey \\
               </div>
               <CopyBlock
                 label=""
-                code={`cd ~/bard
+                code={`# Prerequisite: clone the BARD repo (one-time)
+git clone https://github.com/mmorgsmorgan/bard.git
+cd bard/cli && npm install && cd ..
 
 # Step 1: Request a challenge
-bard challenge
+BARD_API="${API_URL}" node cli/setup-agent.mjs --challenge
 
 # Step 2: Sign with your private key
-bard sign 0xYourPrivateKey
+BARD_API="${API_URL}" PRIVATE_KEY=0xYourPrivateKey \\
+  node cli/setup-agent.mjs --sign
 
-# ✓ Token saved to ~/.bard/config.json
-
-# Optional: Provision a Turnkey wallet later
-bard wallet`}
+# ✓ Token saved to ~/.bard/config.json`}
               />
             </div>
           )}
@@ -520,7 +523,7 @@ jq -r .token ~/.bard/config.json`}
         <CopyBlock
           step={2}
           label="Test Connection"
-          code={`cd ~/bard && node cli/test-mcp.mjs
+          code={`cd bard && BARD_API="${API_URL}" node cli/test-mcp.mjs
 
 # ✓ Server: bard-mcp v0.1.0
 # ✓ 11 tools available
@@ -601,17 +604,16 @@ bard link-token
           </div>
         </div>
 
-        {/* ── Local Reference ── */}
+        {/* ── Reference ── */}
         <div className="mt-4 border border-[rgba(255,255,255,0.06)] bg-[#0a0a0a] p-4">
-          <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-3">Local Dev Reference</div>
+          <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-3">Reference</div>
           <div className="space-y-1">
             {[
-              ['Backend API', 'http://localhost:4000'],
-              ['Frontend', 'http://localhost:3000'],
-              ['MCP Server', 'node ~/bard/mcp/server.js'],
-              ['CLI', 'node ~/bard/cli/bin/bard.js'],
+              ['Backend API', API_URL],
+              ['MCP Server', 'node <path>/bard/mcp/server.js'],
+              ['CLI', 'node <path>/bard/cli/setup-agent.mjs'],
               ['Agent Config', '~/.bard/config.json'],
-              ['Turnkey Keys', '~/bard/backend/.env'],
+              ['Repo', 'https://github.com/mmorgsmorgan/bard'],
             ].map(([k, v]) => (
               <div key={k} className="flex justify-between items-center">
                 <span className="font-mono text-[10px] text-surface-400">{k}</span>
