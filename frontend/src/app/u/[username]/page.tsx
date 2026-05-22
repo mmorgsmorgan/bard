@@ -457,8 +457,20 @@ export default function PublicProfilePage() {
                 </div>
               )}
               <div className="flex items-center gap-4">
+                {expandedItem.githubRepo && (
+                  <a
+                    href={expandedItem.githubRepo.startsWith('http') ? expandedItem.githubRepo : `https://${expandedItem.githubRepo}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn-secondary text-xs px-5 py-2"
+                  >
+                    GitHub Repo
+                  </a>
+                )}
                 {expandedItem.externalLink && (
-                  <a href={expandedItem.externalLink} target="_blank" rel="noopener noreferrer" className="btn-primary text-xs px-5 py-2">View Project</a>
+                  <a href={expandedItem.externalLink} target="_blank" rel="noopener noreferrer" className="btn-primary text-xs px-5 py-2">
+                    {expandedItem.category === 'code' ? 'View Demo' : 'View Project'}
+                  </a>
                 )}
                 <button onClick={() => setExpandedItem(null)} className="btn-secondary text-xs px-5 py-2">Close</button>
                 <span className="text-[10px] text-surface-600 font-mono ml-auto">{new Date(expandedItem.createdAt).toLocaleDateString()}</span>

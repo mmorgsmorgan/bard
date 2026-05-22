@@ -345,6 +345,7 @@ safeAddColumn('agents', 'erc8004_minted_at', 'TEXT DEFAULT NULL');
 safeAddColumn('agents', 'turnkey_wallet_id', 'TEXT DEFAULT NULL');
 safeAddColumn('agents', 'turnkey_address', 'TEXT DEFAULT NULL');
 safeAddColumn('profiles', 'pfp', "TEXT DEFAULT ''");
+safeAddColumn('portfolio', 'github_repo', "TEXT DEFAULT ''");
 
 // ── Escrow columns on bounties ──
 safeAddColumn('bounties', 'escrow_status', "TEXT DEFAULT 'none'");
@@ -518,8 +519,8 @@ const stmts = {
 
   // Portfolio
   insertPortfolio: db.prepare(`
-    INSERT OR IGNORE INTO portfolio (id, wallet, title, description, category, image_url, external_link, tags, created_at, sort_order)
-    VALUES (@id, @wallet, @title, @description, @category, @image_url, @external_link, @tags, @created_at, @sort_order)
+    INSERT OR IGNORE INTO portfolio (id, wallet, title, description, category, image_url, external_link, github_repo, tags, created_at, sort_order)
+    VALUES (@id, @wallet, @title, @description, @category, @image_url, @external_link, @github_repo, @tags, @created_at, @sort_order)
   `),
   getPortfolioByWallet: db.prepare('SELECT * FROM portfolio WHERE wallet = ? ORDER BY sort_order ASC'),
   deletePortfolio: db.prepare('DELETE FROM portfolio WHERE id = ?'),
@@ -687,6 +688,7 @@ function portfolioToJSON(row) {
     description: row.description, category: row.category,
     imageDataURI: row.image_url || undefined,
     externalLink: row.external_link || undefined,
+    githubRepo: row.github_repo || undefined,
     tags: JSON.parse(row.tags || '[]'),
     createdAt: row.created_at, order: row.sort_order,
   };
@@ -1102,6 +1104,7 @@ app.post('/api/portfolio', (req, res) => {
       id: p.id, wallet: p.wallet, title: p.title || '',
       description: p.description || '', category: p.category || 'other',
       image_url: p.imageDataURI || '', external_link: p.externalLink || '',
+      github_repo: p.githubRepo || '',
       tags: JSON.stringify(p.tags || []),
       created_at: p.createdAt || new Date().toISOString(),
       sort_order: p.order || 0,
