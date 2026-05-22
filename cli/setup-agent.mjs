@@ -5,18 +5,23 @@
  * and configure MCP for an AI agent.
  *
  * Usage:
- *   PRIVATE_KEY=0x... node setup-agent.mjs
- *   PRIVATE_KEY=0x... node setup-agent.mjs --name "MyAgent" --type research
+ *   # Turnkey wallet (auto-provisioned, no private key needed):
+ *   BARD_API=<url> node setup-agent.mjs --turnkey --name "MyAgent" --type research
+ *
+ *   # Manual key (bring your own wallet):
+ *   BARD_API=<url> PRIVATE_KEY=0x... node setup-agent.mjs --name "MyAgent" --type research
  */
 
 import { privateKeyToAccount } from 'viem/accounts';
+import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
 // ── Config ──
 const API = process.env.BARD_API || 'http://localhost:4000';
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const USE_TURNKEY = process.argv.includes('--turnkey');
+let PRIVATE_KEY = process.env.PRIVATE_KEY;
 const AGENT_NAME = process.argv.includes('--name')
   ? process.argv[process.argv.indexOf('--name') + 1]
   : 'BardAgent-' + Date.now().toString(36);
@@ -25,15 +30,25 @@ const AGENT_TYPE = process.argv.includes('--type')
   : 'research';
 
 if (!PRIVATE_KEY) {
-  console.error('\n  ✗ PRIVATE_KEY environment variable required.\n');
-  console.error('  Usage: PRIVATE_KEY=0xYourKey node setup-agent.mjs\n');
-  process.exit(1);
+  if (USE_TURNKEY) {
+    // Auto-generate a registration key; the real on-chain wallet will be
+    // provisioned by Turnkey in step 7 below.
+    PRIVATE_KEY = '0x' + randomBytes(32).toString('hex');
+  } else {
+    console.error('\n  ✗ PRIVATE_KEY environment variable required (or pass --turnkey to auto-generate).\n');
+    console.error('  Usage:');
+    console.error('    PRIVATE_KEY=0xYourKey node setup-agent.mjs --name "X" --type research');
+    console.error('    node setup-agent.mjs --turnkey --name "X" --type research\n');
+    process.exit(1);
+  }
 }
 
-async function post(path, body) {
+async function post(path, body, token = '') {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(`${API}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
   return { status: res.status, data: await res.json() };
@@ -151,6 +166,26 @@ async function main() {
     console.log(`  ℹ Skipped Claude Desktop config (manual setup needed)`);
   }
 
+  // ── Step 7: Provision Turnkey Wallet (optional) ──
+  let turnkeyAddress = null;
+  if (USE_TURNKEY) {
+    console.log('\n  ── Step 7: Provision Turnkey Wallet ──');
+    const { status: walletStatus, data: walletData } = await post(
+      `/api/agents/${agentId}/wallet`,
+      {},
+      TOKEN,
+    );
+    if (walletStatus === 200 && walletData.turnkeyEnabled && walletData.address) {
+      turnkeyAddress = walletData.address;
+      console.log(`  ✓ Turnkey wallet: ${turnkeyAddress}\n`);
+    } else if (walletStatus === 200 && walletData.turnkeyEnabled === false) {
+      console.log(`  ⚠ Turnkey not configured on the backend. Falling back to manual key.`);
+      console.log(`    ${walletData.message || 'Set TURNKEY_* env vars on the BARD server.'}\n`);
+    } else {
+      console.log(`  ✗ Turnkey provisioning failed: ${walletData.error || 'unknown'}\n`);
+    }
+  }
+
   // ── Summary ──
   console.log('\n  ╔═══════════════════════════════════════════╗');
   console.log('  ║   ✓ Agent Setup Complete!                 ║');
@@ -159,7 +194,10 @@ async function main() {
   console.log('  ┌─────────────────────────────────────────────┐');
   console.log(`  │ Agent:   ${AGENT_NAME.padEnd(36)}│`);
   console.log(`  │ ID:      ${agentId.padEnd(36)}│`);
-  console.log(`  │ Wallet:  ${account.address.slice(0, 34).padEnd(36)}│`);
+  console.log(`  │ Wallet:  ${(turnkeyAddress || account.address).slice(0, 34).padEnd(36)}│`);
+  if (turnkeyAddress) {
+    console.log(`  │ Type:    Turnkey-managed                     │`);
+  }
   console.log(`  │ Tier:    Newcomer (Score: 0)                │`);
   console.log('  └─────────────────────────────────────────────┘\n');
 
