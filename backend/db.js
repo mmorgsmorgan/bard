@@ -309,6 +309,12 @@ export async function initSchema() {
       count INTEGER DEFAULT 0,
       window_start INTEGER NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS platform_verifiers (
+      wallet TEXT PRIMARY KEY,
+      added_by TEXT NOT NULL,
+      note TEXT DEFAULT '',
+      created_at TEXT DEFAULT (NOW()::text)
+    )`,
     `CREATE TABLE IF NOT EXISTS collaborations (
       id TEXT PRIMARY KEY,
       bounty_id TEXT NOT NULL,
@@ -736,6 +742,28 @@ export const stmts = {
   getTokensByAgent: async (agentId) => many(
     'SELECT * FROM auth_tokens WHERE agent_id = $1 AND revoked = 0 ORDER BY created_at DESC',
     [agentId]
+  ),
+
+  // ── Platform verifiers (delegated escrow approval) ──
+  isPlatformVerifier: async (wallet) => {
+    const r = await pool.query(
+      'SELECT 1 FROM platform_verifiers WHERE wallet = $1',
+      [(wallet || '').toLowerCase()]
+    );
+    return r.rowCount > 0;
+  },
+  listPlatformVerifiers: async () => many(
+    'SELECT * FROM platform_verifiers ORDER BY created_at ASC'
+  ),
+  addPlatformVerifier: async (p) => run(
+    `INSERT INTO platform_verifiers (wallet, added_by, note, created_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (wallet) DO UPDATE SET note = EXCLUDED.note, added_by = EXCLUDED.added_by`,
+    [p.wallet.toLowerCase(), p.added_by.toLowerCase(), p.note || '', new Date().toISOString()]
+  ),
+  removePlatformVerifier: async (wallet) => run(
+    'DELETE FROM platform_verifiers WHERE wallet = $1',
+    [(wallet || '').toLowerCase()]
   ),
 };
 
