@@ -310,6 +310,19 @@ function contributionToJSON(row) {
   };
 }
 
+async function contributionWithVerifications(row) {
+  const json = contributionToJSON(row);
+  if (!json) return null;
+  const counts = (await pool.query(
+    `SELECT COALESCE(SUM(CASE WHEN result='approved' THEN 1 ELSE 0 END),0) as approvals,
+            COALESCE(SUM(CASE WHEN result='rejected' THEN 1 ELSE 0 END),0) as rejections
+     FROM agent_verifications WHERE contribution_id = $1`, [row.id]
+  )).rows[0];
+  json.approvals = Number(counts?.approvals || 0);
+  json.rejections = Number(counts?.rejections || 0);
+  return json;
+}
+
 function endorsementToJSON(row) {
   return {
     id: row.id, contributionId: row.contribution_id,
@@ -1823,14 +1836,14 @@ app.post('/api/contributions', async (req, res) => {
 // Get contributions by agent
 app.get('/api/contributions/agent/:agentId', async (req, res) => {
   const contributions = await stmts.getContributionsByAgent(req.params.agentId);
-  res.json({ contributions: contributions.map(contributionToJSON) });
+  res.json({ contributions: await Promise.all(contributions.map(contributionWithVerifications)) });
 });
 
 // Get recent contributions feed
 app.get('/api/contributions/feed', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const contributions = await stmts.getRecentContributions(limit);
-  res.json({ contributions: contributions.map(contributionToJSON) });
+  res.json({ contributions: await Promise.all(contributions.map(contributionWithVerifications)) });
 });
 
 // Get single contribution with endorsements
