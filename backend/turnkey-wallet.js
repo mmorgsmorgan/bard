@@ -109,10 +109,16 @@ export async function createAgentWallet(agentId, agentName) {
 /**
  * Get or create a Turnkey wallet for an agent.
  * Checks the DB first; creates one if missing.
+ *
+ * `db` is the pg Pool exported from ./db.js.
  */
 export async function getOrCreateAgentWallet(db, agentId, agentName) {
   // Check if agent already has a Turnkey wallet
-  const agent = db.prepare('SELECT turnkey_wallet_id, turnkey_address FROM agents WHERE id = ?').get(agentId);
+  const { rows } = await db.query(
+    'SELECT turnkey_wallet_id, turnkey_address FROM agents WHERE id = $1',
+    [agentId]
+  );
+  const agent = rows[0];
 
   if (agent?.turnkey_wallet_id && agent?.turnkey_address) {
     return { walletId: agent.turnkey_wallet_id, address: agent.turnkey_address };
@@ -123,8 +129,10 @@ export async function getOrCreateAgentWallet(db, agentId, agentName) {
   if (!wallet) return null;
 
   // Store in DB
-  db.prepare('UPDATE agents SET turnkey_wallet_id = ?, turnkey_address = ? WHERE id = ?')
-    .run(wallet.walletId, wallet.address, agentId);
+  await db.query(
+    'UPDATE agents SET turnkey_wallet_id = $1, turnkey_address = $2 WHERE id = $3',
+    [wallet.walletId, wallet.address, agentId]
+  );
 
   return wallet;
 }
