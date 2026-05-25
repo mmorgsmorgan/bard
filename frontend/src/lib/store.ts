@@ -76,6 +76,11 @@ export interface Agent {
   totalContributions: number;
   totalEndorsements: number;
   status: 'active' | 'suspended';
+  specializations: string[];
+  hourlyRateUsdc: number;
+  availability: string;
+  totalEarnedUsdc: number;
+  successRate: number;
   createdAt: string;
 }
 
@@ -89,6 +94,8 @@ export interface Contribution {
   signature: string;
   status: 'pending' | 'verified' | 'rejected';
   endorsementCount: number;
+  approvals?: number;
+  rejections?: number;
   agentName?: string;
   ownerWallet?: string;
   createdAt: string;
@@ -710,4 +717,74 @@ export function createFeedStream(onEvent: (event: FeedEvent) => void): () => voi
   // Only log — don't close, or reconnection is permanently killed
   source.onerror = () => console.debug('[FeedStream] connection error, will auto-reconnect');
   return () => source.close();
+}
+
+// ══════════════════════════════════════════════════════
+// ── Agent Search & Marketplace (Phase 1) ──
+// ══════════════════════════════════════════════════════
+
+export async function searchAgents(params: {
+  q?: string;
+  specialization?: string;
+  min_reputation?: number;
+  availability?: string;
+}): Promise<{ agents: Agent[]; count: number }> {
+  try {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set('q', params.q);
+    if (params.specialization) qs.set('specialization', params.specialization);
+    if (params.min_reputation) qs.set('min_reputation', params.min_reputation.toString());
+    if (params.availability) qs.set('availability', params.availability);
+    const res = await fetch(`${API}/api/agents/search?${qs.toString()}`);
+    const json = await res.json();
+    return { agents: json.agents || [], count: json.count || 0 };
+  } catch { return { agents: [], count: 0 }; }
+}
+
+export async function fetchFeaturedAgents(): Promise<Agent[]> {
+  try {
+    const res = await fetch(`${API}/api/agents/featured`);
+    const json = await res.json();
+    return json.agents || [];
+  } catch { return []; }
+}
+
+// ══════════════════════════════════════════════════════
+// ── Cross-Agent Verification (Phase 2) ──
+// ══════════════════════════════════════════════════════
+
+export interface VerificationStats {
+  total: number;
+  approved: number;
+  rejected: number;
+  accuracy: number;
+}
+
+export async function agentVerifyContribution(
+  contributionId: string,
+  data: { verifierAgentId: string; result: string; reasoning?: string; signature: string }
+): Promise<{ success: boolean; approvals: number; rejections: number; autoAction?: string }> {
+  try {
+    const res = await fetch(`${API}/api/contributions/${contributionId}/agent-verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (!res.ok) return { success: false, approvals: 0, rejections: 0 };
+    return {
+      success: true,
+      approvals: json.approvals || 0,
+      rejections: json.rejections || 0,
+      autoAction: json.autoAction,
+    };
+  } catch { return { success: false, approvals: 0, rejections: 0 }; }
+}
+
+export async function fetchVerificationStats(agentId: string): Promise<VerificationStats | null> {
+  try {
+    const res = await fetch(`${API}/api/agents/${agentId}/verification-stats`);
+    const json = await res.json();
+    return json || null;
+  } catch { return null; }
 }

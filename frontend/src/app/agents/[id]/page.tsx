@@ -6,7 +6,8 @@ import Link from 'next/link';
 import { useAccount } from 'wagmi';
 import {
   fetchAgentById, fetchContributionsByAgent, endorseContribution,
-  type Agent, type Contribution, type ReputationData,
+  fetchAgentsByOwner, agentVerifyContribution, fetchVerificationStats,
+  type Agent, type Contribution, type ReputationData, type VerificationStats,
 } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
 
@@ -27,6 +28,13 @@ const AGENT_TYPES: Record<string, { label: string; icon: string }> = {
   content: { label: 'Content', icon: '◎' },
 };
 
+const AVAIL_COLORS: Record<string, string> = {
+  available: 'bg-emerald-400',
+  busy: 'bg-yellow-400',
+  offline: 'bg-surface-500',
+  dormant: 'bg-red-400',
+};
+
 export default function AgentDetailPage() {
   const params = useParams();
   const agentId = params.id as string;
@@ -38,24 +46,33 @@ export default function AgentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [endorsing, setEndorsing] = useState<string | null>(null);
   const [verifying, setVerifying] = useState<string | null>(null);
+  const [agentVerifying, setAgentVerifying] = useState<string | null>(null);
   const [skills, setSkills] = useState<any[]>([]);
   const [workHistory, setWorkHistory] = useState<any[]>([]);
   const [workStats, setWorkStats] = useState<any>(null);
+  const [verifStats, setVerifStats] = useState<VerificationStats | null>(null);
+  const [myAgents, setMyAgents] = useState<Agent[]>([]);
 
   useEffect(() => {
     if (!agentId) return;
     setLoading(true);
     const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
     (async () => {
-      const [{ agent: a, reputation: r }, contribs] = await Promise.all([
+      const [{ agent: a, reputation: r }, contribs, vStats] = await Promise.all([
         fetchAgentById(agentId),
         fetchContributionsByAgent(agentId),
+        fetchVerificationStats(agentId),
       ]);
       setAgent(a);
       setReputation(r);
       setContributions(contribs);
+      setVerifStats(vStats);
 
-      // Fetch skills and work history
+      if (address) {
+        const owned = await fetchAgentsByOwner(address);
+        setMyAgents(owned);
+      }
+
       try {
         const [skillsRes, historyRes] = await Promise.all([
           fetch(`${API}/api/agents/${agentId}/skills`).then(r => r.json()),
@@ -67,7 +84,7 @@ export default function AgentDetailPage() {
       } catch {}
       setLoading(false);
     })();
-  }, [agentId]);
+  }, [agentId, address]);
 
   async function handleEndorse(contributionId: string) {
     if (!address) return;
@@ -112,9 +129,39 @@ export default function AgentDetailPage() {
         if (data.reputation) setReputation(data.reputation);
       }
     } catch (e) {
-      console.error('Endorse error:', e);
+      console.error('Verify error:', e);
     }
     setVerifying(null);
+  }
+
+  const verifierAgent = myAgents.find(a => a.reputationScore >= 30);
+
+  async function handleAgentVerify(contributionId: string, result: 'approved' | 'rejected') {
+    if (!verifierAgent || verifierAgent.id === agentId) return;
+    setAgentVerifying(contributionId);
+    try {
+      const sig = '0x' + Array.from(crypto.getRandomValues(new Uint8Array(32)))
+        .map(b => b.toString(16).padStart(2, '0')).join('');
+      const res = await agentVerifyContribution(contributionId, {
+        verifierAgentId: verifierAgent.id,
+        result,
+        reasoning: `${result === 'approved' ? 'Approved' : 'Rejected'} via BARD UI by ${verifierAgent.agentName}`,
+        signature: sig,
+      });
+      if (res.success) {
+        setContributions(prev => prev.map(c =>
+          c.id === contributionId ? {
+            ...c,
+            approvals: res.approvals,
+            rejections: res.rejections,
+            status: res.autoAction === 'verified' ? 'verified' : res.autoAction === 'rejected' ? 'rejected' : c.status,
+          } : c
+        ));
+      }
+    } catch (e) {
+      console.error('Agent verify error:', e);
+    }
+    setAgentVerifying(null);
   }
 
   const getReputationColor = (score: number) => {
@@ -146,6 +193,8 @@ export default function AgentDetailPage() {
   const isOwner = address?.toLowerCase() === agent.ownerWallet.toLowerCase();
   const hasOwner = !!agent.ownerWallet && agent.ownerWallet !== '0x0';
   const typeInfo = AGENT_TYPES[agent.agentType] || AGENT_TYPES.general;
+  const verifiedContributions = contributions.filter(c => c.status === 'verified');
+  const canAgentVerify = !!verifierAgent && verifierAgent.id !== agentId;
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-16">
@@ -161,7 +210,7 @@ export default function AgentDetailPage() {
         </Link>
       </div>
 
-      {/* ─── Agent Identity Card ─── */}
+      {/* Agent Identity Card */}
       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-6 mb-4">
         <div className="flex items-start justify-between">
           <div className="flex items-center gap-5">
@@ -177,8 +226,24 @@ export default function AgentDetailPage() {
                 <span className={`font-mono text-[10px] ${agent.status === 'active' ? 'text-emerald-400' : 'text-red-400'}`}>
                   ● {agent.status}
                 </span>
+                {agent.availability && (
+                  <span className="font-mono text-[10px] text-surface-400 flex items-center gap-1">
+                    <span className={`w-1.5 h-1.5 rounded-full ${AVAIL_COLORS[agent.availability] || 'bg-surface-500'}`} />
+                    {agent.availability}
+                  </span>
+                )}
                 <span className="font-mono text-[10px] text-surface-600">{agent.id}</span>
               </div>
+              {/* Specializations */}
+              {agent.specializations?.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {agent.specializations.map((s: string) => (
+                    <span key={s} className="px-1.5 py-0.5 border border-purple-500/20 font-mono text-[9px] text-purple-300 bg-purple-500/5">
+                      {s.replace(/_/g, ' ')}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <div className="text-right shrink-0">
@@ -196,7 +261,7 @@ export default function AgentDetailPage() {
         )}
       </div>
 
-      {/* ─── Owner Link Status ─── */}
+      {/* Owner Link Status */}
       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-4">
         <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-3">Owner Connection</div>
         {hasOwner ? (
@@ -221,7 +286,7 @@ export default function AgentDetailPage() {
         )}
       </div>
 
-      {/* ─── Turnkey Wallet ─── */}
+      {/* Turnkey Wallet */}
       {(agent as any).turnkeyAddress && (
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-4">
           <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">Turnkey Wallet</div>
@@ -233,7 +298,7 @@ export default function AgentDetailPage() {
         </div>
       )}
 
-      {/* ─── ERC-8004 Identity ─── */}
+      {/* ERC-8004 Identity */}
       {(agent as any).erc8004TxHash && (
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-4">
           <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">ERC-8004 Identity</div>
@@ -245,8 +310,8 @@ export default function AgentDetailPage() {
         </div>
       )}
 
-      {/* ─── Stats Grid ─── */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-px mb-6">
+      {/* Stats Grid */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-px mb-4">
         {[
           { label: 'Contributions', value: reputation?.totalContributions || 0 },
           { label: 'Verified', value: reputation?.verified || 0, color: 'text-emerald-400' },
@@ -261,7 +326,32 @@ export default function AgentDetailPage() {
         ))}
       </div>
 
-      {/* ─── Marketplace Skills ─── */}
+      {/* Verification Stats (Phase 2) */}
+      {verifStats && verifStats.total > 0 && (
+        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-5 mb-4">
+          <div className="font-mono text-xs text-surface-500 tracking-wider uppercase mb-4">Verification Activity</div>
+          <div className="grid grid-cols-4 gap-px">
+            <div className="bg-[#080808] px-3 py-2 text-center">
+              <div className="font-mono text-lg text-white font-bold">{verifStats.total}</div>
+              <div className="font-mono text-[9px] text-surface-500">Total Reviews</div>
+            </div>
+            <div className="bg-[#080808] px-3 py-2 text-center">
+              <div className="font-mono text-lg text-emerald-400 font-bold">{verifStats.approved}</div>
+              <div className="font-mono text-[9px] text-surface-500">Approved</div>
+            </div>
+            <div className="bg-[#080808] px-3 py-2 text-center">
+              <div className="font-mono text-lg text-red-400 font-bold">{verifStats.rejected}</div>
+              <div className="font-mono text-[9px] text-surface-500">Rejected</div>
+            </div>
+            <div className="bg-[#080808] px-3 py-2 text-center">
+              <div className="font-mono text-lg text-[#ff8512] font-bold">{verifStats.accuracy}%</div>
+              <div className="font-mono text-[9px] text-surface-500">Accuracy</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Marketplace Skills */}
       {skills.length > 0 && (
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-5 mb-4">
           <div className="font-mono text-xs text-surface-500 tracking-wider uppercase mb-4">Marketplace Skills</div>
@@ -292,7 +382,7 @@ export default function AgentDetailPage() {
         </div>
       )}
 
-      {/* ─── Escrow Work History ─── */}
+      {/* Escrow Work History */}
       {(workHistory.length > 0 || (workStats && workStats.total > 0)) && (
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-5 mb-4">
           <div className="font-mono text-xs text-surface-500 tracking-wider uppercase mb-4">Escrow Work History</div>
@@ -329,7 +419,39 @@ export default function AgentDetailPage() {
         </div>
       )}
 
-      {/* ─── Contribution Timeline ─── */}
+      {/* Verified Portfolio */}
+      {verifiedContributions.length > 0 && (
+        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-5 mb-4">
+          <div className="font-mono text-xs text-surface-500 tracking-wider uppercase mb-4">
+            Verified Portfolio ({verifiedContributions.length})
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {verifiedContributions.map(c => {
+              const typeInfo = CONTRIBUTION_TYPES[c.type] || CONTRIBUTION_TYPES.other;
+              return (
+                <div key={c.id} className="p-3 border border-emerald-500/10 bg-[#0a0a0a]">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`font-mono text-[10px] px-1.5 py-0.5 border ${typeInfo.color}`}>{typeInfo.label}</span>
+                    <span className="font-mono text-[9px] text-emerald-400">✓ VERIFIED</span>
+                    {(c.approvals || 0) >= 2 && (
+                      <span className="font-mono text-[9px] px-1.5 py-0.5 bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">AUTO</span>
+                    )}
+                  </div>
+                  <div className="font-mono text-sm text-surface-300 mb-1.5 line-clamp-2">{c.description || 'No description'}</div>
+                  <div className="flex items-center gap-3 font-mono text-[9px] text-surface-500">
+                    <span>{new Date(c.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
+                    <span>proof: {c.proofHash.slice(0, 10)}...</span>
+                    <span>{c.endorsementCount} endorsement{c.endorsementCount !== 1 ? 's' : ''}</span>
+                    {(c.approvals || 0) > 0 && <span className="text-emerald-400">{c.approvals} approvals</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Contribution Timeline */}
       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-5">
         <div className="font-mono text-xs text-surface-500 tracking-wider uppercase mb-4">
           Contribution Timeline ({contributions.length})
@@ -348,34 +470,57 @@ export default function AgentDetailPage() {
                   </div>
                   {/* Content */}
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span className={`font-mono text-[10px] px-1.5 py-0.5 border ${typeInfo.color}`}>
                         {typeInfo.label}
                       </span>
                       {c.status === 'verified' && <span className="font-mono text-[9px] text-emerald-400">✓ VERIFIED</span>}
                       {c.status === 'pending' && <span className="font-mono text-[9px] text-yellow-500">⧖ PENDING</span>}
+                      {c.status === 'rejected' && <span className="font-mono text-[9px] text-red-400">✕ REJECTED</span>}
+                      {c.status === 'verified' && (c.approvals || 0) >= 2 && (
+                        <span className="font-mono text-[9px] px-1.5 py-0.5 bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">AUTO-VERIFIED</span>
+                      )}
                     </div>
                     <div className="font-mono text-sm text-surface-300 mb-1">{c.description || 'No description'}</div>
-                    <div className="flex items-center gap-3 text-[10px] text-surface-500 font-mono">
+                    <div className="flex items-center gap-3 text-[10px] text-surface-500 font-mono flex-wrap">
                       <span>{new Date(c.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
                       <span>proof: {c.proofHash.slice(0, 12)}...</span>
                       <span>{c.endorsementCount} endorsement{c.endorsementCount !== 1 ? 's' : ''}</span>
+                      {((c.approvals || 0) > 0 || (c.rejections || 0) > 0) && (
+                        <>
+                          <span className="text-emerald-400">{c.approvals} approved</span>
+                          {(c.rejections || 0) > 0 && <span className="text-red-400">{c.rejections} rejected</span>}
+                        </>
+                      )}
                     </div>
                   </div>
-                  {/* Owner: Endorse button */}
-                  {isConnected && c.status === 'pending' && isOwner && (
-                    <button onClick={() => handleVerify(c.id)} disabled={verifying === c.id}
-                      className="shrink-0 font-mono text-[10px] px-3 py-1.5 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.1)] transition-colors disabled:opacity-40">
-                      {verifying === c.id ? '...' : '✓ Endorse'}
-                    </button>
-                  )}
-                  {/* Non-owner: Endorse button */}
-                  {isConnected && c.status === 'pending' && !isOwner && (
-                    <button onClick={() => handleEndorse(c.id)} disabled={endorsing === c.id}
-                      className="shrink-0 font-mono text-[10px] px-2 py-1 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.1)] transition-colors disabled:opacity-40">
-                      {endorsing === c.id ? '...' : '✓ Endorse'}
-                    </button>
-                  )}
+                  {/* Action buttons */}
+                  <div className="flex gap-1.5 shrink-0">
+                    {isConnected && c.status === 'pending' && isOwner && (
+                      <button onClick={() => handleVerify(c.id)} disabled={verifying === c.id}
+                        className="font-mono text-[10px] px-3 py-1.5 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.1)] transition-colors disabled:opacity-40">
+                        {verifying === c.id ? '...' : '✓ Endorse'}
+                      </button>
+                    )}
+                    {isConnected && c.status === 'pending' && !isOwner && (
+                      <button onClick={() => handleEndorse(c.id)} disabled={endorsing === c.id}
+                        className="font-mono text-[10px] px-2 py-1 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.1)] transition-colors disabled:opacity-40">
+                        {endorsing === c.id ? '...' : '✓ Endorse'}
+                      </button>
+                    )}
+                    {isConnected && c.status === 'pending' && canAgentVerify && (
+                      <>
+                        <button onClick={() => handleAgentVerify(c.id, 'approved')} disabled={agentVerifying === c.id}
+                          className="font-mono text-[10px] px-2 py-1 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40">
+                          {agentVerifying === c.id ? '...' : '⬡ Approve'}
+                        </button>
+                        <button onClick={() => handleAgentVerify(c.id, 'rejected')} disabled={agentVerifying === c.id}
+                          className="font-mono text-[10px] px-2 py-1 border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40">
+                          ✕
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -383,7 +528,7 @@ export default function AgentDetailPage() {
         )}
       </div>
 
-      {/* ─── Agent Public Key ─── */}
+      {/* Agent Public Key */}
       <div className="mt-4 border border-[rgba(255,255,255,0.04)] bg-[#080808] p-4">
         <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">Agent Public Key</div>
         <div className="font-mono text-xs text-surface-400 break-all">{agent.agentPublicKey}</div>
