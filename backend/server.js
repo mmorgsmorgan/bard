@@ -2362,15 +2362,70 @@ app.post('/api/bounties/:id/review', async (req, res) => {
   res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
 });
 
+// ══════════════════════════════════════════════════════
+// ── Platform verifier management ──
+// ══════════════════════════════════════════════════════
+// The platform_verifiers table controls who can call /platform-verify
+// on bounties. The PLATFORM_OWNER_WALLET is auto-seeded at startup and
+// can grant/revoke other verifiers via these endpoints. Only an existing
+// verifier can add or remove others.
+
+app.get('/api/admin/platform-verifiers', async (_req, res) => {
+  try {
+    const verifiers = await stmts.listPlatformVerifiers();
+    res.json({ verifiers, count: verifiers.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/platform-verifiers', async (req, res) => {
+  const { callerWallet, wallet, note } = req.body;
+  if (!callerWallet || !wallet) return res.status(400).json({ error: 'callerWallet and wallet required' });
+  if (!/^0x[a-fA-F0-9]{40}$/.test(wallet)) return res.status(400).json({ error: 'wallet must be a 0x-prefixed Ethereum address' });
+  if (!(await stmts.isPlatformVerifier(callerWallet))) {
+    return res.status(403).json({ error: 'Only existing platform verifiers can add new ones' });
+  }
+  try {
+    await stmts.addPlatformVerifier({ wallet, added_by: callerWallet, note: note || '' });
+    const verifiers = await stmts.listPlatformVerifiers();
+    res.json({ success: true, added: wallet.toLowerCase(), verifiers });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/platform-verifiers/:wallet', async (req, res) => {
+  const { callerWallet } = req.body;
+  const target = req.params.wallet;
+  if (!callerWallet) return res.status(400).json({ error: 'callerWallet required' });
+  if (!(await stmts.isPlatformVerifier(callerWallet))) {
+    return res.status(403).json({ error: 'Only existing platform verifiers can remove others' });
+  }
+  if (target.toLowerCase() === PLATFORM_OWNER_WALLET) {
+    return res.status(403).json({ error: 'Cannot remove the platform owner. Change PLATFORM_OWNER_WALLET env var first.' });
+  }
+  try {
+    const { rowCount } = await stmts.removePlatformVerifier(target);
+    if (rowCount === 0) return res.status(404).json({ error: 'Not a verifier' });
+    res.json({ success: true, removed: target.toLowerCase() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/bounties/:id/platform-verify — Platform owner verifies (Stage 1)
 app.post('/api/bounties/:id/platform-verify', async (req, res) => {
   const { verifierWallet, decision, reasoning } = req.body;
   if (!verifierWallet || !decision) return res.status(400).json({ error: 'verifierWallet and decision required' });
   if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'decision must be approved or rejected' });
 
-  // Auth: Only platform owner can verify in Stage 1
-  if (verifierWallet.toLowerCase() !== PLATFORM_OWNER_WALLET) {
-    return res.status(403).json({ error: 'Only the platform owner can verify escrow in Stage 1' });
+  // Auth: caller wallet must be in the platform_verifiers table.
+  // The PLATFORM_OWNER_WALLET is auto-seeded into this table at startup,
+  // so the owner always retains access. Additional verifiers can be
+  // added via POST /api/admin/platform-verifiers.
+  if (!(await stmts.isPlatformVerifier(verifierWallet))) {
+    return res.status(403).json({ error: 'Caller is not a platform verifier' });
   }
   if (!(await checkRateLimit(verifierWallet, 'escrow_verify'))) return res.status(429).json({ error: 'Rate limit exceeded' });
 
@@ -2808,6 +2863,19 @@ process.on('SIGTERM', async () => { try { await pool.end(); } catch {} process.e
   try {
     await initSchema();
     console.log('  ✓ Schema verified');
+
+    // Bootstrap: ensure PLATFORM_OWNER_WALLET is always a verifier.
+    try {
+      await stmts.addPlatformVerifier({
+        wallet: PLATFORM_OWNER_WALLET,
+        added_by: PLATFORM_OWNER_WALLET,
+        note: 'Auto-seeded platform owner',
+      });
+      const verifiers = await stmts.listPlatformVerifiers();
+      console.log(`  ✓ Platform verifiers: ${verifiers.length} (owner + ${verifiers.length - 1} delegated)`);
+    } catch (err) {
+      console.error('  ! Could not seed platform verifier:', err.message);
+    }
   } catch (err) {
     console.error('Fatal: schema init failed:', err.message);
     process.exit(1);
