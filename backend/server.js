@@ -20,6 +20,11 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// Railway/Vercel sit behind a proxy that sets X-Forwarded-Proto.
+// Without this, req.protocol returns 'http' and upload URLs get saved as
+// http://... which Vercel blocks as mixed content.
+app.set('trust proxy', 1);
+
 // ── Seller wallet (receives USDC nanopayments) ──
 const SELLER_ADDRESS = process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E13Ba3b1b3c042e28a';
 
