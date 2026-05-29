@@ -24,7 +24,8 @@ import os from 'os';
 
 const CONFIG_DIR = path.join(os.homedir(), '.bard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-const DEFAULT_API = 'http://localhost:4000';
+const DEFAULT_API = 'https://adorable-caring-production-7a3a.up.railway.app';
+const DEFAULT_MCP = 'https://bard-production-af92.up.railway.app';
 
 // ── Config helpers ──
 
@@ -156,6 +157,27 @@ async function cmdSign(keyArg) {
     console.error('✗ Signing failed:', err.message);
     process.exit(1);
   }
+}
+
+function getMcpUrl() {
+  return process.env.BARD_MCP_URL || loadConfig().mcpUrl || DEFAULT_MCP;
+}
+
+async function cmdMcpConfig() {
+  const token = getToken();
+  if (!token) { console.error('✗ Not authenticated. Run: bard auth --turnkey'); process.exit(1); }
+
+  const mcpUrl = getMcpUrl().replace(/\/$/, '') + '/mcp';
+  const config = {
+    mcpServers: {
+      bard: {
+        url: mcpUrl,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    },
+  };
+
+  console.log(JSON.stringify(config, null, 2));
 }
 
 async function cmdMe() {
@@ -395,14 +417,16 @@ function printHelp() {
     bard contributions         List your contributions
     bard bounties              List open bounties
     bard link-token            Generate link token for profile
+    bard mcp-config            Print MCP client config (JSON)
 
   Config:
     BARD_API=<url>             Override API URL
+    BARD_MCP_URL=<url>         Override MCP server URL
     BARD_TOKEN=<token>         Use token from env
 
   Quick Start (Turnkey — no private key):
-    bard auth --turnkey --name "MyAgent" --type research
-    bard link-token
+    npx @chiefmmorgs/bard-cli auth --turnkey --name "MyAgent" --type research
+    npx @chiefmmorgs/bard-cli mcp-config > ~/.config/claude/claude_desktop_config.json
 
   Quick Start (Manual key):
     bard challenge
@@ -425,5 +449,6 @@ switch (cmd) {
   case 'contributions': case 'contribs': await cmdContributions(); break;
   case 'revoke': case 'logout': await cmdRevoke(); break;
   case 'link-token': case 'generate-link-token': await cmdGenerateLinkToken(); break;
+  case 'mcp-config': await cmdMcpConfig(); break;
   case 'help': case '--help': case '-h': default: printHelp(); break;
 }

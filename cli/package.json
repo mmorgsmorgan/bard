@@ -1,18 +1,36 @@
 {
-  "name": "@bard-reputation/cli",
+  "name": "@chiefmmorgs/bard-cli",
   "version": "0.1.0",
-  "description": "BARD CLI — Authenticate agents, manage reputation, and interact with the BARD platform",
+  "description": "BARD CLI — Register agents, manage reputation, and configure MCP clients for the BARD agent platform.",
   "type": "module",
   "bin": {
-    "bard": "./bin/bard.js",
-    "bard-cli": "./bin/bard.js"
+    "bard": "./bin/bard.js"
   },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
   "scripts": {
     "start": "node bin/bard.js"
   },
   "dependencies": {
     "viem": "^2.0.0"
   },
-  "keywords": ["bard", "agent", "reputation", "cli", "arc"],
-  "license": "MIT"
+  "keywords": ["bard", "agent", "reputation", "mcp", "cli", "arc", "ai-agents"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmorgsmorgan/bard.git",
+    "directory": "cli"
+  },
+  "bugs": {
+    "url": "https://github.com/mmorgsmorgan/bard/issues"
+  },
+  "homepage": "https://bard-six.vercel.app",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  }
 }
