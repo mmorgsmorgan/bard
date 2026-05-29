@@ -163,21 +163,82 @@ function getMcpUrl() {
   return process.env.BARD_MCP_URL || loadConfig().mcpUrl || DEFAULT_MCP;
 }
 
+const MCP_CLIENTS = {
+  cursor:          { format: 'json',    file: '~/.cursor/mcp.json' },
+  'claude-desktop':{ format: 'json',    file: '~/.config/claude/claude_desktop_config.json' },
+  windsurf:        { format: 'json',    file: '~/.codeium/windsurf/mcp_config.json' },
+  'claude-code':   { format: 'shell',   file: '(run the command — registers via `claude mcp add`)' },
+  codex:           { format: 'toml',    file: '~/.codex/config.toml' },
+  hermes:          { format: 'yaml',    file: '~/.hermes/config.yaml' },
+  openclaw:        { format: 'json',    file: '~/.openclaw/openclaw.json' },
+  generic:         { format: 'json',    file: '(any Streamable HTTP MCP client)' },
+};
+
+function renderMcpConfig(client, mcpUrl, token) {
+  switch (client) {
+    case 'cursor':
+    case 'claude-desktop':
+    case 'windsurf':
+    case 'openclaw':
+    case 'generic':
+      return JSON.stringify({
+        mcpServers: {
+          bard: {
+            url: mcpUrl,
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        },
+      }, null, 2);
+
+    case 'claude-code':
+      return `claude mcp add --transport http bard ${mcpUrl} \\\n  --header "Authorization: Bearer ${token}"`;
+
+    case 'codex':
+      return `# Append to ~/.codex/config.toml
+# (Codex MCP config format may vary by version — adjust if needed)
+[mcp_servers.bard]
+type = "http"
+url = "${mcpUrl}"
+headers = { Authorization = "Bearer ${token}" }`;
+
+    case 'hermes':
+      return `# Append to ~/.hermes/config.yaml under mcp_servers:
+mcp_servers:
+  bard:
+    url: "${mcpUrl}"
+    headers:
+      Authorization: "Bearer ${token}"`;
+
+    default:
+      throw new Error(`Unknown client: ${client}. Valid: ${Object.keys(MCP_CLIENTS).join(', ')}`);
+  }
+}
+
 async function cmdMcpConfig() {
   const token = getToken();
   if (!token) { console.error('✗ Not authenticated. Run: bard auth --turnkey'); process.exit(1); }
 
-  const mcpUrl = getMcpUrl().replace(/\/$/, '') + '/mcp';
-  const config = {
-    mcpServers: {
-      bard: {
-        url: mcpUrl,
-        headers: { Authorization: `Bearer ${token}` },
-      },
-    },
-  };
+  const args = process.argv.slice(3);
+  const clientIdx = args.indexOf('--client');
+  const client = clientIdx >= 0 && args[clientIdx + 1] ? args[clientIdx + 1] : 'generic';
 
-  console.log(JSON.stringify(config, null, 2));
+  if (!MCP_CLIENTS[client]) {
+    console.error(`✗ Unknown client: ${client}`);
+    console.error(`  Valid clients: ${Object.keys(MCP_CLIENTS).join(', ')}`);
+    process.exit(1);
+  }
+
+  const mcpUrl = getMcpUrl().replace(/\/$/, '') + '/mcp';
+  const output = renderMcpConfig(client, mcpUrl, token);
+
+  if (args.includes('--quiet') || client === 'generic') {
+    console.log(output);
+    return;
+  }
+
+  // Friendly mode: include the destination hint as a comment-prefix on stderr
+  process.stderr.write(`# ${MCP_CLIENTS[client].file}\n`);
+  console.log(output);
 }
 
 async function cmdMe() {
@@ -417,7 +478,8 @@ function printHelp() {
     bard contributions         List your contributions
     bard bounties              List open bounties
     bard link-token            Generate link token for profile
-    bard mcp-config            Print MCP client config (JSON)
+    bard mcp-config [--client] Print MCP client config (JSON/TOML/YAML/shell)
+      --client cursor | claude-desktop | claude-code | windsurf | codex | hermes | openclaw | generic
 
   Config:
     BARD_API=<url>             Override API URL
