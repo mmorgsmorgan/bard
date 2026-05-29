@@ -11,7 +11,7 @@ import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, fetc
 import type { StoredProfile, StoredProof, PortfolioItem, Notification } from '@/lib/store';
 
 export default function DashboardPage() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, status } = useAccount();
   const [profile, setProfile] = useState<StoredProfile | null>(null);
   const [proofs, setProofs] = useState<StoredProof[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
@@ -57,6 +57,10 @@ export default function DashboardPage() {
   const validatedProofs = proofs.filter((p) => p.status === 'validated').length;
   const trustScore = Math.min(100, validatedProofs * 15 + proofs.length * 5 + portfolio.length * 3);
   const unread = notifications.filter((n) => !n.read).length;
+
+  if (status === 'connecting' || status === 'reconnecting') {
+    return <div className="min-h-[80vh]" />;
+  }
 
   if (!isConnected) {
     return (
