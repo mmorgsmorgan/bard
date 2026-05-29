@@ -22,7 +22,7 @@ export default function SendPage() {
   const searchParams = useSearchParams();
   const prefillTo = searchParams.get('to') || '';
 
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, status } = useAccount();
   const [recipient, setRecipient] = useState(prefillTo);
   const [amount, setAmount] = useState('');
   const [step, setStep] = useState<'input' | 'confirm' | 'sending' | 'done' | 'error'>('input');
@@ -119,6 +119,10 @@ export default function SendPage() {
     setRecipient('');
     setAmount('');
     setError('');
+  }
+
+  if (status === 'connecting' || status === 'reconnecting') {
+    return <div className="min-h-screen" />;
   }
 
   if (!isConnected) {

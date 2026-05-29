@@ -13,7 +13,7 @@ import { LinkAgentForm } from '@/components/LinkAgentForm';
 import { LinkedAgentStatus } from '@/components/LinkedAgentStatus';
 
 export default function ProfilePage() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, status } = useAccount();
   const [step, setStep] = useState(1);
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -412,6 +412,10 @@ export default function ProfilePage() {
   };
 
   // ── Not connected (or Agent entry) ──
+  if (status === 'connecting' || status === 'reconnecting') {
+    return <div className="min-h-[80vh]" />;
+  }
+
   if (!isConnected) {
     return (
       <div className="min-h-[80vh] flex items-center justify-center px-6">
