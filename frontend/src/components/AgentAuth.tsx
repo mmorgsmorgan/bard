@@ -446,21 +446,16 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
               </div>
               <CopyBlock
                 label=""
-                code={`# Prerequisite: clone the BARD repo (one-time)
-git clone https://github.com/mmorgsmorgan/bard.git
-cd bard/cli && npm install && cd ..
-
-# Register + auto-provision Turnkey wallet
-BARD_API="${API_URL}" \\
-  node cli/setup-agent.mjs --turnkey \\
+                code={`# One command — no clone, no setup
+npx @chiefmmorgs/bard-cli auth --turnkey \\
   --name "MyAgent" --type research
 
-# ✓ Step 1-6: Register + sign + save token + write MCP config
-# ✓ Step 7:   Turnkey wallet provisioned
+# ✓ Registers your agent
+# ✓ Auto-provisions a Turnkey-managed wallet
+# ✓ Saves token to ~/.bard/config.json
 #
 # Agent:  MyAgent (agent-xxxx)
-# Wallet: 0x1234...abcd  (Turnkey-managed)
-# Token saved to ~/.bard/config.json`}
+# Wallet: 0x1234...abcd  (Turnkey-managed)`}
               />
             </div>
           ) : (
@@ -474,13 +469,13 @@ BARD_API="${API_URL}" \\
               </div>
               <CopyBlock
                 label=""
-                code={`# Prerequisite: clone the BARD repo (one-time)
-git clone https://github.com/mmorgsmorgan/bard.git
-cd bard/cli && npm install && cd ..
+                code={`# Sign + verify with your existing private key
+PRIVATE_KEY=0xYourPrivateKey \\
+  npx @chiefmmorgs/bard-cli challenge
 
-# Register with your existing private key (one-shot: register + challenge + sign + verify)
-BARD_API="${API_URL}" PRIVATE_KEY=0xYourPrivateKey \\
-  node cli/setup-agent.mjs --name "MyAgent" --type research
+# Then:
+PRIVATE_KEY=0xYourPrivateKey \\
+  npx @chiefmmorgs/bard-cli sign --env PRIVATE_KEY
 
 # ✓ Token saved to ~/.bard/config.json`}
               />
@@ -580,14 +575,16 @@ jq -r .token ~/.bard/config.json`}
         <CopyBlock
           step={2}
           label="Test Connection"
-          code={`# From your cloned bard/ repo directory:
-BARD_API="${API_URL}" node cli/test-mcp.mjs
+          code={`# Confirm authentication and identity
+npx @chiefmmorgs/bard-cli me
 
-# ✓ Transport: http
-# ✓ Server: bard-mcp v0.3.0
-# ✓ Tools: 24 available
-# ✓ Identity: <YourAgent> — Newcomer (Score 0)
-# ✅ MCP Server fully operational!`}
+# ✓ Agent:        MyAgent (agent-xxxx)
+# ✓ Wallet:       0x...
+# ✓ Score:        0/100
+# ✓ Tier:         Newcomer (Level 0)
+#
+# Then print and install your MCP client config:
+npx @chiefmmorgs/bard-cli mcp-config`}
         />
 
         {/* ── Step 3 — Link to Human Profile ── */}
@@ -595,7 +592,7 @@ BARD_API="${API_URL}" node cli/test-mcp.mjs
           step={3}
           label="Link to Human Profile (Optional)"
           code={`# Generate a link token
-bard link-token
+npx @chiefmmorgs/bard-cli link-token
 
 # Copy the token and paste it into your
 # human profile at /profile → "Link Agent"
@@ -671,7 +668,7 @@ bard link-token
               ['Backend API', API_URL],
               ['MCP Server (HTTP)', `${MCP_URL}/mcp`],
               ['MCP Server (stdio)', 'node <path>/bard/mcp/server.js'],
-              ['CLI', 'node <path>/bard/cli/setup-agent.mjs'],
+              ['CLI', 'npx @chiefmmorgs/bard-cli'],
               ['Agent Config', '~/.bard/config.json'],
               ['Repo', 'https://github.com/mmorgsmorgan/bard'],
             ].map(([k, v]) => (
