@@ -9,6 +9,7 @@ import { useState } from 'react';
  */
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+const MCP_URL = process.env.NEXT_PUBLIC_MCP_URL || 'http://localhost:4100';
 
 function CopyBlock({ label, code, step }: { label: string; code: string; step?: number }) {
   const [copied, setCopied] = useState(false);
@@ -295,7 +296,7 @@ BARD_TOKEN=$(jq -r .token ~/.bard/agent1.json) bard me`}
             </div>
             <div>
               <span className="text-surface-300">MCP server not connecting</span>
-              <div className="text-surface-600 ml-3">Ensure BARD_API points to <span className="text-surface-400">{API_URL}</span> and BARD_TOKEN is set in your MCP config.</div>
+              <div className="text-surface-600 ml-3">For HTTP transport, ensure your config URL is <span className="text-surface-400">{MCP_URL}/mcp</span>. For stdio, ensure BARD_API points to <span className="text-surface-400">{API_URL}</span> and BARD_TOKEN is set.</div>
             </div>
             <div>
               <span className="text-surface-300">Turnkey wallet creation failed</span>
@@ -331,7 +332,7 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
 {
   "mcpServers": {
     "bard": {
-      "url": "${API_URL}/mcp",
+      "url": "${MCP_URL}/mcp",
       "headers": {
         "Authorization": "Bearer <paste token from ~/.bard/config.json>"
       }
@@ -364,14 +365,14 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
 {
   "name": "bard",
   "transport": "streamable-http",
-  "url": "${API_URL}/mcp",
+  "url": "${MCP_URL}/mcp",
   "headers": {
     "Authorization": "Bearer <paste token from ~/.bard/config.json>"
   }
 }
 
 // Or via Claude Code CLI in one line:
-// claude mcp add --transport http bard ${API_URL}/mcp --header "Authorization: Bearer $(jq -r .token ~/.bard/config.json)"`;
+// claude mcp add --transport http bard ${MCP_URL}/mcp --header "Authorization: Bearer $(jq -r .token ~/.bard/config.json)"`;
 
   const genericConfigStdio = `// Any MCP-compatible client (Cline, Continue, etc.)
 // Get your token: cat ~/.bard/config.json | jq -r .token
@@ -668,7 +669,8 @@ bard link-token
           <div className="space-y-1">
             {[
               ['Backend API', API_URL],
-              ['MCP Server', 'node <path>/bard/mcp/server.js'],
+              ['MCP Server (HTTP)', `${MCP_URL}/mcp`],
+              ['MCP Server (stdio)', 'node <path>/bard/mcp/server.js'],
               ['CLI', 'node <path>/bard/cli/setup-agent.mjs'],
               ['Agent Config', '~/.bard/config.json'],
               ['Repo', 'https://github.com/mmorgsmorgan/bard'],

@@ -1,12 +1,13 @@
 /**
- * BARD MCP Handler — pure functions, no I/O setup.
+ * BARD MCP Handler — pure functions, no I/O setup. Published as @bard/mcp-core.
  *
- * Used by:
- *   - backend/server.js for hosted Streamable HTTP transport (POST /mcp)
- *   - mcp/server.js (stdio wrapper) for local subprocess transport
+ * Consumed by:
+ *   - mcp-server/server.js — hosted Streamable HTTP transport on Railway
+ *   - mcp/server.js        — local stdio wrapper for subprocess transport
+ *   - backend (optionally) — if any future feature needs in-process MCP calls
  *
- * The token is threaded through every call so multiple concurrent users
- * can share a single hosted instance.
+ * The token is threaded through every call so multiple concurrent users can
+ * share a single hosted instance.
  */
 
 import { createHash, randomBytes } from 'crypto';
@@ -16,13 +17,11 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Skill markdown — try a few likely paths so the file works both when
-// running embedded in the backend and from the standalone stdio wrapper.
 let SKILL_CONTENT = '';
 for (const p of [
-  join(__dirname, 'mcp-skill.md'),
-  join(__dirname, '..', 'AGENT_SKILL.md'),
-  join(__dirname, '..', 'mcp', 'SKILL.md'),
+  join(__dirname, 'skill.md'),
+  join(__dirname, '..', '..', 'AGENT_SKILL.md'),
+  join(__dirname, '..', '..', 'mcp', 'SKILL.md'),
 ]) {
   try { SKILL_CONTENT = readFileSync(p, 'utf8'); break; } catch {}
 }

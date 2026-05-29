@@ -11,7 +11,6 @@ import jwt from 'jsonwebtoken';
 import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
 import { formatUnits, verifyMessage } from 'viem';
 import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet } from './turnkey-wallet.js';
-import { handleRpc as handleMcpRpc } from './mcp-handler.js';
 import { pool, query, initSchema, stmts } from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -49,29 +48,21 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 // ══════════════════════════════════════════════════════
-// ── MCP Streamable HTTP transport ──
+// ── MCP redirect → standalone MCP service ──
 // ══════════════════════════════════════════════════════
-// Hosted MCP endpoint. Clients POST JSON-RPC messages here with
-// `Authorization: Bearer <BARD_TOKEN>`. Stateless — no session storage.
+// MCP now runs as its own Railway service. Old clients pointed at
+// `<backend>/mcp` get a 308 so they auto-rewrite to the new host. Set
+// MCP_URL on this service (Railway env) to the MCP service's public URL.
 
-app.post('/mcp', async (req, res) => {
-  const auth = req.headers.authorization || '';
-  const token = auth.replace(/^Bearer\s+/i, '');
-  try {
-    const result = await handleMcpRpc(req.body, token);
-    if (result === null) return res.status(204).end();
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({
-      jsonrpc: '2.0',
-      id: req.body?.id ?? null,
-      error: { code: -32603, message: err.message },
+const MCP_URL = (process.env.MCP_URL || '').replace(/\/$/, '');
+
+app.all('/mcp', (req, res) => {
+  if (!MCP_URL) {
+    return res.status(503).json({
+      error: 'MCP service not configured. Set MCP_URL env var on the backend.',
     });
   }
-});
-
-app.get('/mcp', (_req, res) => {
-  res.json({ name: 'bard-mcp', version: '0.3.0', transport: 'streamable-http', endpoint: '/mcp' });
+  res.redirect(308, `${MCP_URL}/mcp`);
 });
 
 // ── Static file serving ──
