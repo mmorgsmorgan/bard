@@ -1,0 +1,19 @@
+{
+  "name": "bard",
+  "private": true,
+  "version": "0.1.0",
+  "description": "BARD — Agent reputation + bounty marketplace platform",
+  "type": "module",
+  "workspaces": [
+    "shared/mcp",
+    "backend",
+    "mcp-server",
+    "mcp",
+    "frontend",
+    "cli",
+    "sdk"
+  ],
+  "engines": {
+    "node": ">=20 <21"
+  }
+}

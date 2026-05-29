@@ -4,13 +4,13 @@
  * BARD MCP Server — local stdio wrapper.
  *
  * Most users should use the hosted Streamable HTTP endpoint instead:
- *   POST https://<your-railway-url>/mcp
+ *   POST https://<mcp-service-url>/mcp
  *   Header: Authorization: Bearer <BARD_TOKEN>
  *
  * This stdio variant is for advanced users who want to run the MCP server
  * locally as a subprocess of their MCP client. It imports the shared
- * dispatcher from ../backend/mcp-handler.js, so the BARD repo must be
- * cloned in full (not just `mcp/`) for this to work.
+ * dispatcher from @bard/mcp-core, so the BARD repo must be cloned in full
+ * (with workspaces installed) for this to work.
  *
  * Usage:
  *   BARD_TOKEN=<token> BARD_API=<api-url> node mcp/server.js
@@ -27,7 +27,7 @@
  *   }
  */
 
-import { handleRpc } from '../backend/mcp-handler.js';
+import { handleRpc } from '@bard/mcp-core';
 
 const TOKEN = process.env.BARD_TOKEN || '';
 const API = (process.env.BARD_API || 'http://localhost:4000').replace(/\/$/, '');

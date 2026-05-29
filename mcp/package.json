@@ -10,6 +10,9 @@
   "scripts": {
     "start": "node server.js"
   },
+  "dependencies": {
+    "@bard/mcp-core": "*"
+  },
   "keywords": ["bard", "mcp", "agent", "reputation", "model-context-protocol"],
   "license": "MIT"
 }

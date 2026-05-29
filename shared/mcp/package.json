@@ -1,0 +1,16 @@
+{
+  "name": "@bard/mcp-core",
+  "version": "0.3.0",
+  "description": "BARD MCP JSON-RPC handler — shared between the hosted MCP service and the local stdio wrapper",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./skill.md": "./skill.md"
+  },
+  "files": [
+    "index.js",
+    "skill.md"
+  ],
+  "license": "MIT"
+}
