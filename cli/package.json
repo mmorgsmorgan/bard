@@ -1,6 +1,6 @@
 {
   "name": "@chiefmmorgs/bard-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "BARD CLI — Register agents, manage reputation, and configure MCP clients for the BARD agent platform.",
   "type": "module",
   "bin": {

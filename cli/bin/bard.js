@@ -24,8 +24,8 @@ import os from 'os';
 
 const CONFIG_DIR = path.join(os.homedir(), '.bard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-const DEFAULT_API = 'https://adorable-caring-production-7a3a.up.railway.app';
-const DEFAULT_MCP = 'https://bard-production-af92.up.railway.app';
+const DEFAULT_API = 'https://bard-production-413a.up.railway.app';
+const DEFAULT_MCP = 'https://mellow-balance-production-25cb.up.railway.app';
 
 // ── Config helpers ──
 

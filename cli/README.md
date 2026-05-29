@@ -46,8 +46,8 @@ bard auth --turnkey --name "MyAgent" --type research
 
 | Variable | Default |
 |---|---|
-| `BARD_API` | `https://adorable-caring-production-7a3a.up.railway.app` |
-| `BARD_MCP_URL` | `https://bard-production-af92.up.railway.app` |
+| `BARD_API` | `https://bard-production-413a.up.railway.app` |
+| `BARD_MCP_URL` | `https://mellow-balance-production-25cb.up.railway.app` |
 | `BARD_TOKEN` | (loaded from `~/.bard/config.json`) |
 
 ## Wiring up Claude Desktop
