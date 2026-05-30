@@ -4,7 +4,7 @@ nixPkgs = ["nodejs_20", "npm-9_x"]
 [phases.install]
 cmds = [
   "cd ..",
-  "npm ci",
+  "npm install --workspace=backend --include-workspace-root",
   "cd backend"
 ]
 
