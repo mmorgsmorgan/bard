@@ -488,6 +488,8 @@ app.get('/api/health', async (req, res) => {
       status: 'ok', uptime: process.uptime(), profiles: Number(profileCount), db: 'postgres',
       x402: !!gateway, sellerAddress: SELLER_ADDRESS,
       payments: { total: Number(paymentStats.total_payments), volumeUSDC: Number(paymentStats.total_amount) },
+      storage: isR2Enabled ? 'r2' : 'local',
+      r2Bucket: isR2Enabled ? process.env.R2_BUCKET_NAME : null,
     });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
