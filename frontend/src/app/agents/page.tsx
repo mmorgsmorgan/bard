@@ -18,6 +18,7 @@ const AGENT_TYPES = [
   { value: 'code', label: 'Code', icon: '⟐' },
   { value: 'data', label: 'Data', icon: '⬡' },
   { value: 'content', label: 'Content', icon: '◎' },
+  { value: 'swarm', label: 'Swarm', icon: '⬢' },
 ];
 
 const CONTRIBUTION_TYPES: Record<string, { label: string; color: string }> = {

@@ -4,7 +4,7 @@ import multer from 'multer';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto';
 import { EventEmitter } from 'events';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
@@ -12,6 +12,7 @@ import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
 import { formatUnits, verifyMessage } from 'viem';
 import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet } from './turnkey-wallet.js';
 import { pool, query, initSchema, stmts } from './db.js';
+import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +30,11 @@ const SELLER_ADDRESS = process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E1
 
 // ── Platform owner wallet (Stage 1 escrow verifier) ──
 const PLATFORM_OWNER_WALLET = (process.env.PLATFORM_OWNER_WALLET || SELLER_ADDRESS).toLowerCase();
+
+// ── Swarms API configuration ──
+const SWARMS_API_KEY = process.env.SWARMS_API_KEY || '';
+const SWARMS_PLATFORM_MARKUP_PCT = parseFloat(process.env.SWARMS_PLATFORM_MARKUP_PCT || '20');
+const SWARMS_API_BASE = 'https://api.swarms.world';
 
 // ── CORS ──
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
@@ -439,22 +445,25 @@ async function logPayment(req, endpoint) {
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB (videos up to 25MB)
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    // Detect type from URL: /api/upload/pfp, /api/upload/portfolio, /api/upload/proof
-    const urlType = req.originalUrl.split('/api/upload/')[1]?.split('?')[0] || '';
-    const type = req.params.type || urlType || 'portfolio';
-    const dir = path.join(UPLOADS_DIR, type);
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const wallet = (req.body.wallet || 'unknown').toLowerCase().slice(0, 12);
-    const ext = path.extname(file.originalname) || '.png';
-    const unique = `${wallet}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
-    cb(null, unique);
-  },
-});
+// Use memory storage when R2 is enabled, disk storage otherwise
+const storage = isR2Enabled
+  ? multer.memoryStorage()
+  : multer.diskStorage({
+      destination: (req, file, cb) => {
+        // Detect type from URL: /api/upload/pfp, /api/upload/portfolio, /api/upload/proof
+        const urlType = req.originalUrl.split('/api/upload/')[1]?.split('?')[0] || '';
+        const type = req.params.type || urlType || 'portfolio';
+        const dir = path.join(UPLOADS_DIR, type);
+        fs.mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+      },
+      filename: (req, file, cb) => {
+        const wallet = (req.body.wallet || 'unknown').toLowerCase().slice(0, 12);
+        const ext = path.extname(file.originalname) || '.png';
+        const unique = `${wallet}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+        cb(null, unique);
+      },
+    });
 
 const fileFilter = (req, file, cb) => {
   const allowed = /\.(jpg|jpeg|png|gif|webp|mp4|webm|svg)$/i;
@@ -765,16 +774,48 @@ app.get('/api/agents/:id/notifications', requireAuth, async (req, res) => {
 // ── Routes: File Uploads ──
 // ══════════════════════════════════════════════════════
 
-app.post('/api/upload/portfolio', upload.single('file'), (req, res) => {
+app.post('/api/upload/portfolio', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${req.file.filename}`;
-  res.json({ success: true, url, filename: req.file.filename, size: req.file.size, mimetype: req.file.mimetype });
+
+  try {
+    let url, filename;
+
+    if (isR2Enabled) {
+      // Upload to R2
+      filename = generateFilename(req.file.originalname, req.body.wallet);
+      url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+    } else {
+      // Local disk storage
+      filename = req.file.filename;
+      url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
+    }
+
+    res.json({ success: true, url, filename, size: req.file.size, mimetype: req.file.mimetype });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-app.post('/api/upload/pfp', upload.single('file'), (req, res) => {
+app.post('/api/upload/pfp', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const url = `${req.protocol}://${req.get('host')}/uploads/pfp/${req.file.filename}`;
-  res.json({ success: true, url, filename: req.file.filename, size: req.file.size, mimetype: req.file.mimetype });
+
+  try {
+    let url, filename;
+
+    if (isR2Enabled) {
+      // Upload to R2
+      filename = generateFilename(req.file.originalname, req.body.wallet);
+      url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'pfp');
+    } else {
+      // Local disk storage
+      filename = req.file.filename;
+      url = `${req.protocol}://${req.get('host')}/uploads/pfp/${filename}`;
+    }
+
+    res.json({ success: true, url, filename, size: req.file.size, mimetype: req.file.mimetype });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post('/api/upload/proof', upload.single('file'), async (req, res) => {
@@ -793,12 +834,24 @@ app.post('/api/upload/proof', upload.single('file'), async (req, res) => {
     );
 
     if (walletVideos.length >= MAX_VIDEOS) {
-      // Delete the oldest video file from disk, keep the proof record
+      // Delete the oldest video file
       const oldest = walletVideos[0];
       if (oldest.file_url) {
-        const filename = oldest.file_url.split('/').pop();
-        const filePath = path.join(UPLOADS_DIR, 'portfolio', filename);
-        try { fs.unlinkSync(filePath); } catch { /* file may already be gone */ }
+        try {
+          if (isR2Enabled) {
+            // Extract R2 key from URL
+            const urlObj = new URL(oldest.file_url);
+            const key = urlObj.pathname.substring(1); // Remove leading /
+            await deleteFromR2(key);
+          } else {
+            // Delete from local disk
+            const filename = oldest.file_url.split('/').pop();
+            const filePath = path.join(UPLOADS_DIR, 'portfolio', filename);
+            fs.unlinkSync(filePath);
+          }
+        } catch (err) {
+          console.error('Failed to delete old video:', err);
+        }
         // Clear the file_url but keep the proof post
         await pool.query("UPDATE proofs SET file_url = '' WHERE id = $1", [oldest.id]);
         deletedOldest = { proofId: oldest.id, removedFile: oldest.file_url };
@@ -806,8 +859,23 @@ app.post('/api/upload/proof', upload.single('file'), async (req, res) => {
     }
   }
 
-  const url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${req.file.filename}`;
-  res.json({ success: true, url, filename: req.file.filename, size: req.file.size, mimetype: req.file.mimetype, deletedOldest });
+  try {
+    let url, filename;
+
+    if (isR2Enabled) {
+      // Upload to R2
+      filename = generateFilename(req.file.originalname, wallet);
+      url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+    } else {
+      // Local disk storage
+      filename = req.file.filename;
+      url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
+    }
+
+    res.json({ success: true, url, filename, size: req.file.size, mimetype: req.file.mimetype, deletedOldest });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Agent proxy: upload proof on behalf of linked human
@@ -833,7 +901,9 @@ app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), asy
     if (req.file) {
       // Reject videos over 25MB
       if (req.file.mimetype.startsWith('video/') && req.file.size > 25 * 1024 * 1024) {
-        try { fs.unlinkSync(req.file.path); } catch {}
+        if (!isR2Enabled) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+        }
         return res.status(400).json({ error: 'Video must be under 25MB' });
       }
 
@@ -846,9 +916,19 @@ app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), asy
         );
         if (walletVideos.length >= 3) {
           const oldest = walletVideos[0];
-          const filename = oldest.file_url.split('/').pop();
-          try { fs.unlinkSync(path.join(UPLOADS_DIR, 'portfolio', filename)); } catch {}
-          await pool.query("UPDATE proofs SET file_url = '' WHERE id = $1", [oldest.id]);
+          if (oldest.file_url) {
+            try {
+              if (isR2Enabled) {
+                const urlObj = new URL(oldest.file_url);
+                const key = urlObj.pathname.substring(1);
+                await deleteFromR2(key);
+              } else {
+                const filename = oldest.file_url.split('/').pop();
+                fs.unlinkSync(path.join(UPLOADS_DIR, 'portfolio', filename));
+              }
+            } catch {}
+            await pool.query("UPDATE proofs SET file_url = '' WHERE id = $1", [oldest.id]);
+          }
         }
 
         // Also enforce 3-video limit per agent (submitted_by)
@@ -858,12 +938,29 @@ app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), asy
         );
         if (agentVideos.length >= 3) {
           const oldest = agentVideos[0];
-          const filename = oldest.file_url.split('/').pop();
-          try { fs.unlinkSync(path.join(UPLOADS_DIR, 'portfolio', filename)); } catch {}
-          await pool.query("UPDATE proofs SET file_url = '' WHERE id = $1", [oldest.id]);
+          if (oldest.file_url) {
+            try {
+              if (isR2Enabled) {
+                const urlObj = new URL(oldest.file_url);
+                const key = urlObj.pathname.substring(1);
+                await deleteFromR2(key);
+              } else {
+                const filename = oldest.file_url.split('/').pop();
+                fs.unlinkSync(path.join(UPLOADS_DIR, 'portfolio', filename));
+              }
+            } catch {}
+            await pool.query("UPDATE proofs SET file_url = '' WHERE id = $1", [oldest.id]);
+          }
         }
       }
-      fileUrl = `${req.protocol}://${req.get('host')}/uploads/portfolio/${req.file.filename}`;
+
+      // Upload file
+      if (isR2Enabled) {
+        const filename = generateFilename(req.file.originalname, humanWallet);
+        fileUrl = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+      } else {
+        fileUrl = `${req.protocol}://${req.get('host')}/uploads/portfolio/${req.file.filename}`;
+      }
     }
 
     // Save proof to the human's profile
@@ -913,17 +1010,150 @@ app.get('/api/files/:wallet', (req, res) => {
   res.json({ files });
 });
 
-app.delete('/api/files/:type/:filename', (req, res) => {
+app.delete('/api/files/:type/:filename', async (req, res) => {
   const { type, filename } = req.params;
   if (!['portfolio', 'pfp'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
-  const filePath = path.join(UPLOADS_DIR, type, filename);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-    res.json({ success: true });
-  } else {
-    res.status(404).json({ error: 'File not found' });
+
+  try {
+    if (isR2Enabled) {
+      // Delete from R2
+      const key = `${type}/${filename}`;
+      await deleteFromR2(key);
+      res.json({ success: true });
+    } else {
+      // Delete from local disk
+      const filePath = path.join(UPLOADS_DIR, type, filename);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: 'File not found' });
+      }
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
+
+// ══════════════════════════════════════════════════════
+// ── Swarm Execution Helpers ──
+// ══════════════════════════════════════════════════════
+
+function encryptApiKey(plaintext) {
+  const key = scryptSync(process.env.JWT_SECRET || 'default-secret', 'salt', 32);
+  const iv = randomBytes(16);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  let encrypted = cipher.update(plaintext, 'utf8', 'base64');
+  encrypted += cipher.final('base64');
+  const authTag = cipher.getAuthTag().toString('base64');
+  return JSON.stringify({ encrypted, iv: iv.toString('base64'), authTag });
+}
+
+function decryptApiKey(ciphertext) {
+  const { encrypted, iv, authTag } = JSON.parse(ciphertext);
+  const key = scryptSync(process.env.JWT_SECRET || 'default-secret', 'salt', 32);
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(authTag, 'base64'));
+  let decrypted = decipher.update(encrypted, 'base64', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
+
+async function executeSwarm(agent, task, bountyId) {
+  const executionId = `swarm-exec-${Date.now()}-${randomBytes(4).toString('hex')}`;
+  const now = new Date().toISOString();
+
+  try {
+    // Parse swarm config
+    const swarmConfig = JSON.parse(agent.swarm_config || '{}');
+    const { swarm_type, agents: swarmAgents, user_swarms_api_key_encrypted } = swarmConfig;
+
+    if (!swarm_type || !swarmAgents) {
+      throw new Error('Invalid swarm_config: missing swarm_type or agents');
+    }
+
+    // Determine API key
+    let apiKey;
+    if (agent.is_platform_owned === 1) {
+      apiKey = SWARMS_API_KEY;
+      if (!apiKey) throw new Error('Platform SWARMS_API_KEY not configured');
+    } else {
+      if (!user_swarms_api_key_encrypted) throw new Error('User swarm missing API key');
+      apiKey = decryptApiKey(user_swarms_api_key_encrypted);
+    }
+
+    // Create execution record
+    await pool.query(
+      `INSERT INTO swarm_executions (id, bounty_id, agent_id, swarm_type, task, status, started_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [executionId, bountyId, agent.id, swarm_type, task, 'running', now, now]
+    );
+
+    // Call Swarms API with correct endpoint and format
+    const response = await fetch(`${SWARMS_API_BASE}/v1/swarm/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey
+      },
+      body: JSON.stringify({
+        name: agent.agent_name,
+        description: agent.description || 'BARD swarm execution',
+        task: task,
+        swarm_type: swarm_type,
+        agents: swarmAgents.map(a => ({
+          agent_name: a.role,
+          system_prompt: a.system_prompt,
+          model_name: a.model,
+          description: `${a.role} agent`,
+          role: 'worker'
+        })),
+        max_loops: 1,
+        stream: false
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Swarms API error: ${response.status} ${errorText}`);
+    }
+
+    const result = await response.json();
+    const deliverable = result.output || result.completion || JSON.stringify(result);
+
+    // Extract cost from response (if available)
+    const swarmsCostUsd = result.total_cost || result.cost_usd || 0.10;
+    const platformMarkupUsd = agent.is_platform_owned === 1
+      ? swarmsCostUsd * (SWARMS_PLATFORM_MARKUP_PCT / 100)
+      : 0;
+    const totalChargedUsd = swarmsCostUsd + platformMarkupUsd;
+
+    // Update execution record
+    await pool.query(
+      `UPDATE swarm_executions
+       SET status = $1, swarms_api_response = $2, swarms_cost_usd = $3,
+           platform_markup_usd = $4, total_charged_usd = $5, completed_at = $6
+       WHERE id = $7`,
+      ['completed', JSON.stringify(result), swarmsCostUsd, platformMarkupUsd, totalChargedUsd, now, executionId]
+    );
+
+    return {
+      executionId,
+      deliverable,
+      status: 'completed',
+      costs: { swarmsCostUsd, platformMarkupUsd, totalChargedUsd }
+    };
+
+  } catch (error) {
+    // Mark execution as failed
+    await pool.query(
+      `UPDATE swarm_executions SET status = $1, swarms_api_response = $2, completed_at = $3 WHERE id = $4`,
+      ['failed', JSON.stringify({ error: error.message }), now, executionId]
+    );
+
+    throw error;
+  }
+}
 
 // ══════════════════════════════════════════════════════
 // ── Routes: Agent Reputation System ──
@@ -931,17 +1161,38 @@ app.delete('/api/files/:type/:filename', (req, res) => {
 
 // Register a new agent (owner signs with wallet)
 app.post('/api/agents/register', async (req, res) => {
-  const { ownerWallet, agentName, agentPublicKey, agentType, description } = req.body;
+  const { ownerWallet, agentName, agentPublicKey, agentType, description, swarmConfig } = req.body;
   if (!ownerWallet || !agentName || !agentPublicKey) {
     return res.status(400).json({ error: 'ownerWallet, agentName, and agentPublicKey required' });
   }
   const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
-    await stmts.insertAgent({
+    const insertData = {
       id, owner_wallet: ownerWallet, agent_name: agentName,
       agent_public_key: agentPublicKey, agent_type: agentType || 'general',
       description: description || '', created_at: new Date().toISOString(),
-    });
+    };
+
+    // If swarm config provided, encrypt the BYOK API key before storage
+    if (swarmConfig) {
+      try {
+        const parsed = typeof swarmConfig === 'string' ? JSON.parse(swarmConfig) : swarmConfig;
+
+        // Encrypt the user's Swarms API key if present
+        if (parsed.user_swarms_api_key) {
+          parsed.user_swarms_api_key_encrypted = encryptApiKey(parsed.user_swarms_api_key);
+          delete parsed.user_swarms_api_key; // Never store plaintext
+        }
+
+        insertData.swarm_config = JSON.stringify(parsed);
+        insertData.is_platform_owned = 0; // User-owned swarm
+      } catch (err) {
+        return res.status(400).json({ error: `Invalid swarmConfig: ${err.message}` });
+      }
+    }
+
+    await stmts.insertAgent(insertData);
+
     // Initialize agent state
     await stmts.upsertAgentState({
       agent_id: id, context: JSON.stringify({ initialized: true }),
@@ -2301,7 +2552,53 @@ app.post('/api/bounties/:id/claim', async (req, res) => {
   await createNotification({ wallet: bounty.creator_wallet, type: 'system', title: 'Agent Claimed Bounty', message: `${agent.agent_name} accepted your bounty "${bounty.title}".`, from: agent.owner_wallet });
   emitFeedEvent('escrow:claimed', { bountyId: req.params.id, agentId, agentName: agent.agent_name });
 
-  res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
+  // If this is a swarm agent, execute the swarm immediately
+  let swarmResult = null;
+  if (agent.agent_type === 'swarm' && agent.swarm_config) {
+    try {
+      swarmResult = await executeSwarm(agent, bounty.description, req.params.id);
+
+      // Store execution ID
+      await pool.query('UPDATE bounties SET swarm_execution_id = $1 WHERE id = $2', [swarmResult.executionId, req.params.id]);
+
+      // If sync response, auto-submit deliverable
+      if (swarmResult.status === 'completed' && swarmResult.deliverable) {
+        const hash = '0x' + createHash('sha256').update(swarmResult.deliverable).digest('hex');
+        await stmts.submitBountyDeliverable({
+          deliverable_hash: hash,
+          deliverable_content: swarmResult.deliverable,
+          submitted_at: now,
+          updated_at: now,
+          id: req.params.id
+        });
+        await logEscrowEvent(req.params.id, 'submitted', agent.owner_wallet, 'agent', `Swarm deliverable auto-submitted`, '');
+        await createNotification({
+          wallet: bounty.creator_wallet,
+          type: 'system',
+          title: 'Swarm Completed',
+          message: `Swarm agent "${agent.agent_name}" completed your bounty "${bounty.title}".`,
+          from: agent.owner_wallet
+        });
+      }
+    } catch (swarmError) {
+      console.error('Swarm execution failed:', swarmError);
+      // Don't fail the claim - just log the error
+      await createNotification({
+        wallet: bounty.creator_wallet,
+        type: 'system',
+        title: 'Swarm Execution Failed',
+        message: `Swarm agent "${agent.agent_name}" failed to execute: ${swarmError.message}`,
+        from: 'BARD System'
+      });
+    }
+  }
+
+  res.json({
+    success: true,
+    bounty: await stmts.getBountyById(req.params.id),
+    swarm_execution_id: swarmResult?.executionId,
+    swarm_status: swarmResult?.status
+  });
 });
 
 // POST /api/bounties/:id/deliver — Agent submits deliverable
@@ -2493,9 +2790,32 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
       );
 
       if (bounty.provider_agent_id) {
+        // Check if this is a swarm execution with platform fees
+        let agentEarnings = bounty.escrow_budget_usdc || 0;
+        let platformFee = 0;
+
+        if (bounty.swarm_execution_id) {
+          const execResult = await client.query('SELECT platform_markup_usd, total_charged_usd FROM swarm_executions WHERE id = $1', [bounty.swarm_execution_id]);
+          if (execResult.rows.length > 0) {
+            const execution = execResult.rows[0];
+            platformFee = execution.platform_markup_usd || 0;
+            agentEarnings = (bounty.escrow_budget_usdc || 0) - platformFee;
+
+            // Log platform fee collection
+            if (platformFee > 0) {
+              const feeEvId = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-fee`;
+              await client.query(
+                `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                [feeEvId, req.params.id, 'platform_fee', SELLER_ADDRESS, 'platform', `Platform fee: ${platformFee.toFixed(2)} USDC`, '', now]
+              );
+            }
+          }
+        }
+
         await client.query(
           'UPDATE agents SET reputation_score = LEAST(100, reputation_score + 15), total_earned_usdc = total_earned_usdc + $1 WHERE id = $2',
-          [bounty.escrow_budget_usdc || 0, bounty.provider_agent_id]
+          [agentEarnings, bounty.provider_agent_id]
         );
       }
     } else {
@@ -2560,6 +2880,105 @@ app.get('/api/bounties/:id/escrow', async (req, res) => {
   const events = await stmts.getEscrowEvents(req.params.id);
   const decisions = await stmts.getVerificationDecisions(req.params.id);
   res.json({ bounty, events, decisions });
+});
+
+// ══════════════════════════════════════════════════════
+// ── Swarms API Integration ──
+// ══════════════════════════════════════════════════════
+
+// POST /api/swarms/validate-key — Test a user's Swarms API key
+app.post('/api/swarms/validate-key', async (req, res) => {
+  const { apiKey } = req.body;
+  if (!apiKey) return res.status(400).json({ error: 'apiKey required' });
+
+  try {
+    // Test the key by calling Swarms API health check
+    const response = await fetch(`${SWARMS_API_BASE}/v1/models/available`, {
+      method: 'GET',
+      headers: {
+        'x-api-key': apiKey
+      }
+    });
+
+    if (response.ok) {
+      res.json({ valid: true });
+    } else {
+      const errorText = await response.text();
+      res.json({ valid: false, error: `API key validation failed: ${response.status} ${errorText}` });
+    }
+  } catch (error) {
+    res.json({ valid: false, error: error.message });
+  }
+});
+
+// POST /api/swarms/webhook — Receive async execution results from Swarms API
+app.post('/api/swarms/webhook', async (req, res) => {
+  try {
+    // TODO: Verify webhook signature if Swarms API provides one
+    const { execution_id, status, result, cost_usd } = req.body;
+
+    if (!execution_id) {
+      return res.status(400).json({ error: 'execution_id required' });
+    }
+
+    // Find the execution record
+    const execResult = await pool.query('SELECT * FROM swarm_executions WHERE id = $1', [execution_id]);
+    if (execResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Execution not found' });
+    }
+
+    const execution = execResult.rows[0];
+    const now = new Date().toISOString();
+
+    // Calculate costs
+    const swarmsCostUsd = cost_usd || 0;
+    const agentResult = await pool.query('SELECT is_platform_owned FROM agents WHERE id = $1', [execution.agent_id]);
+    const isPlatformOwned = agentResult.rows[0]?.is_platform_owned === 1;
+    const platformMarkupUsd = isPlatformOwned ? swarmsCostUsd * (SWARMS_PLATFORM_MARKUP_PCT / 100) : 0;
+    const totalChargedUsd = swarmsCostUsd + platformMarkupUsd;
+
+    // Update execution record
+    await pool.query(
+      `UPDATE swarm_executions
+       SET status = $1, swarms_api_response = $2, swarms_cost_usd = $3,
+           platform_markup_usd = $4, total_charged_usd = $5, completed_at = $6
+       WHERE id = $7`,
+      [status, JSON.stringify(req.body), swarmsCostUsd, platformMarkupUsd, totalChargedUsd, now, execution_id]
+    );
+
+    // If completed, update bounty with deliverable
+    if (status === 'completed' && result) {
+      const deliverable = typeof result === 'string' ? result : JSON.stringify(result);
+      const hash = '0x' + createHash('sha256').update(deliverable).digest('hex');
+
+      await pool.query(
+        `UPDATE bounties SET deliverable_content = $1, deliverable_hash = $2,
+         escrow_status = 'submitted', submitted_at = $3, updated_at = $4
+         WHERE id = $5`,
+        [deliverable, hash, now, now, execution.bounty_id]
+      );
+
+      await logEscrowEvent(execution.bounty_id, 'submitted', '', 'agent', 'Swarm webhook: deliverable submitted', '');
+
+      // Notify client
+      const bountyResult = await pool.query('SELECT creator_wallet, title FROM bounties WHERE id = $1', [execution.bounty_id]);
+      if (bountyResult.rows.length > 0) {
+        const bounty = bountyResult.rows[0];
+        await createNotification({
+          wallet: bounty.creator_wallet,
+          type: 'system',
+          title: 'Swarm Completed',
+          message: `Swarm execution completed for "${bounty.title}". Review the deliverable.`,
+          from: 'BARD System'
+        });
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Webhook processing error:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════

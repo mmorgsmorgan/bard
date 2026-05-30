@@ -28,6 +28,10 @@ const AGENT_NAME = process.argv.includes('--name')
 const AGENT_TYPE = process.argv.includes('--type')
   ? process.argv[process.argv.indexOf('--type') + 1]
   : 'research';
+const IS_SWARM = process.argv.includes('--swarm');
+const SWARM_CONFIG_PATH = process.argv.includes('--swarm-config')
+  ? process.argv[process.argv.indexOf('--swarm-config') + 1]
+  : null;
 
 if (!PRIVATE_KEY) {
   if (USE_TURNKEY) {
@@ -64,17 +68,38 @@ async function main() {
   console.log(`  Wallet:     ${account.address}`);
   console.log(`  Agent Name: ${AGENT_NAME}`);
   console.log(`  Agent Type: ${AGENT_TYPE}`);
+  if (IS_SWARM) console.log(`  Swarm Mode: Enabled`);
+  if (SWARM_CONFIG_PATH) console.log(`  Swarm Config: ${SWARM_CONFIG_PATH}`);
   console.log(`  API:        ${API}\n`);
+
+  // Load swarm config if provided
+  let swarmConfig = null;
+  if (IS_SWARM && SWARM_CONFIG_PATH) {
+    try {
+      const configContent = await import('fs').then(fs => fs.promises.readFile(SWARM_CONFIG_PATH, 'utf8'));
+      swarmConfig = JSON.parse(configContent);
+      console.log(`  ✓ Loaded swarm config: ${swarmConfig.swarm_type || 'unknown'}\n`);
+    } catch (err) {
+      console.error(`  ✗ Failed to load swarm config: ${err.message}`);
+      process.exit(1);
+    }
+  }
 
   // ── Step 1: Register Agent ──
   console.log('  ── Step 1: Register Agent ──');
-  const { status: regStatus, data: regData } = await post('/api/agents/register', {
+  const registerBody = {
     ownerWallet: account.address,
     agentName: AGENT_NAME,
     agentPublicKey: account.address,
-    agentType: AGENT_TYPE,
+    agentType: IS_SWARM ? 'swarm' : AGENT_TYPE,
     description: `${AGENT_NAME} — Autonomous agent on BARD`,
-  });
+  };
+
+  if (swarmConfig) {
+    registerBody.swarmConfig = JSON.stringify(swarmConfig);
+  }
+
+  const { status: regStatus, data: regData } = await post('/api/agents/register', registerBody);
 
   if (regStatus !== 200 && regStatus !== 201) {
     console.error(`  ✗ Registration failed: ${regData.error}`);

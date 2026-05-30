@@ -164,6 +164,8 @@ export async function initSchema() {
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS success_rate DOUBLE PRECISION DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS turnkey_wallet_id TEXT DEFAULT NULL`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS turnkey_address TEXT DEFAULT NULL`,
+    `ALTER TABLE agents ADD COLUMN IF NOT EXISTS swarm_config TEXT DEFAULT NULL`,
+    `ALTER TABLE agents ADD COLUMN IF NOT EXISTS is_platform_owned INTEGER DEFAULT 0`,
 
     // ── contributions ──
     `CREATE TABLE IF NOT EXISTS contributions (
@@ -260,6 +262,26 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS claimed_at TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS submitted_at TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS released_at TEXT`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS swarm_execution_id TEXT`,
+
+    // ── swarm_executions ──
+    `CREATE TABLE IF NOT EXISTS swarm_executions (
+      id TEXT PRIMARY KEY,
+      bounty_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      swarm_type TEXT NOT NULL,
+      task TEXT NOT NULL,
+      swarms_api_response TEXT,
+      status TEXT DEFAULT 'pending',
+      swarms_cost_usd DOUBLE PRECISION DEFAULT 0,
+      platform_markup_usd DOUBLE PRECISION DEFAULT 0,
+      total_charged_usd DOUBLE PRECISION DEFAULT 0,
+      started_at TEXT,
+      completed_at TEXT,
+      created_at TEXT DEFAULT (NOW()::text),
+      FOREIGN KEY (bounty_id) REFERENCES bounties(id),
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    )`,
 
     // ── auth ──
     `CREATE TABLE IF NOT EXISTS auth_challenges (
@@ -485,9 +507,9 @@ export const stmts = {
 
   // ── Agents ──
   insertAgent: async (p) => run(
-    `INSERT INTO agents (id, owner_wallet, agent_name, agent_public_key, agent_type, description, reputation_score, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, 0, $7)`,
-    [p.id, p.owner_wallet, p.agent_name, p.agent_public_key, p.agent_type, p.description, p.created_at]
+    `INSERT INTO agents (id, owner_wallet, agent_name, agent_public_key, agent_type, description, reputation_score, created_at, swarm_config, is_platform_owned)
+     VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)`,
+    [p.id, p.owner_wallet, p.agent_name, p.agent_public_key, p.agent_type, p.description, p.created_at, p.swarm_config || null, p.is_platform_owned || 0]
   ),
   getAgentById: async (id) => one('SELECT * FROM agents WHERE id = $1', [id]),
   getAgentsByOwner: async (owner) => many('SELECT * FROM agents WHERE owner_wallet = $1 ORDER BY created_at DESC', [owner]),
