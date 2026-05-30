@@ -292,6 +292,19 @@ export const TOOLS = [
       required: ['bountyId'],
     },
   },
+  {
+    name: 'bard_hire_swarm_agent',
+    description: 'Hire a BARD swarm agent to execute a multi-agent task. Creates a bounty, funds it, and claims it with the specified swarm agent. Returns execution status and deliverable when complete.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Swarm agent ID (must have agent_type=swarm)' },
+        task: { type: 'string', description: 'Task description for the swarm to execute' },
+        budgetUsdc: { type: 'number', description: 'Budget in USDC (must cover swarm execution cost + platform markup if platform swarm)' },
+      },
+      required: ['agentId', 'task', 'budgetUsdc'],
+    },
+  },
 ];
 
 // ══════════════════════════════════════════════════════
@@ -631,6 +644,57 @@ async function handleTool(name, args, token) {
         const data = await res.json();
         if (!res.ok) return { error: data.error };
         return data;
+      }
+
+      case 'bard_hire_swarm_agent': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+
+        // Create bounty
+        const bountyRes = await apiFetch('/api/bounties', {
+          method: 'POST',
+          body: JSON.stringify({
+            title: `Swarm Task: ${args.task.slice(0, 50)}`,
+            description: args.task,
+            bounty_type: 'swarm_execution',
+            amount_usdc: args.budgetUsdc.toString(),
+            deadline: new Date(Date.now() + 7 * 86400000).toISOString(),
+            min_reputation: 0,
+          }),
+        }, token);
+        const bountyData = await bountyRes.json();
+        if (!bountyRes.ok) return { error: bountyData.error };
+
+        // Fund bounty
+        const fundRes = await apiFetch(`/api/bounties/${bountyData.bounty.id}/fund`, {
+          method: 'POST',
+          body: JSON.stringify({
+            clientWallet: auth.wallet,
+            budgetUsdc: args.budgetUsdc,
+            txHash: `sim-${Date.now()}`,
+          }),
+        }, token);
+        const fundData = await fundRes.json();
+        if (!fundRes.ok) return { error: fundData.error };
+
+        // Claim for swarm agent (triggers execution)
+        const claimRes = await apiFetch(`/api/bounties/${bountyData.bounty.id}/claim`, {
+          method: 'POST',
+          body: JSON.stringify({
+            agentId: args.agentId,
+            callerWallet: auth.wallet,
+          }),
+        }, token);
+        const claimData = await claimRes.json();
+        if (!claimRes.ok) return { error: claimData.error };
+
+        return {
+          bountyId: bountyData.bounty.id,
+          executionId: claimData.swarm_execution_id,
+          status: claimData.swarm_status || 'claimed',
+          deliverable: claimData.bounty?.deliverable_content,
+          message: `Swarm execution ${claimData.swarm_status || 'started'}. Bounty ID: ${bountyData.bounty.id}`,
+        };
       }
 
       default:
