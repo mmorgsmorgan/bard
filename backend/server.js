@@ -516,6 +516,32 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// GET /api/storage/stats — Storage usage metrics
+app.get('/api/storage/stats', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days) || 7;
+    const stats = await stmts.getStorageStats(days);
+
+    res.json({
+      period_days: days,
+      total_operations: parseInt(stats.total_operations) || 0,
+      successful_operations: parseInt(stats.successful_operations) || 0,
+      failed_operations: parseInt(stats.failed_operations) || 0,
+      uploads: parseInt(stats.uploads) || 0,
+      deletes: parseInt(stats.deletes) || 0,
+      total_bytes_uploaded: parseInt(stats.total_bytes_uploaded) || 0,
+      total_mb_uploaded: ((parseInt(stats.total_bytes_uploaded) || 0) / (1024 * 1024)).toFixed(2),
+      r2_operations: parseInt(stats.r2_operations) || 0,
+      local_operations: parseInt(stats.local_operations) || 0,
+      success_rate: stats.total_operations > 0
+        ? ((stats.successful_operations / stats.total_operations) * 100).toFixed(1)
+        : '0.0'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ══════════════════════════════════════════════════════
 // ── Routes: x402 Premium Endpoints ──
 // ══════════════════════════════════════════════════════
@@ -806,7 +832,7 @@ app.post('/api/upload/portfolio', upload.single('file'), async (req, res) => {
       try {
         // Upload to R2
         filename = generateFilename(req.file.originalname, req.body.wallet);
-        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio', req.body.wallet);
       } catch (r2Error) {
         console.error('R2 upload failed, falling back to local storage:', r2Error.message);
         // Fallback to local disk storage

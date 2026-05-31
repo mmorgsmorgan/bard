@@ -395,6 +395,19 @@ export async function initSchema() {
       FOREIGN KEY (bounty_id) REFERENCES bounties(id)
     )`,
 
+    // ── storage_metrics ──
+    `CREATE TABLE IF NOT EXISTS storage_metrics (
+      id BIGSERIAL PRIMARY KEY,
+      operation TEXT NOT NULL,
+      storage_type TEXT NOT NULL,
+      file_type TEXT DEFAULT '',
+      file_size BIGINT DEFAULT 0,
+      wallet TEXT DEFAULT '',
+      success INTEGER DEFAULT 1,
+      error_message TEXT DEFAULT '',
+      created_at TEXT DEFAULT (NOW()::text)
+    )`,
+
     // ── Indexes ──
     `CREATE INDEX IF NOT EXISTS idx_proofs_contributor ON proofs(contributor)`,
     `CREATE INDEX IF NOT EXISTS idx_portfolio_wallet ON portfolio(wallet)`,
@@ -422,6 +435,9 @@ export async function initSchema() {
     `CREATE INDEX IF NOT EXISTS idx_swarm_executions_bounty ON swarm_executions(bounty_id)`,
     `CREATE INDEX IF NOT EXISTS idx_swarm_executions_agent ON swarm_executions(agent_id)`,
     `CREATE INDEX IF NOT EXISTS idx_swarm_executions_status ON swarm_executions(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_storage_metrics_created ON storage_metrics(created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_storage_metrics_operation ON storage_metrics(operation)`,
+    `CREATE INDEX IF NOT EXISTS idx_storage_metrics_wallet ON storage_metrics(wallet)`,
   ];
 
   for (const sql of statements) {
@@ -791,6 +807,30 @@ export const stmts = {
     'DELETE FROM platform_verifiers WHERE wallet = $1',
     [(wallet || '').toLowerCase()]
   ),
+
+  // ── Storage metrics ──
+  logStorageMetric: async (p) => run(
+    `INSERT INTO storage_metrics (operation, storage_type, file_type, file_size, wallet, success, error_message, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [p.operation, p.storage_type, p.file_type || '', p.file_size || 0, p.wallet || '', p.success ? 1 : 0, p.error_message || '', new Date().toISOString()]
+  ),
+  getStorageStats: async (days = 7) => {
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    return one(
+      `SELECT
+        COUNT(*) as total_operations,
+        COUNT(CASE WHEN success = 1 THEN 1 END) as successful_operations,
+        COUNT(CASE WHEN success = 0 THEN 1 END) as failed_operations,
+        COUNT(CASE WHEN operation = 'upload' THEN 1 END) as uploads,
+        COUNT(CASE WHEN operation = 'delete' THEN 1 END) as deletes,
+        SUM(CASE WHEN operation = 'upload' AND success = 1 THEN file_size ELSE 0 END) as total_bytes_uploaded,
+        COUNT(CASE WHEN storage_type = 'r2' THEN 1 END) as r2_operations,
+        COUNT(CASE WHEN storage_type = 'local' THEN 1 END) as local_operations
+      FROM storage_metrics
+      WHERE created_at >= $1`,
+      [since]
+    );
+  },
 };
 
 export default { pool, query, initSchema, stmts };

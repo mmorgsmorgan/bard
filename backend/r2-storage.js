@@ -1,6 +1,7 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { randomBytes } from 'crypto';
+import { stmts } from './db.js';
 
 // ══════════════════════════════════════════════════════
 // ── Cloudflare R2 Storage ──
@@ -48,52 +49,106 @@ if (isR2Enabled) {
  * @param {string} filename - Desired filename
  * @param {string} contentType - MIME type
  * @param {string} folder - Folder path (e.g., 'pfp', 'portfolio', 'proof')
+ * @param {string} wallet - User wallet address (for metrics)
  * @returns {Promise<string>} - Public URL of uploaded file
  */
-export async function uploadToR2(buffer, filename, contentType, folder = 'uploads') {
+export async function uploadToR2(buffer, filename, contentType, folder = 'uploads', wallet = '') {
   if (!isR2Enabled) {
     throw new Error('R2 storage is not configured');
   }
 
   const key = `${folder}/${filename}`;
 
-  const upload = new Upload({
-    client: s3Client,
-    params: {
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
-      Body: buffer,
-      ContentType: contentType,
-    },
-  });
+  try {
+    const upload = new Upload({
+      client: s3Client,
+      params: {
+        Bucket: R2_BUCKET_NAME,
+        Key: key,
+        Body: buffer,
+        ContentType: contentType,
+      },
+    });
 
-  await upload.done();
+    await upload.done();
 
-  // Return public URL
-  if (R2_PUBLIC_URL) {
-    return `${R2_PUBLIC_URL}/${key}`;
-  } else {
-    // If no custom domain, use R2's default URL format
-    return `https://pub-${R2_ACCOUNT_ID}.r2.dev/${key}`;
+    // Log successful upload metric
+    await stmts.logStorageMetric({
+      operation: 'upload',
+      storage_type: 'r2',
+      file_type: contentType,
+      file_size: buffer.length,
+      wallet,
+      success: true,
+      error_message: ''
+    }).catch(err => console.error('Failed to log storage metric:', err));
+
+    // Return public URL
+    if (R2_PUBLIC_URL) {
+      return `${R2_PUBLIC_URL}/${key}`;
+    } else {
+      // If no custom domain, use R2's default URL format
+      return `https://pub-${R2_ACCOUNT_ID}.r2.dev/${key}`;
+    }
+  } catch (error) {
+    // Log failed upload metric
+    await stmts.logStorageMetric({
+      operation: 'upload',
+      storage_type: 'r2',
+      file_type: contentType,
+      file_size: buffer.length,
+      wallet,
+      success: false,
+      error_message: error.message
+    }).catch(err => console.error('Failed to log storage metric:', err));
+
+    throw error;
   }
 }
 
 /**
  * Delete a file from R2
  * @param {string} key - File key (e.g., 'pfp/wallet-timestamp.png')
+ * @param {string} wallet - User wallet address (for metrics)
  * @returns {Promise<void>}
  */
-export async function deleteFromR2(key) {
+export async function deleteFromR2(key, wallet = '') {
   if (!isR2Enabled) {
     throw new Error('R2 storage is not configured');
   }
 
-  const command = new DeleteObjectCommand({
-    Bucket: R2_BUCKET_NAME,
-    Key: key,
-  });
+  try {
+    const command = new DeleteObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+    });
 
-  await s3Client.send(command);
+    await s3Client.send(command);
+
+    // Log successful delete metric
+    await stmts.logStorageMetric({
+      operation: 'delete',
+      storage_type: 'r2',
+      file_type: '',
+      file_size: 0,
+      wallet,
+      success: true,
+      error_message: ''
+    }).catch(err => console.error('Failed to log storage metric:', err));
+  } catch (error) {
+    // Log failed delete metric
+    await stmts.logStorageMetric({
+      operation: 'delete',
+      storage_type: 'r2',
+      file_type: '',
+      file_size: 0,
+      wallet,
+      success: false,
+      error_message: error.message
+    }).catch(err => console.error('Failed to log storage metric:', err));
+
+    throw error;
+  }
 }
 
 /**
