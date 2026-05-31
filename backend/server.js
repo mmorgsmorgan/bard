@@ -2774,6 +2774,85 @@ async function verifyTransaction(txHash, expectedFrom, expectedTo, expectedAmoun
   }
 }
 
+// Transfer USDC from platform escrow wallet to recipient
+async function transferUSDCFromPlatform(toAddress, amountUsdc) {
+  if (!isTurnkeyEnabled()) {
+    throw new Error('Turnkey not configured. Cannot sign platform transactions.');
+  }
+
+  // Validate inputs
+  if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress)) {
+    throw new Error('Invalid recipient address');
+  }
+  if (amountUsdc <= 0) {
+    throw new Error('Amount must be positive');
+  }
+
+  console.log(`[Platform Transfer] Sending ${amountUsdc} USDC to ${toAddress}...`);
+
+  try {
+    const { Turnkey } = await import('@turnkey/sdk-server');
+    const { createAccount } = await import('@turnkey/viem');
+    const { createWalletClient, http, encodeFunctionData } = await import('viem');
+
+    // Arc Testnet chain definition
+    const arcTestnet = {
+      id: 5042002,
+      name: 'Arc Testnet',
+      nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+      rpcUrls: { default: { http: [ARC_TESTNET_RPC] } },
+      blockExplorers: { default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' } },
+    };
+
+    const amountWei = BigInt(Math.round(amountUsdc * 1_000_000)); // 6 decimals
+
+    // Create Turnkey signer for platform wallet
+    const tk = new Turnkey({
+      defaultOrganizationId: process.env.TURNKEY_ORGANIZATION_ID,
+      apiBaseUrl: 'https://api.turnkey.com',
+      apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
+      apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
+    });
+
+    const account = await createAccount({
+      client: tk.apiClient(),
+      organizationId: process.env.TURNKEY_ORGANIZATION_ID,
+      signWith: SELLER_ADDRESS, // Platform escrow wallet
+    });
+
+    const walletClient = createWalletClient({
+      account,
+      chain: arcTestnet,
+      transport: http(),
+    });
+
+    // ERC-20 transfer(address, uint256)
+    const data = encodeFunctionData({
+      abi: [{
+        name: 'transfer',
+        type: 'function',
+        stateMutability: 'nonpayable',
+        inputs: [{ name: 'to', type: 'address' }, { name: 'value', type: 'uint256' }],
+        outputs: [{ name: '', type: 'bool' }],
+      }],
+      functionName: 'transfer',
+      args: [toAddress, amountWei],
+    });
+
+    const txHash = await walletClient.sendTransaction({
+      to: USDC_CONTRACT_ADDRESS,
+      data,
+      value: 0n,
+    });
+
+    console.log(`✓ Platform transfer successful: ${amountUsdc} USDC → ${toAddress} | tx: ${txHash}`);
+    return txHash;
+  } catch (error) {
+    console.error(`✗ Platform transfer failed:`, error);
+    throw new Error(`USDC transfer failed: ${error.message}`);
+  }
+}
+
 // POST /api/bounties/:id/fund — Client locks USDC into escrow
 app.post('/api/bounties/:id/fund', async (req, res) => {
   const { clientWallet, budgetUsdc, txHash } = req.body;
@@ -2840,6 +2919,15 @@ app.post('/api/bounties/:id/claim', async (req, res) => {
   }
   if (agent.reputation_score < (bounty.min_reputation || 0)) {
     return res.status(403).json({ error: `Agent needs reputation >= ${bounty.min_reputation}` });
+  }
+
+  // Require Turnkey wallet for funded bounties (to receive payment)
+  if (bounty.escrow_status === 'funded' && !agent.turnkey_address) {
+    return res.status(400).json({
+      error: 'Agent must have a Turnkey wallet to receive payments from funded bounties.',
+      action_required: 'create_wallet',
+      hint: 'Use bard_create_wallet MCP tool or POST /api/agents/:id/create-wallet to create a Turnkey wallet first.'
+    });
   }
 
   const now = new Date().toISOString();
@@ -3077,7 +3165,50 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
         [evId1, req.params.id, 'verified', verifierWallet, 'platform', 'Platform approved — ready for release', '', now]
       );
 
-      const releaseTx = `release-${Date.now()}`;
+      // Calculate agent earnings and platform fee
+      let agentEarnings = bounty.escrow_budget_usdc || 0;
+      let platformFee = 0;
+
+      if (bounty.swarm_execution_id) {
+        const execResult = await client.query('SELECT platform_markup_usd, total_charged_usd FROM swarm_executions WHERE id = $1', [bounty.swarm_execution_id]);
+        if (execResult.rows.length > 0) {
+          const execution = execResult.rows[0];
+          platformFee = execution.platform_markup_usd || 0;
+          agentEarnings = (bounty.escrow_budget_usdc || 0) - platformFee;
+
+          // Log platform fee collection
+          if (platformFee > 0) {
+            const feeEvId = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-fee`;
+            await client.query(
+              `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [feeEvId, req.params.id, 'platform_fee', SELLER_ADDRESS, 'platform', `Platform fee: ${platformFee.toFixed(2)} USDC (kept in escrow)`, '', now]
+            );
+          }
+        }
+      }
+
+      // Get agent wallet address
+      if (!bounty.provider_agent_id) {
+        throw new Error('No provider agent for this bounty');
+      }
+
+      const agentResult = await client.query('SELECT turnkey_address, owner_wallet, agent_name FROM agents WHERE id = $1', [bounty.provider_agent_id]);
+      if (agentResult.rows.length === 0) {
+        throw new Error('Provider agent not found');
+      }
+
+      const agent = agentResult.rows[0];
+      const recipientWallet = agent.turnkey_address || agent.owner_wallet;
+
+      if (!recipientWallet) {
+        throw new Error('Agent has no wallet address for payment');
+      }
+
+      // ACTUAL USDC TRANSFER - Release payment to agent
+      console.log(`[Escrow Release] Transferring ${agentEarnings} USDC to ${agent.agent_name} (${recipientWallet})...`);
+      const releaseTx = await transferUSDCFromPlatform(recipientWallet, agentEarnings);
+
       await client.query(
         `UPDATE bounties SET release_tx_hash = $1, escrow_status = 'released', status = 'completed', released_at = $2, updated_at = $3 WHERE id = $4`,
         [releaseTx, now, now, req.params.id]
@@ -3086,52 +3217,34 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
       await client.query(
         `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [evId2, req.params.id, 'released', verifierWallet, 'platform', `${bounty.escrow_budget_usdc} USDC released to agent`, releaseTx, now]
+        [evId2, req.params.id, 'released', verifierWallet, 'platform', `${agentEarnings.toFixed(2)} USDC released to agent (platform fee: ${platformFee.toFixed(2)} USDC)`, releaseTx, now]
       );
 
-      if (bounty.provider_agent_id) {
-        // Check if this is a swarm execution with platform fees
-        let agentEarnings = bounty.escrow_budget_usdc || 0;
-        let platformFee = 0;
-
-        if (bounty.swarm_execution_id) {
-          const execResult = await client.query('SELECT platform_markup_usd, total_charged_usd FROM swarm_executions WHERE id = $1', [bounty.swarm_execution_id]);
-          if (execResult.rows.length > 0) {
-            const execution = execResult.rows[0];
-            platformFee = execution.platform_markup_usd || 0;
-            agentEarnings = (bounty.escrow_budget_usdc || 0) - platformFee;
-
-            // Log platform fee collection
-            if (platformFee > 0) {
-              const feeEvId = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-fee`;
-              await client.query(
-                `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-                [feeEvId, req.params.id, 'platform_fee', SELLER_ADDRESS, 'platform', `Platform fee: ${platformFee.toFixed(2)} USDC`, '', now]
-              );
-            }
-          }
-        }
-
-        await client.query(
-          'UPDATE agents SET reputation_score = LEAST(100, reputation_score + 15), total_earned_usdc = total_earned_usdc + $1 WHERE id = $2',
-          [agentEarnings, bounty.provider_agent_id]
-        );
-      }
+      // Update agent stats
+      await client.query(
+        'UPDATE agents SET reputation_score = LEAST(100, reputation_score + 15), total_earned_usdc = total_earned_usdc + $1 WHERE id = $2',
+        [agentEarnings, bounty.provider_agent_id]
+      );
     } else {
+      // REJECTION - Refund to creator
       await client.query(
         `UPDATE bounties SET verifier_wallet = $1, verifier_decision = 'rejected', verifier_reason = $2, escrow_status = 'refunded', updated_at = $3 WHERE id = $4`,
         [verifierWallet, reasoning || '', now, req.params.id]
       );
+
+      // ACTUAL USDC TRANSFER - Refund to creator
+      console.log(`[Escrow Refund] Transferring ${bounty.escrow_budget_usdc} USDC back to creator (${bounty.creator_wallet})...`);
+      const refundTx = await transferUSDCFromPlatform(bounty.creator_wallet, bounty.escrow_budget_usdc);
+
       await client.query(
-        `UPDATE bounties SET escrow_status = 'refunded', status = 'cancelled', updated_at = $1 WHERE id = $2`,
+        `UPDATE bounties SET status = 'cancelled', updated_at = $1 WHERE id = $2`,
         [now, req.params.id]
       );
       const evId = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await client.query(
         `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [evId, req.params.id, 'refunded', verifierWallet, 'platform', `Platform rejected: ${reasoning || 'No reason'}. USDC refunded.`, '', now]
+        [evId, req.params.id, 'refunded', verifierWallet, 'platform', `Platform rejected: ${reasoning || 'No reason'}. ${bounty.escrow_budget_usdc} USDC refunded to creator.`, refundTx, now]
       );
 
       if (bounty.provider_agent_id) {
