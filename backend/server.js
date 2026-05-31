@@ -831,6 +831,71 @@ app.post('/api/upload/portfolio', upload.single('file'), async (req, res) => {
   }
 });
 
+// Multi-file portfolio upload
+app.post('/api/upload/portfolio/batch', upload.array('files', 10), async (req, res) => {
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files uploaded' });
+  }
+
+  try {
+    const results = [];
+    const errors = [];
+
+    for (const file of req.files) {
+      try {
+        let url, filename;
+
+        if (isR2Enabled) {
+          try {
+            // Upload to R2
+            filename = generateFilename(file.originalname, req.body.wallet);
+            url = await uploadToR2(file.buffer, filename, file.mimetype, 'portfolio');
+          } catch (r2Error) {
+            console.error('R2 upload failed, falling back to local storage:', r2Error.message);
+            // Fallback to local disk storage
+            const wallet = (req.body.wallet || 'unknown').toLowerCase().slice(0, 12);
+            const ext = path.extname(file.originalname) || '.png';
+            filename = `${wallet}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+            const dir = path.join(UPLOADS_DIR, 'portfolio');
+            fs.mkdirSync(dir, { recursive: true });
+            const filePath = path.join(dir, filename);
+            fs.writeFileSync(filePath, file.buffer);
+            url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
+          }
+        } else {
+          // Local disk storage
+          filename = file.filename;
+          url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
+        }
+
+        results.push({
+          success: true,
+          url,
+          filename,
+          originalName: file.originalname,
+          size: file.size,
+          mimetype: file.mimetype
+        });
+      } catch (fileError) {
+        errors.push({
+          filename: file.originalname,
+          error: fileError.message
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      uploaded: results.length,
+      failed: errors.length,
+      results,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/upload/pfp', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -3219,6 +3284,90 @@ app.get('/api/swarms/executions/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching swarm execution:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/swarms/executions/:id/cancel — Cancel a running swarm execution
+app.post('/api/swarms/executions/:id/cancel', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { callerWallet } = req.body;
+
+    // Fetch execution
+    const result = await pool.query('SELECT * FROM swarm_executions WHERE id = $1', [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Execution not found' });
+    }
+
+    const execution = result.rows[0];
+
+    // Check if execution is cancellable
+    if (execution.status !== 'running' && execution.status !== 'pending') {
+      return res.status(400).json({
+        error: `Cannot cancel execution with status: ${execution.status}`,
+        current_status: execution.status
+      });
+    }
+
+    // Verify caller owns the bounty or the agent
+    const bounty = await stmts.getBountyById(execution.bounty_id);
+    if (!bounty) {
+      return res.status(404).json({ error: 'Associated bounty not found' });
+    }
+
+    const agent = await stmts.getAgentById(execution.agent_id);
+    if (!agent) {
+      return res.status(404).json({ error: 'Associated agent not found' });
+    }
+
+    // Authorization: bounty creator or agent owner can cancel
+    const isCreator = callerWallet && bounty.creator_wallet.toLowerCase() === callerWallet.toLowerCase();
+    const isAgentOwner = callerWallet && agent.owner_wallet.toLowerCase() === callerWallet.toLowerCase();
+
+    if (!isCreator && !isAgentOwner) {
+      return res.status(403).json({
+        error: 'Only the bounty creator or agent owner can cancel this execution'
+      });
+    }
+
+    // Update execution status to cancelled
+    const now = new Date().toISOString();
+    await pool.query(
+      `UPDATE swarm_executions
+       SET status = 'cancelled', completed_at = $1
+       WHERE id = $2`,
+      [now, id]
+    );
+
+    // Update bounty status back to claimed (can be re-submitted)
+    await pool.query(
+      `UPDATE bounties
+       SET escrow_status = 'claimed', deliverable_content = NULL, deliverable_hash = NULL,
+           submitted_at = NULL, updated_at = $1
+       WHERE id = $2`,
+      [now, execution.bounty_id]
+    );
+
+    // Log escrow event
+    await logEscrowEvent(
+      execution.bounty_id,
+      'execution_cancelled',
+      callerWallet || '',
+      'human',
+      `Swarm execution ${id} cancelled by ${isCreator ? 'client' : 'agent owner'}`,
+      ''
+    );
+
+    res.json({
+      success: true,
+      message: 'Swarm execution cancelled',
+      execution_id: id,
+      bounty_id: execution.bounty_id,
+      cancelled_by: isCreator ? 'bounty_creator' : 'agent_owner'
+    });
+  } catch (error) {
+    console.error('Error cancelling swarm execution:', error);
     res.status(500).json({ error: error.message });
   }
 });
