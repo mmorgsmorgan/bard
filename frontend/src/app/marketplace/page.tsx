@@ -36,6 +36,7 @@ interface OpenBounty {
   min_reputation: number;
   deadline: string;
   created_at: string;
+  selection_mode?: 'first_come' | 'proposal';
 }
 
 const CATEGORIES = [
@@ -161,7 +162,7 @@ export default function MarketplacePage() {
           </div>
         ) : tab === 'bounties' ? (
           <div>
-            {/* Funded Bounties First */}
+            {/* Funded First-Come Bounties */}
             {fundedBounties.length > 0 && (
               <div className="mb-8">
                 <h3 className="font-mono text-xs text-[#ff8512] tracking-[0.15em] uppercase mb-4">USDC Escrowed — Ready to Claim</h3>
@@ -173,12 +174,24 @@ export default function MarketplacePage() {
               </div>
             )}
 
-            {/* Other Bounties */}
-            {unfundedBounties.length > 0 && (
+            {/* Proposal-Mode Bounties */}
+            {bounties.filter(b => b.selection_mode === 'proposal' && b.status === 'proposal_open').length > 0 && (
+              <div className="mb-8">
+                <h3 className="font-mono text-xs text-cyan-400 tracking-[0.15em] uppercase mb-4">Accepting Proposals — Pitch Your Plan</h3>
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {bounties.filter(b => b.selection_mode === 'proposal' && b.status === 'proposal_open').map(b => (
+                    <BountyCard key={b.id} bounty={b} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Other Open Bounties */}
+            {unfundedBounties.filter(b => b.selection_mode !== 'proposal').length > 0 && (
               <div>
                 <h3 className="font-mono text-xs text-surface-500 tracking-[0.15em] uppercase mb-4">Open Bounties</h3>
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {unfundedBounties.map(b => (
+                  {unfundedBounties.filter(b => b.selection_mode !== 'proposal').map(b => (
                     <BountyCard key={b.id} bounty={b} />
                   ))}
                 </div>
@@ -218,6 +231,7 @@ export default function MarketplacePage() {
 }
 
 function BountyCard({ bounty, funded }: { bounty: OpenBounty; funded?: boolean }) {
+  const isProposal = bounty.selection_mode === 'proposal';
   const amount = funded ? bounty.escrow_budget_usdc : parseFloat(bounty.amount_usdc);
   const typeColors: Record<string, string> = {
     research: 'text-blue-400 border-blue-500/20',
@@ -230,9 +244,11 @@ function BountyCard({ bounty, funded }: { bounty: OpenBounty; funded?: boolean }
   const tc = typeColors[bounty.bounty_type] || typeColors.other;
 
   return (
-    <Link href={`/bounties`} className="block group">
+    <Link href={`/bounties/${bounty.id}`} className="block group">
       <div className={`p-5 border transition-all hover:border-[rgba(255,133,18,0.3)] ${
-        funded ? 'bg-[rgba(255,133,18,0.03)] border-[rgba(255,133,18,0.15)]' : 'bg-[#0a0a0a] border-[rgba(255,255,255,0.04)]'
+        funded ? 'bg-[rgba(255,133,18,0.03)] border-[rgba(255,133,18,0.15)]'
+        : isProposal ? 'bg-[rgba(34,211,238,0.03)] border-[rgba(34,211,238,0.15)]'
+        : 'bg-[#0a0a0a] border-[rgba(255,255,255,0.04)]'
       }`}>
         <div className="flex items-start justify-between mb-3">
           <span className={`font-mono text-[10px] px-2 py-0.5 border ${tc}`}>
@@ -243,13 +259,20 @@ function BountyCard({ bounty, funded }: { bounty: OpenBounty; funded?: boolean }
               ESCROWED
             </span>
           )}
+          {isProposal && !funded && (
+            <span className="font-mono text-[10px] text-cyan-400 bg-cyan-500/10 px-2 py-0.5 border border-cyan-500/20">
+              PROPOSAL
+            </span>
+          )}
         </div>
         <h3 className="font-mono text-sm text-white font-medium mb-2 group-hover:text-[#ff8512] transition-colors line-clamp-2">
           {bounty.title}
         </h3>
         <p className="font-mono text-[11px] text-surface-500 line-clamp-2 mb-4">{bounty.description}</p>
         <div className="flex items-center justify-between">
-          <span className="font-mono text-lg font-bold text-[#ff8512]">{amount} USDC</span>
+          <span className="font-mono text-lg font-bold text-[#ff8512]">
+            {isProposal && !funded ? `Up to $${amount}` : `${amount} USDC`}
+          </span>
           <div className="flex items-center gap-3 text-surface-500 font-mono text-[10px]">
             {bounty.min_reputation > 0 && <span>Rep ≥ {bounty.min_reputation}</span>}
             <span>{new Date(bounty.deadline).toLocaleDateString()}</span>

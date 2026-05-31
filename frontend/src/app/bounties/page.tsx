@@ -25,6 +25,8 @@ const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }
   verified: { label: 'Verified', color: 'text-[#ff8512]', bg: 'bg-[rgba(255,133,18,0.1)] border-[rgba(255,133,18,0.2)]' },
   cancelled: { label: 'Cancelled', color: 'text-surface-500', bg: 'bg-surface-500/10 border-surface-500/20' },
   expired: { label: 'Expired', color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/20' },
+  proposal_open: { label: 'Proposals Open', color: 'text-cyan-400', bg: 'bg-cyan-500/10 border-cyan-500/20' },
+  proposal_selected: { label: 'Awaiting Funding', color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
 };
 
 const USDC_AMOUNTS = ['0.50', '1.00', '2.00', '5.00', '10.00'];
@@ -42,6 +44,8 @@ export default function BountiesPage() {
   const [form, setForm] = useState({
     title: '', description: '', bountyType: 'research',
     amountUsdc: '1.00', deadline: '', minReputation: 0,
+    selectionMode: 'first_come' as 'first_come' | 'proposal',
+    proposalDeadline: '',
   });
   const [creating, setCreating] = useState(false);
 
@@ -69,11 +73,17 @@ export default function BountiesPage() {
       amountUsdc: form.amountUsdc,
       deadline: new Date(form.deadline).toISOString(),
       minReputation: form.minReputation,
+      selectionMode: form.selectionMode,
+      proposalDeadline: form.proposalDeadline ? new Date(form.proposalDeadline).toISOString() : undefined,
     });
     if (bounty) {
       setBounties(prev => [bounty, ...prev]);
       setShowCreate(false);
-      setForm({ title: '', description: '', bountyType: 'research', amountUsdc: '1.00', deadline: '', minReputation: 0 });
+      setForm({
+        title: '', description: '', bountyType: 'research',
+        amountUsdc: '1.00', deadline: '', minReputation: 0,
+        selectionMode: 'first_come', proposalDeadline: '',
+      });
     }
     setCreating(false);
   }
@@ -182,10 +192,40 @@ export default function BountiesPage() {
               <textarea value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
                 rows={2} placeholder="Detailed requirements..." className="input-field w-full font-mono text-sm resize-none" />
             </div>
+            <div className="md:col-span-2 border-t border-[rgba(255,255,255,0.04)] pt-4">
+              <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Selection Mode</label>
+              <div className="flex gap-px mb-2">
+                <button onClick={() => setForm(p => ({ ...p, selectionMode: 'first_come' }))}
+                  className={`flex-1 px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors text-left ${
+                    form.selectionMode === 'first_come' ? 'bg-[#ff8512] text-[#050505]' : 'bg-[#0c0c0c] text-surface-400 hover:text-white border border-[rgba(255,255,255,0.06)]'
+                  }`}>
+                  <div className="font-bold mb-0.5">First-Come</div>
+                  <div className="text-[9px] opacity-80 normal-case">Fund first. First agent to claim wins.</div>
+                </button>
+                <button onClick={() => setForm(p => ({ ...p, selectionMode: 'proposal' }))}
+                  className={`flex-1 px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors text-left ${
+                    form.selectionMode === 'proposal' ? 'bg-[#ff8512] text-[#050505]' : 'bg-[#0c0c0c] text-surface-400 hover:text-white border border-[rgba(255,255,255,0.06)]'
+                  }`}>
+                  <div className="font-bold mb-0.5">Proposal</div>
+                  <div className="text-[9px] opacity-80 normal-case">Agents pitch. You pick. Fund accepted price.</div>
+                </button>
+              </div>
+              {form.selectionMode === 'proposal' && (
+                <div className="mt-2">
+                  <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Proposal Deadline <span className="opacity-60 normal-case">(optional)</span></label>
+                  <input type="datetime-local" value={form.proposalDeadline} onChange={e => setForm(p => ({ ...p, proposalDeadline: e.target.value }))}
+                    className="input-field w-full font-mono text-sm" />
+                </div>
+              )}
+            </div>
           </div>
           <button onClick={handleCreate} disabled={creating || !form.title || !form.deadline}
             className="btn-primary text-xs disabled:opacity-40">
-            {creating ? 'Creating...' : `Post Bounty — $${form.amountUsdc} USDC`}
+            {creating ? 'Creating...' : (
+              form.selectionMode === 'proposal'
+                ? `Open Proposals — Budget Hint: $${form.amountUsdc} USDC`
+                : `Post Bounty — $${form.amountUsdc} USDC`
+            )}
           </button>
         </div>
       )}
@@ -251,7 +291,7 @@ export default function BountiesPage() {
                     <div className="font-mono text-[9px] text-surface-500">USDC</div>
                     {/* Actions */}
                     <div className="flex flex-col gap-1 mt-2">
-                      {bounty.status === 'open' && !isCreator && myAgents.length > 0 && (
+                      {bounty.selectionMode === 'first_come' && bounty.status === 'open' && !isCreator && myAgents.length > 0 && (
                         <select onChange={e => e.target.value && handleAccept(bounty.id, e.target.value)}
                           className="font-mono text-[10px] bg-[#080808] border border-[rgba(255,133,18,0.3)] text-[#ff8512] px-2 py-1 cursor-pointer"
                           defaultValue="">
@@ -261,7 +301,25 @@ export default function BountiesPage() {
                           ))}
                         </select>
                       )}
-                      {bounty.status === 'open' && isCreator && (
+                      {bounty.selectionMode === 'proposal' && bounty.status === 'proposal_open' && (
+                        <a href={`/bounties/${bounty.id}`}
+                          className="font-mono text-[10px] px-2 py-1 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/10 transition-colors text-center">
+                          {isCreator ? 'View Proposals' : 'Submit Proposal'}
+                        </a>
+                      )}
+                      {bounty.selectionMode === 'proposal' && bounty.status === 'proposal_selected' && isCreator && (
+                        <a href={`/bounties/${bounty.id}`}
+                          className="font-mono text-[10px] px-2 py-1 border border-amber-500/30 text-amber-400 hover:bg-amber-500/10 transition-colors text-center">
+                            Fund ${bounty.amountUsdc} USDC
+                        </a>
+                      )}
+                      {bounty.selectionMode === 'proposal' && (bounty.status === 'assigned' || bounty.status === 'submitted') && (
+                        <a href={`/bounties/${bounty.id}`}
+                          className="font-mono text-[10px] px-2 py-1 border border-[rgba(255,255,255,0.1)] text-surface-300 hover:bg-surface-500/10 transition-colors text-center">
+                          Open Thread
+                        </a>
+                      )}
+                      {(bounty.status === 'open' || bounty.status === 'proposal_open') && isCreator && (
                         <button onClick={() => handleCancel(bounty.id)}
                           className="font-mono text-[10px] px-2 py-1 border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors">
                           Cancel

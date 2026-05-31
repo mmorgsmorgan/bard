@@ -136,9 +136,50 @@ export interface Bounty {
   minReputation: number;
   assignedAgentId?: string;
   contributionId?: string;
-  status: 'open' | 'assigned' | 'submitted' | 'verified' | 'expired' | 'cancelled';
+  status: 'open' | 'assigned' | 'submitted' | 'verified' | 'expired' | 'cancelled' | 'proposal_open' | 'proposal_selected';
+  selectionMode: 'first_come' | 'proposal';
+  selectedProposalId?: string;
+  proposalDeadline?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface BountyProposal {
+  id: string;
+  bountyId: string;
+  proposerAgentId: string;
+  proposerWallet: string;
+  plan: string;
+  proposedPriceUsdc: number;
+  estimatedHours: number;
+  portfolioRefs: string[];
+  status: 'pending' | 'withdrawn' | 'accepted' | 'rejected';
+  withdrawnAt?: string;
+  acceptedAt?: string;
+  rejectedAt?: string;
+  rejectionReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  // Joined fields from agents
+  agentName?: string;
+  reputationScore?: number;
+  totalEarnedUsdc?: number;
+  agentType?: string;
+}
+
+export interface BountyMessage {
+  id: string;
+  bountyId: string;
+  proposalId?: string;
+  fromWallet: string;
+  fromAgentId?: string;
+  fromAgentName?: string;
+  toWallet: string;
+  toAgentId?: string;
+  toAgentName?: string;
+  message: string;
+  read: boolean;
+  createdAt: string;
 }
 
 export interface Commitment {
@@ -562,8 +603,56 @@ function bountyFromRow(row: Record<string, unknown>): Bounty {
     assignedAgentId: (row.assigned_agent_id || row.assignedAgentId) as string | undefined,
     contributionId: (row.contribution_id || row.contributionId) as string | undefined,
     status: row.status as Bounty['status'],
+    selectionMode: ((row.selection_mode || row.selectionMode) as Bounty['selectionMode']) || 'first_come',
+    selectedProposalId: (row.selected_proposal_id || row.selectedProposalId) as string | undefined,
+    proposalDeadline: (row.proposal_deadline || row.proposalDeadline) as string | undefined,
     createdAt: (row.created_at || row.createdAt) as string,
     updatedAt: (row.updated_at || row.updatedAt) as string,
+  };
+}
+
+function proposalFromRow(row: Record<string, unknown>): BountyProposal {
+  let refs: string[] = [];
+  try {
+    refs = JSON.parse((row.portfolio_refs as string) || '[]');
+  } catch { refs = []; }
+  return {
+    id: row.id as string,
+    bountyId: (row.bounty_id || row.bountyId) as string,
+    proposerAgentId: (row.proposer_agent_id || row.proposerAgentId) as string,
+    proposerWallet: (row.proposer_wallet || row.proposerWallet) as string,
+    plan: row.plan as string,
+    proposedPriceUsdc: parseFloat(String(row.proposed_price_usdc ?? row.proposedPriceUsdc ?? '0')),
+    estimatedHours: parseInt(String(row.estimated_hours ?? row.estimatedHours ?? '0'), 10),
+    portfolioRefs: refs,
+    status: (row.status as BountyProposal['status']) || 'pending',
+    withdrawnAt: (row.withdrawn_at || row.withdrawnAt) as string | undefined,
+    acceptedAt: (row.accepted_at || row.acceptedAt) as string | undefined,
+    rejectedAt: (row.rejected_at || row.rejectedAt) as string | undefined,
+    rejectionReason: (row.rejection_reason || row.rejectionReason) as string | undefined,
+    createdAt: (row.created_at || row.createdAt) as string,
+    updatedAt: (row.updated_at || row.updatedAt) as string,
+    agentName: row.agent_name as string | undefined,
+    reputationScore: row.reputation_score ? Number(row.reputation_score) : undefined,
+    totalEarnedUsdc: row.total_earned_usdc ? Number(row.total_earned_usdc) : undefined,
+    agentType: row.agent_type as string | undefined,
+  };
+}
+
+function messageFromRow(row: Record<string, unknown>): BountyMessage {
+  return {
+    id: row.id as string,
+    bountyId: (row.bounty_id || row.bountyId) as string,
+    proposalId: (row.proposal_id || row.proposalId) as string | undefined,
+    fromWallet: (row.from_wallet || row.fromWallet) as string,
+    fromAgentId: (row.from_agent_id || row.fromAgentId) as string | undefined,
+    fromAgentName: (row.from_agent_name || row.fromAgentName) as string | undefined,
+    toWallet: (row.to_wallet || row.toWallet) as string,
+    toAgentId: (row.to_agent_id || row.toAgentId) as string | undefined,
+    toAgentName: (row.to_agent_name || row.toAgentName) as string | undefined,
+    message: row.message as string,
+    read: Boolean(row.read),
+    createdAt: (row.created_at || row.createdAt) as string,
   };
 }
 
@@ -592,6 +681,8 @@ export async function createBounty(data: {
   amountUsdc: string;
   deadline: string;
   minReputation?: number;
+  selectionMode?: 'first_come' | 'proposal';
+  proposalDeadline?: string;
 }): Promise<Bounty | null> {
   try {
     const res = await fetch(`${API}/api/bounties`, {
@@ -634,6 +725,138 @@ export async function cancelBounty(bountyId: string, creatorWallet: string): Pro
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ creatorWallet }),
+    });
+    return res.ok;
+  } catch { return false; }
+}
+
+// ══════════════════════════════════════════════════════
+// ── Bounty Proposals (Hybrid Mode) ──
+// ══════════════════════════════════════════════════════
+
+export async function fetchBountyProposals(
+  bountyId: string,
+  callerWallet: string
+): Promise<{ proposals: BountyProposal[]; isCreator: boolean }> {
+  try {
+    const url = `${API}/api/bounties/${bountyId}/proposals?callerWallet=${encodeURIComponent(callerWallet)}`;
+    const res = await fetch(url);
+    const json = await res.json();
+    return {
+      proposals: (json.proposals || []).map(proposalFromRow),
+      isCreator: Boolean(json.isCreator),
+    };
+  } catch (e) { console.error('fetchBountyProposals error:', e); return { proposals: [], isCreator: false }; }
+}
+
+export async function submitBountyProposal(
+  bountyId: string,
+  token: string,
+  data: { plan: string; proposedPriceUsdc: number; estimatedHours?: number; portfolioRefs?: string[] }
+): Promise<{ proposal: BountyProposal | null; error?: string }> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/proposals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (!res.ok) return { proposal: null, error: json.error };
+    return { proposal: proposalFromRow(json.proposal) };
+  } catch (e) { return { proposal: null, error: String(e) }; }
+}
+
+export async function updateBountyProposal(
+  bountyId: string,
+  proposalId: string,
+  token: string,
+  data: { plan?: string; proposedPriceUsdc?: number; estimatedHours?: number; portfolioRefs?: string[] }
+): Promise<{ proposal: BountyProposal | null; error?: string }> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/proposals/${proposalId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (!res.ok) return { proposal: null, error: json.error };
+    return { proposal: proposalFromRow(json.proposal) };
+  } catch (e) { return { proposal: null, error: String(e) }; }
+}
+
+export async function withdrawBountyProposal(
+  bountyId: string,
+  proposalId: string,
+  token: string
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/proposals/${proposalId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return res.ok;
+  } catch { return false; }
+}
+
+export async function acceptBountyProposal(
+  bountyId: string,
+  proposalId: string,
+  creatorWallet: string
+): Promise<{ bounty: Bounty | null; error?: string }> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/proposals/${proposalId}/accept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callerWallet: creatorWallet }),
+    });
+    const json = await res.json();
+    if (!res.ok) return { bounty: null, error: json.error };
+    return { bounty: json.bounty ? bountyFromRow(json.bounty) : null };
+  } catch (e) { return { bounty: null, error: String(e) }; }
+}
+
+export async function rejectBountyProposal(
+  bountyId: string,
+  proposalId: string,
+  creatorWallet: string,
+  reason?: string
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/proposals/${proposalId}/reject`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callerWallet: creatorWallet, reason }),
+    });
+    return res.ok;
+  } catch { return false; }
+}
+
+export async function fetchBountyMessages(
+  bountyId: string,
+  proposalId: string,
+  callerWallet: string
+): Promise<{ messages: BountyMessage[]; isCreator: boolean; isProposer: boolean }> {
+  try {
+    const url = `${API}/api/bounties/${bountyId}/messages?proposalId=${encodeURIComponent(proposalId)}&callerWallet=${encodeURIComponent(callerWallet)}`;
+    const res = await fetch(url);
+    const json = await res.json();
+    return {
+      messages: (json.messages || []).map(messageFromRow),
+      isCreator: Boolean(json.isCreator),
+      isProposer: Boolean(json.isProposer),
+    };
+  } catch { return { messages: [], isCreator: false, isProposer: false }; }
+}
+
+export async function sendBountyMessage(
+  bountyId: string,
+  data: { proposalId: string; message: string; callerWallet: string; callerAgentId?: string }
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
     });
     return res.ok;
   } catch { return false; }
