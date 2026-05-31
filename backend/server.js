@@ -40,7 +40,10 @@ const SWARMS_WEBHOOK_SECRET = process.env.SWARMS_WEBHOOK_SECRET || '';
 
 // ── Arc Testnet RPC for transaction verification ──
 const ARC_TESTNET_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
-const USDC_CONTRACT_ADDRESS = process.env.USDC_CONTRACT_ADDRESS || '0x036CbD53842c5426634e7929541eC2318f3dCF7e'; // Circle USDC on Arc Testnet
+// Arc Testnet exposes USDC as a system contract; the ERC-20 interface lives at
+// 0x3600...0000 (6 decimals). The previous default (0x036C...) was Base Sepolia's
+// USDC and would silently fail with "contract function returned no data" on Arc.
+const USDC_CONTRACT_ADDRESS = process.env.USDC_CONTRACT_ADDRESS || '0x3600000000000000000000000000000000000000';
 
 // Create viem public client for Arc Testnet
 const arcTestnetClient = createPublicClient({
