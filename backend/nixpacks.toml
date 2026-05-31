@@ -1,3 +1,6 @@
+# Railway build configuration for BARD backend
+# Updated: 2026-05-30 - simplified for direct npm install
+
 [phases.setup]
 nixPkgs = ["nodejs_20", "npm-9_x"]
 
