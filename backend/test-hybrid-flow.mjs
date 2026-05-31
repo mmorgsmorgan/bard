@@ -37,7 +37,7 @@ import pg from 'pg';
 
 const API = process.env.BARD_API_URL || 'http://localhost:4001';
 const ARC_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
-const USDC = (process.env.USDC_CONTRACT_ADDRESS || '0x036CbD53842c5426634e7929541eC2318f3dCF7e');
+const USDC = (process.env.USDC_CONTRACT_ADDRESS || '0x3600000000000000000000000000000000000000');
 const ARC_CHAIN_ID = 5042002;
 
 const { Pool } = pg;
