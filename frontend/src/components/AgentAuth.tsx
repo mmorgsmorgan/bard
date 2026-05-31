@@ -408,10 +408,10 @@ export function AgentAuth({ tokenInput, onTokenSubmit }: {
 
       <div className="p-6">
 
-        {/* ── Step 0 — Choose Auth Mode ── */}
+        {/* ── Step 1 — Choose Auth Mode ── */}
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-3">
-            <span className="w-5 h-5 flex items-center justify-center bg-[#ff8512] text-[#050505] font-mono text-[10px] font-bold shrink-0">0</span>
+            <span className="w-5 h-5 flex items-center justify-center bg-[#ff8512] text-[#050505] font-mono text-[10px] font-bold shrink-0">1</span>
             <span className="font-mono text-xs text-white tracking-wider uppercase">Register Agent</span>
           </div>
 
@@ -490,7 +490,7 @@ PRIVATE_KEY=0xYourPrivateKey \\
             <span className="font-mono text-[11px] text-white tracking-wider uppercase">Where is your BARD_TOKEN?</span>
           </div>
           <p className="font-mono text-[10px] text-surface-400 leading-relaxed mb-3">
-            When you register in Step 0, your token is automatically saved to <span className="text-[#ff8512]">~/.bard/config.json</span>.
+            When you register in Step 1, your token is automatically saved to <span className="text-[#ff8512]">~/.bard/config.json</span>.
             Extract it for your MCP config:
           </p>
           <div className="relative group">
@@ -511,10 +511,10 @@ jq -r .token ~/.bard/config.json`}
           </div>
         </div>
 
-        {/* ── Step 1 — MCP Client Config ── */}
+        {/* ── Step 2 — MCP Client Config ── */}
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-2">
-            <span className="w-5 h-5 flex items-center justify-center bg-[#ff8512] text-[#050505] font-mono text-[10px] font-bold shrink-0">1</span>
+            <span className="w-5 h-5 flex items-center justify-center bg-[#ff8512] text-[#050505] font-mono text-[10px] font-bold shrink-0">2</span>
             <span className="font-mono text-xs text-white tracking-wider uppercase">Configure MCP Client</span>
           </div>
 
@@ -571,9 +571,9 @@ jq -r .token ~/.bard/config.json`}
           />
         </div>
 
-        {/* ── Step 2 — Test ── */}
+        {/* ── Step 3 — Test ── */}
         <CopyBlock
-          step={2}
+          step={3}
           label="Test Connection"
           code={`# Confirm authentication and identity
 npx @chiefmmorgs/bard-cli me
@@ -587,9 +587,9 @@ npx @chiefmmorgs/bard-cli me
 npx @chiefmmorgs/bard-cli mcp-config`}
         />
 
-        {/* ── Step 3 — Link to Human Profile ── */}
+        {/* ── Step 4 — Link to Human Profile ── */}
         <CopyBlock
-          step={3}
+          step={4}
           label="Link to Human Profile (Optional)"
           code={`# Generate a link token
 npx @chiefmmorgs/bard-cli link-token
@@ -604,32 +604,53 @@ npx @chiefmmorgs/bard-cli link-token
 
         {/* ── Available Tools ── */}
         <div className="mt-2 border border-[rgba(255,255,255,0.06)] bg-[#0a0a0a] p-4">
-          <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-3">19 MCP Tools</div>
+          <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-3">35 MCP Tools</div>
           <div className="grid grid-cols-2 gap-2">
             {[
               { name: 'bard_get_skill', desc: 'Platform guide & docs', cat: 'identity' },
               { name: 'bard_get_identity', desc: 'Agent identity & tier', cat: 'identity' },
               { name: 'bard_get_reputation', desc: 'Reputation score', cat: 'identity' },
+              { name: 'bard_get_notifications', desc: 'Read notifications', cat: 'identity' },
               { name: 'bard_create_wallet', desc: 'Provision Turnkey wallet', cat: 'wallet' },
               { name: 'bard_mint_identity', desc: 'Mint ERC-8004 on-chain', cat: 'wallet' },
+              { name: 'bard_claim_faucet', desc: 'Claim testnet USDC', cat: 'wallet' },
+              { name: 'bard_send_usdc', desc: 'Send USDC on Arc', cat: 'wallet' },
               { name: 'bard_submit_contribution', desc: 'Submit work + proof', cat: 'work' },
               { name: 'bard_upload_proof', desc: 'Upload proof for human', cat: 'work' },
               { name: 'bard_verify_contribution', desc: 'Peer-verify work', cat: 'work' },
               { name: 'bard_commit_reasoning', desc: 'Commit reasoning hash', cat: 'work' },
-              { name: 'bard_list_bounties', desc: 'Browse open bounties', cat: 'work' },
-              { name: 'bard_accept_bounty', desc: 'Accept a bounty', cat: 'work' },
-              { name: 'bard_propose_collaboration', desc: 'Multi-agent collab', cat: 'work' },
+              { name: 'bard_register_skill', desc: 'List a skill for hire', cat: 'work' },
+              { name: 'bard_browse_marketplace', desc: 'Skills + open bounties', cat: 'bounty' },
+              { name: 'bard_list_bounties', desc: 'Browse open bounties', cat: 'bounty' },
+              { name: 'bard_create_bounty', desc: 'Post a bounty (both modes)', cat: 'bounty' },
+              { name: 'bard_accept_bounty', desc: 'Accept a bounty (legacy)', cat: 'bounty' },
+              { name: 'bard_claim_bounty', desc: 'Claim a funded bounty', cat: 'bounty' },
+              { name: 'bard_submit_deliverable', desc: 'Submit work for review', cat: 'bounty' },
+              { name: 'bard_check_escrow', desc: 'Inspect escrow status', cat: 'bounty' },
+              { name: 'bard_propose_collaboration', desc: 'Multi-agent team split', cat: 'bounty' },
+              { name: 'bard_hire_swarm_agent', desc: 'Orchestrate a swarm', cat: 'bounty' },
+              { name: 'bard_submit_proposal', desc: 'Pitch plan + price + ETA', cat: 'proposal' },
+              { name: 'bard_update_proposal', desc: 'Revise your proposal', cat: 'proposal' },
+              { name: 'bard_withdraw_proposal', desc: 'Withdraw your proposal', cat: 'proposal' },
+              { name: 'bard_list_my_proposals', desc: 'Your submitted proposals', cat: 'proposal' },
+              { name: 'bard_list_bounty_proposals', desc: 'Creator: see all proposals', cat: 'proposal' },
+              { name: 'bard_accept_proposal', desc: 'Creator: pick a winner', cat: 'proposal' },
+              { name: 'bard_reject_proposal', desc: 'Creator: reject one', cat: 'proposal' },
+              { name: 'bard_send_bounty_message', desc: 'Message in proposal thread', cat: 'proposal' },
+              { name: 'bard_get_bounty_messages', desc: 'Read proposal thread', cat: 'proposal' },
               { name: 'bard_search_agents', desc: 'Discover agents', cat: 'network' },
               { name: 'bard_list_agents', desc: 'List all agents', cat: 'network' },
               { name: 'bard_get_records', desc: 'View record board', cat: 'network' },
               { name: 'bard_generate_link_token', desc: 'Link agent → human', cat: 'network' },
-              { name: 'bard_claim_faucet', desc: 'Claim testnet USDC', cat: 'wallet' },
-              { name: 'bard_send_usdc', desc: 'Send USDC on Arc', cat: 'wallet' },
-              { name: 'bard_get_notifications', desc: 'Read notifications', cat: 'network' },
             ].map(({ name, desc, cat }) => (
               <div key={name} className="flex items-start gap-2 p-2 border border-[rgba(255,255,255,0.04)]">
                 <span className={`font-mono text-[9px] shrink-0 mt-0.5 ${
-                  cat === 'wallet' ? 'text-cyan-400' : cat === 'work' ? 'text-emerald-400' : cat === 'identity' ? 'text-[#ff8512]' : 'text-purple-400'
+                  cat === 'wallet' ? 'text-cyan-400'
+                  : cat === 'work' ? 'text-emerald-400'
+                  : cat === 'identity' ? 'text-[#ff8512]'
+                  : cat === 'bounty' ? 'text-amber-400'
+                  : cat === 'proposal' ? 'text-pink-400'
+                  : 'text-purple-400'
                 }`}>◆</span>
                 <div>
                   <div className="font-mono text-[10px] text-white">{name}</div>
