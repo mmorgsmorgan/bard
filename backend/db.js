@@ -263,6 +263,46 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS submitted_at TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS released_at TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS swarm_execution_id TEXT`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selection_mode TEXT DEFAULT 'first_come'`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selected_proposal_id TEXT DEFAULT NULL`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS proposal_deadline TEXT DEFAULT NULL`,
+
+    // ── bounty_proposals (hybrid mode) ──
+    `CREATE TABLE IF NOT EXISTS bounty_proposals (
+      id TEXT PRIMARY KEY,
+      bounty_id TEXT NOT NULL,
+      proposer_agent_id TEXT NOT NULL,
+      proposer_wallet TEXT NOT NULL,
+      plan TEXT NOT NULL,
+      proposed_price_usdc DOUBLE PRECISION NOT NULL,
+      estimated_hours INTEGER DEFAULT 0,
+      portfolio_refs TEXT DEFAULT '[]',
+      status TEXT DEFAULT 'pending',
+      withdrawn_at TEXT,
+      accepted_at TEXT,
+      rejected_at TEXT,
+      rejection_reason TEXT DEFAULT '',
+      created_at TEXT DEFAULT (NOW()::text),
+      updated_at TEXT DEFAULT (NOW()::text),
+      FOREIGN KEY (bounty_id) REFERENCES bounties(id),
+      FOREIGN KEY (proposer_agent_id) REFERENCES agents(id),
+      UNIQUE(bounty_id, proposer_agent_id)
+    )`,
+
+    // ── bounty_messages (creator <-> proposer thread) ──
+    `CREATE TABLE IF NOT EXISTS bounty_messages (
+      id TEXT PRIMARY KEY,
+      bounty_id TEXT NOT NULL,
+      proposal_id TEXT,
+      from_wallet TEXT NOT NULL,
+      from_agent_id TEXT,
+      to_wallet TEXT NOT NULL,
+      to_agent_id TEXT,
+      message TEXT NOT NULL,
+      read INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (NOW()::text),
+      FOREIGN KEY (bounty_id) REFERENCES bounties(id)
+    )`,
 
     // ── swarm_executions ──
     `CREATE TABLE IF NOT EXISTS swarm_executions (
@@ -438,6 +478,12 @@ export async function initSchema() {
     `CREATE INDEX IF NOT EXISTS idx_storage_metrics_created ON storage_metrics(created_at)`,
     `CREATE INDEX IF NOT EXISTS idx_storage_metrics_operation ON storage_metrics(operation)`,
     `CREATE INDEX IF NOT EXISTS idx_storage_metrics_wallet ON storage_metrics(wallet)`,
+    `CREATE INDEX IF NOT EXISTS idx_proposals_bounty ON bounty_proposals(bounty_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_proposals_agent ON bounty_proposals(proposer_agent_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_proposals_status ON bounty_proposals(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_msgs_bounty ON bounty_messages(bounty_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_msgs_proposal ON bounty_messages(proposal_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_msgs_thread ON bounty_messages(bounty_id, proposal_id, created_at)`,
   ];
 
   for (const sql of statements) {
@@ -630,9 +676,15 @@ export const stmts = {
 
   // ── Bounties ──
   insertBounty: async (p) => run(
-    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [p.id, p.creator_wallet, p.title, p.description, p.bounty_type, p.amount_usdc, p.deadline, p.min_reputation, p.created_at, p.updated_at]
+    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, created_at, updated_at, status, selection_mode, proposal_deadline)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+    [
+      p.id, p.creator_wallet, p.title, p.description, p.bounty_type, p.amount_usdc, p.deadline,
+      p.min_reputation, p.created_at, p.updated_at,
+      p.status || 'open',
+      p.selection_mode || 'first_come',
+      p.proposal_deadline || null,
+    ]
   ),
   getBountyById: async (id) => one('SELECT * FROM bounties WHERE id = $1', [id]),
   getOpenBounties: async (status, limit) => many(
@@ -699,7 +751,7 @@ export const stmts = {
     [limit]
   ),
   getMarketplaceBounties: async (limit) => many(
-    "SELECT * FROM bounties WHERE escrow_status IN ('funded', 'none') AND status = 'open' ORDER BY escrow_budget_usdc DESC, created_at DESC LIMIT $1",
+    "SELECT * FROM bounties WHERE escrow_status IN ('funded', 'none') AND status IN ('open', 'proposal_open') ORDER BY escrow_budget_usdc DESC, created_at DESC LIMIT $1",
     [limit]
   ),
 
@@ -831,6 +883,85 @@ export const stmts = {
       [since]
     );
   },
+
+  // ── Bounty proposals (hybrid mode) ──
+  insertProposal: async (p) => run(
+    `INSERT INTO bounty_proposals (id, bounty_id, proposer_agent_id, proposer_wallet, plan, proposed_price_usdc, estimated_hours, portfolio_refs, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [p.id, p.bounty_id, p.proposer_agent_id, p.proposer_wallet, p.plan, p.proposed_price_usdc, p.estimated_hours || 0, p.portfolio_refs || '[]', p.created_at, p.updated_at]
+  ),
+  getProposalById: async (id) => one('SELECT * FROM bounty_proposals WHERE id = $1', [id]),
+  getProposalsByBounty: async (bountyId) => many(
+    `SELECT p.*, a.agent_name, a.reputation_score, a.total_earned_usdc, a.agent_type
+     FROM bounty_proposals p
+     LEFT JOIN agents a ON p.proposer_agent_id = a.id
+     WHERE p.bounty_id = $1
+     ORDER BY p.created_at ASC`,
+    [bountyId]
+  ),
+  getProposalByBountyAndAgent: async (bountyId, agentId) => one(
+    'SELECT * FROM bounty_proposals WHERE bounty_id = $1 AND proposer_agent_id = $2',
+    [bountyId, agentId]
+  ),
+  getProposalsByAgent: async (agentId) => many(
+    `SELECT p.*, b.title as bounty_title, b.status as bounty_status, b.amount_usdc as bounty_amount_usdc, b.selection_mode
+     FROM bounty_proposals p
+     LEFT JOIN bounties b ON p.bounty_id = b.id
+     WHERE p.proposer_agent_id = $1
+     ORDER BY p.created_at DESC
+     LIMIT 100`,
+    [agentId]
+  ),
+  updateProposal: async (p) => run(
+    `UPDATE bounty_proposals
+     SET plan = $1, proposed_price_usdc = $2, estimated_hours = $3, portfolio_refs = $4, updated_at = $5
+     WHERE id = $6 AND status = 'pending'`,
+    [p.plan, p.proposed_price_usdc, p.estimated_hours || 0, p.portfolio_refs || '[]', p.updated_at, p.id]
+  ),
+  withdrawProposal: async (p) => run(
+    `UPDATE bounty_proposals SET status = 'withdrawn', withdrawn_at = $1, updated_at = $1 WHERE id = $2 AND status = 'pending'`,
+    [p.withdrawn_at, p.id]
+  ),
+  acceptProposal: async (p) => run(
+    `UPDATE bounty_proposals SET status = 'accepted', accepted_at = $1, updated_at = $1 WHERE id = $2 AND status = 'pending'`,
+    [p.accepted_at, p.id]
+  ),
+  rejectProposal: async (p) => run(
+    `UPDATE bounty_proposals SET status = 'rejected', rejected_at = $1, rejection_reason = $2, updated_at = $1 WHERE id = $3 AND status = 'pending'`,
+    [p.rejected_at, p.rejection_reason || '', p.id]
+  ),
+  setBountySelectedProposal: async (p) => run(
+    `UPDATE bounties SET selected_proposal_id = $1, status = $2, amount_usdc = $3, updated_at = $4 WHERE id = $5`,
+    [p.selected_proposal_id, p.status, p.amount_usdc, p.updated_at, p.id]
+  ),
+
+  // ── Bounty messages (creator <-> proposer threads) ──
+  insertBountyMessage: async (p) => run(
+    `INSERT INTO bounty_messages (id, bounty_id, proposal_id, from_wallet, from_agent_id, to_wallet, to_agent_id, message, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [p.id, p.bounty_id, p.proposal_id || null, (p.from_wallet || '').toLowerCase(), p.from_agent_id || null, (p.to_wallet || '').toLowerCase(), p.to_agent_id || null, p.message, p.created_at]
+  ),
+  getBountyMessages: async (bountyId, proposalId) => many(
+    proposalId
+      ? `SELECT m.*, fa.agent_name as from_agent_name, ta.agent_name as to_agent_name
+         FROM bounty_messages m
+         LEFT JOIN agents fa ON m.from_agent_id = fa.id
+         LEFT JOIN agents ta ON m.to_agent_id = ta.id
+         WHERE m.bounty_id = $1 AND m.proposal_id = $2
+         ORDER BY m.created_at ASC`
+      : `SELECT m.*, fa.agent_name as from_agent_name, ta.agent_name as to_agent_name
+         FROM bounty_messages m
+         LEFT JOIN agents fa ON m.from_agent_id = fa.id
+         LEFT JOIN agents ta ON m.to_agent_id = ta.id
+         WHERE m.bounty_id = $1
+         ORDER BY m.created_at ASC`,
+    proposalId ? [bountyId, proposalId] : [bountyId]
+  ),
+  markMessagesRead: async (bountyId, proposalId, recipientWallet) => run(
+    `UPDATE bounty_messages SET read = 1
+     WHERE bounty_id = $1 AND proposal_id = $2 AND LOWER(to_wallet) = LOWER($3) AND read = 0`,
+    [bountyId, proposalId, recipientWallet]
+  ),
 };
 
 export default { pool, query, initSchema, stmts };

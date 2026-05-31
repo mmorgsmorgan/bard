@@ -97,7 +97,7 @@ export const TOOLS = [
     description: 'List available bounties. Bounties are paid tasks that agents can accept and complete for USDC rewards.',
     inputSchema: {
       type: 'object',
-      properties: { status: { type: 'string', enum: ['open', 'assigned', 'submitted'], default: 'open' } },
+      properties: { status: { type: 'string', enum: ['open', 'assigned', 'submitted', 'proposal_open', 'proposal_selected'], default: 'open' } },
       required: [],
     },
   },
@@ -304,6 +304,132 @@ export const TOOLS = [
         txHash: { type: 'string', description: 'Transaction hash of USDC transfer to platform escrow address. Required for funding verification.' },
       },
       required: ['agentId', 'task', 'budgetUsdc', 'txHash'],
+    },
+  },
+  // ── Hybrid bounty / proposals tools ──
+  {
+    name: 'bard_create_bounty',
+    description: 'Create a new bounty. selectionMode="first_come" (default): first agent to claim wins. selectionMode="proposal": agents submit proposals, you pick one, then fund.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short title for the bounty' },
+        description: { type: 'string', description: 'Detailed description of what needs to be done' },
+        bountyType: { type: 'string', enum: ['research', 'code_review', 'data_analysis', 'content', 'verification', 'other'] },
+        amountUsdc: { type: 'string', description: 'Budget in USDC (in proposal mode this is a hint; accepted proposal price wins)' },
+        deadline: { type: 'string', description: 'ISO 8601 deadline for delivery' },
+        minReputation: { type: 'number', description: 'Minimum agent reputation required' },
+        selectionMode: { type: 'string', enum: ['first_come', 'proposal'], default: 'first_come' },
+        proposalDeadline: { type: 'string', description: 'Optional ISO 8601 deadline for proposal submission (proposal mode only)' },
+      },
+      required: ['title', 'bountyType', 'amountUsdc', 'deadline'],
+    },
+  },
+  {
+    name: 'bard_submit_proposal',
+    description: 'Submit a proposal for a proposal-mode bounty. Pitch your plan, your price, and how long it will take. One proposal per agent per bounty (use bard_update_proposal to change it).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string', description: 'Bounty ID to bid on' },
+        plan: { type: 'string', description: 'Your plan for completing the task (10–8000 chars)' },
+        proposedPriceUsdc: { type: 'number', description: 'Your proposed price in USDC (min 1)' },
+        estimatedHours: { type: 'number', description: 'Estimated hours to complete' },
+        portfolioRefs: { type: 'array', items: { type: 'string' }, description: 'Optional portfolio item IDs to reference past relevant work' },
+      },
+      required: ['bountyId', 'plan', 'proposedPriceUsdc'],
+    },
+  },
+  {
+    name: 'bard_update_proposal',
+    description: 'Update your pending proposal (before creator accepts or rejects). Only the proposer can update.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string' },
+        proposalId: { type: 'string' },
+        plan: { type: 'string' },
+        proposedPriceUsdc: { type: 'number' },
+        estimatedHours: { type: 'number' },
+        portfolioRefs: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['bountyId', 'proposalId'],
+    },
+  },
+  {
+    name: 'bard_withdraw_proposal',
+    description: 'Withdraw your own pending proposal from a bounty.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string' },
+        proposalId: { type: 'string' },
+      },
+      required: ['bountyId', 'proposalId'],
+    },
+  },
+  {
+    name: 'bard_list_my_proposals',
+    description: "List all proposals submitted by the calling agent across every bounty.",
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'bard_list_bounty_proposals',
+    description: 'List proposals submitted to a bounty. Creators see all; proposers see only their own.',
+    inputSchema: {
+      type: 'object',
+      properties: { bountyId: { type: 'string' } },
+      required: ['bountyId'],
+    },
+  },
+  {
+    name: 'bard_accept_proposal',
+    description: 'Accept a proposal as the bounty creator. Bounty amount updates to proposal price; all other proposals are auto-rejected; bounty moves to proposal_selected awaiting your funding.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string' },
+        proposalId: { type: 'string' },
+      },
+      required: ['bountyId', 'proposalId'],
+    },
+  },
+  {
+    name: 'bard_reject_proposal',
+    description: 'Reject a specific proposal as the bounty creator (without accepting any). The proposer is notified.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string' },
+        proposalId: { type: 'string' },
+        reason: { type: 'string', description: 'Optional reason shown to proposer' },
+      },
+      required: ['bountyId', 'proposalId'],
+    },
+  },
+  {
+    name: 'bard_send_bounty_message',
+    description: 'Send a message in a bounty thread (creator <-> proposer). Available throughout the bounty lifecycle for clarification and negotiation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string' },
+        proposalId: { type: 'string', description: 'Which proposal thread (each proposer has their own thread with the creator)' },
+        message: { type: 'string', description: 'Message text (max 4000 chars)' },
+      },
+      required: ['bountyId', 'proposalId', 'message'],
+    },
+  },
+  {
+    name: 'bard_get_bounty_messages',
+    description: 'Read the message thread for a bounty proposal. Only the creator or proposer can read.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string' },
+        proposalId: { type: 'string' },
+      },
+      required: ['bountyId', 'proposalId'],
     },
   },
 ];
@@ -706,6 +832,153 @@ async function handleTool(name, args, token) {
           deliverable: claimData.bounty?.deliverable_content,
           message: `Swarm execution ${claimData.swarm_status || 'started'}. Bounty ID: ${bountyData.bounty.id}`,
         };
+      }
+
+      // ── Hybrid bounty / proposals ──
+
+      case 'bard_create_bounty': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch('/api/bounties', {
+          method: 'POST',
+          body: JSON.stringify({
+            creatorWallet: auth.me?.wallet,
+            title: args.title,
+            description: args.description || '',
+            bountyType: args.bountyType,
+            amountUsdc: String(args.amountUsdc),
+            deadline: args.deadline,
+            minReputation: args.minReputation || 0,
+            selectionMode: args.selectionMode || 'first_come',
+            proposalDeadline: args.proposalDeadline || null,
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        const nextStep = (args.selectionMode === 'proposal')
+          ? 'Agents can now submit proposals via bard_submit_proposal. Use bard_list_bounty_proposals to see them.'
+          : 'Bounty live. Fund it via the /fund endpoint (or marketplace UI) so agents can claim it.';
+        return { success: true, bounty: data.bounty, nextStep };
+      }
+
+      case 'bard_submit_proposal': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals`, {
+          method: 'POST',
+          body: JSON.stringify({
+            plan: args.plan,
+            proposedPriceUsdc: args.proposedPriceUsdc,
+            estimatedHours: args.estimatedHours || 0,
+            portfolioRefs: args.portfolioRefs || [],
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error, hint: data.hint, existing_proposal_id: data.existing_proposal_id };
+        return { success: true, proposal: data.proposal, message: `Proposal submitted at ${args.proposedPriceUsdc} USDC.` };
+      }
+
+      case 'bard_update_proposal': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const body = {};
+        if (args.plan !== undefined) body.plan = args.plan;
+        if (args.proposedPriceUsdc !== undefined) body.proposedPriceUsdc = args.proposedPriceUsdc;
+        if (args.estimatedHours !== undefined) body.estimatedHours = args.estimatedHours;
+        if (args.portfolioRefs !== undefined) body.portfolioRefs = args.portfolioRefs;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals/${args.proposalId}`, {
+          method: 'PUT',
+          body: JSON.stringify(body),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return { success: true, proposal: data.proposal };
+      }
+
+      case 'bard_withdraw_proposal': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals/${args.proposalId}`, {
+          method: 'DELETE',
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return { success: true, message: 'Proposal withdrawn.' };
+      }
+
+      case 'bard_list_my_proposals': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/agents/${auth.agentId}/proposals`, {}, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return data;
+      }
+
+      case 'bard_list_bounty_proposals': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const url = `/api/bounties/${args.bountyId}/proposals?callerWallet=${encodeURIComponent(auth.me?.wallet || '')}`;
+        const res = await apiFetch(url, {}, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return data;
+      }
+
+      case 'bard_accept_proposal': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals/${args.proposalId}/accept`, {
+          method: 'POST',
+          body: JSON.stringify({ callerWallet: auth.me?.wallet }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return {
+          success: true,
+          bounty: data.bounty,
+          rejectedProposalCount: data.rejectedProposalCount,
+          message: `Proposal accepted at ${data.bounty?.amount_usdc} USDC. Now fund the bounty for that exact amount so the agent can start work.`,
+        };
+      }
+
+      case 'bard_reject_proposal': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals/${args.proposalId}/reject`, {
+          method: 'POST',
+          body: JSON.stringify({ callerWallet: auth.me?.wallet, reason: args.reason || '' }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return { success: true, message: 'Proposal rejected.' };
+      }
+
+      case 'bard_send_bounty_message': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            proposalId: args.proposalId,
+            message: args.message,
+            callerWallet: auth.me?.wallet,
+            callerAgentId: auth.agentId,
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return { success: true, messageId: data.id };
+      }
+
+      case 'bard_get_bounty_messages': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const url = `/api/bounties/${args.bountyId}/messages?proposalId=${encodeURIComponent(args.proposalId)}&callerWallet=${encodeURIComponent(auth.me?.wallet || '')}`;
+        const res = await apiFetch(url, {}, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return data;
       }
 
       default:
