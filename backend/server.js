@@ -9,7 +9,7 @@ import { EventEmitter } from 'events';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
-import { formatUnits, verifyMessage } from 'viem';
+import { formatUnits, verifyMessage, createPublicClient, http, parseUnits } from 'viem';
 import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet } from './turnkey-wallet.js';
 import { pool, query, initSchema, stmts } from './db.js';
 import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
@@ -35,6 +35,26 @@ const PLATFORM_OWNER_WALLET = (process.env.PLATFORM_OWNER_WALLET || SELLER_ADDRE
 const SWARMS_API_KEY = process.env.SWARMS_API_KEY || '';
 const SWARMS_PLATFORM_MARKUP_PCT = parseFloat(process.env.SWARMS_PLATFORM_MARKUP_PCT || '20');
 const SWARMS_API_BASE = 'https://api.swarms.world';
+const SWARMS_WEBHOOK_SECRET = process.env.SWARMS_WEBHOOK_SECRET || '';
+
+// ── Arc Testnet RPC for transaction verification ──
+const ARC_TESTNET_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
+const USDC_CONTRACT_ADDRESS = process.env.USDC_CONTRACT_ADDRESS || '0x036CbD53842c5426634e7929541eC2318f3dCF7e'; // Circle USDC on Arc Testnet
+
+// Create viem public client for Arc Testnet
+const arcTestnetClient = createPublicClient({
+  chain: {
+    id: 5042002,
+    name: 'Arc Testnet',
+    network: 'arc-testnet',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: {
+      default: { http: [ARC_TESTNET_RPC] },
+      public: { http: [ARC_TESTNET_RPC] }
+    }
+  },
+  transport: http(ARC_TESTNET_RPC)
+});
 
 // ── CORS ──
 const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:3000', 'http://127.0.0.1:3000'];
@@ -2550,6 +2570,73 @@ const logEscrowEvent = async (bountyId, eventType, actorWallet, actorType, detai
   await stmts.insertEscrowEvent({ id, bounty_id: bountyId, event_type: eventType, actor_wallet: actorWallet || '', actor_type: actorType || 'system', details: details || '', tx_hash: txHash || '', created_at: new Date().toISOString() });
 };
 
+// Verify transaction on-chain
+async function verifyTransaction(txHash, expectedFrom, expectedTo, expectedAmountUsdc) {
+  try {
+    // Fetch transaction receipt
+    const receipt = await arcTestnetClient.getTransactionReceipt({ hash: txHash });
+
+    if (!receipt) {
+      return { valid: false, error: 'Transaction not found on-chain' };
+    }
+
+    if (receipt.status !== 'success') {
+      return { valid: false, error: 'Transaction failed on-chain' };
+    }
+
+    // Fetch transaction details
+    const tx = await arcTestnetClient.getTransaction({ hash: txHash });
+
+    // Verify it's a USDC transfer (to USDC contract)
+    if (tx.to?.toLowerCase() !== USDC_CONTRACT_ADDRESS.toLowerCase()) {
+      return { valid: false, error: 'Transaction is not a USDC transfer' };
+    }
+
+    // Verify sender
+    if (tx.from.toLowerCase() !== expectedFrom.toLowerCase()) {
+      return { valid: false, error: `Transaction sender mismatch. Expected ${expectedFrom}, got ${tx.from}` };
+    }
+
+    // Decode USDC transfer from logs (ERC20 Transfer event)
+    // Transfer(address indexed from, address indexed to, uint256 value)
+    const transferLog = receipt.logs.find(log =>
+      log.address.toLowerCase() === USDC_CONTRACT_ADDRESS.toLowerCase() &&
+      log.topics[0] === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef' // Transfer event signature
+    );
+
+    if (!transferLog) {
+      return { valid: false, error: 'No USDC Transfer event found in transaction' };
+    }
+
+    // Decode transfer event
+    const transferTo = '0x' + transferLog.topics[2].slice(26); // Remove padding from address
+    const transferValue = BigInt(transferLog.data);
+    const transferAmountUsdc = Number(transferValue) / 1e6; // USDC has 6 decimals
+
+    // Verify recipient
+    if (transferTo.toLowerCase() !== expectedTo.toLowerCase()) {
+      return { valid: false, error: `Transfer recipient mismatch. Expected ${expectedTo}, got ${transferTo}` };
+    }
+
+    // Verify amount (allow 0.1% tolerance for rounding)
+    const tolerance = expectedAmountUsdc * 0.001;
+    if (Math.abs(transferAmountUsdc - expectedAmountUsdc) > tolerance) {
+      return { valid: false, error: `Amount mismatch. Expected ${expectedAmountUsdc} USDC, got ${transferAmountUsdc} USDC` };
+    }
+
+    return {
+      valid: true,
+      from: tx.from,
+      to: transferTo,
+      amount: transferAmountUsdc,
+      blockNumber: receipt.blockNumber
+    };
+  } catch (error) {
+    console.error('Transaction verification error:', error);
+    return { valid: false, error: `Verification failed: ${error.message}` };
+  }
+}
+
 // POST /api/bounties/:id/fund — Client locks USDC into escrow
 app.post('/api/bounties/:id/fund', async (req, res) => {
   const { clientWallet, budgetUsdc, txHash } = req.body;
@@ -2562,9 +2649,30 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
   if (bounty.creator_wallet.toLowerCase() !== clientWallet.toLowerCase()) return res.status(403).json({ error: 'Only bounty creator can fund' });
   if (bounty.escrow_status !== 'none') return res.status(409).json({ error: `Bounty already in escrow state: ${bounty.escrow_status}` });
 
-  // TODO: Stage 1 — txHash is trusted (not verified on-chain).
-  // In Stage 2+, verify txHash against Arc Testnet RPC to confirm USDC transfer.
-  // For now, the platform owner manually confirms funding before verifying.
+  // Verify transaction on-chain if txHash is provided
+  if (txHash) {
+    console.log(`Verifying transaction ${txHash} for bounty ${req.params.id}...`);
+    const verification = await verifyTransaction(
+      txHash,
+      clientWallet,
+      SELLER_ADDRESS, // Platform escrow address
+      parseFloat(budgetUsdc)
+    );
+
+    if (!verification.valid) {
+      console.error(`Transaction verification failed: ${verification.error}`);
+      return res.status(400).json({
+        error: 'Transaction verification failed',
+        details: verification.error
+      });
+    }
+
+    console.log(`✓ Transaction verified: ${verification.amount} USDC from ${verification.from} to ${verification.to}`);
+  } else {
+    // If no txHash provided, log warning but allow (for backward compatibility)
+    console.warn(`⚠️  Bounty ${req.params.id} funded without txHash - skipping verification`);
+  }
+
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(); // 72h from fund
   await stmts.updateBountyEscrow({ escrow_status: 'funded', escrow_budget_usdc: parseFloat(budgetUsdc), escrow_tx_hash: txHash || '', expires_at: expiresAt, updated_at: now, id: req.params.id });
@@ -3007,7 +3115,35 @@ app.get('/api/swarms/executions/:id', async (req, res) => {
 // POST /api/swarms/webhook — Receive async execution results from Swarms API
 app.post('/api/swarms/webhook', async (req, res) => {
   try {
-    // TODO: Verify webhook signature if Swarms API provides one
+    // Verify webhook signature if secret is configured
+    if (SWARMS_WEBHOOK_SECRET) {
+      const signature = req.headers['x-swarms-signature'] || req.headers['x-webhook-signature'];
+
+      if (!signature) {
+        console.error('Webhook signature missing');
+        return res.status(401).json({ error: 'Webhook signature required' });
+      }
+
+      // Verify HMAC-SHA256 signature
+      const payload = JSON.stringify(req.body);
+      const expectedSignature = createHash('sha256')
+        .update(SWARMS_WEBHOOK_SECRET + payload)
+        .digest('hex');
+
+      // Support both "sha256=..." and raw hex formats
+      const providedSignature = signature.startsWith('sha256=')
+        ? signature.slice(7)
+        : signature;
+
+      if (providedSignature !== expectedSignature) {
+        console.error('Webhook signature verification failed');
+        return res.status(401).json({ error: 'Invalid webhook signature' });
+      }
+    } else {
+      // Log warning if webhook secret is not configured
+      console.warn('⚠️  SWARMS_WEBHOOK_SECRET not set - webhook endpoint is unprotected');
+    }
+
     const { execution_id, status, result, cost_usd } = req.body;
 
     if (!execution_id) {

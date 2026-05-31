@@ -294,15 +294,16 @@ export const TOOLS = [
   },
   {
     name: 'bard_hire_swarm_agent',
-    description: 'Hire a BARD swarm agent to execute a multi-agent task. Creates a bounty, funds it, and claims it with the specified swarm agent. Returns execution status and deliverable when complete.',
+    description: 'Hire a BARD swarm agent to execute a multi-agent task. Creates a bounty, funds it, and claims it with the specified swarm agent. Returns execution status and deliverable when complete. IMPORTANT: You must send USDC to the platform escrow address first and provide the transaction hash.',
     inputSchema: {
       type: 'object',
       properties: {
         agentId: { type: 'string', description: 'Swarm agent ID (must have agent_type=swarm)' },
         task: { type: 'string', description: 'Task description for the swarm to execute' },
         budgetUsdc: { type: 'number', description: 'Budget in USDC (must cover swarm execution cost + platform markup if platform swarm)' },
+        txHash: { type: 'string', description: 'Transaction hash of USDC transfer to platform escrow address. Required for funding verification.' },
       },
-      required: ['agentId', 'task', 'budgetUsdc'],
+      required: ['agentId', 'task', 'budgetUsdc', 'txHash'],
     },
   },
 ];
@@ -650,6 +651,16 @@ async function handleTool(name, args, token) {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
 
+        // Require txHash parameter for real funding verification
+        if (!args.txHash) {
+          return {
+            error: 'txHash required. Please send USDC to the platform escrow address first, then provide the transaction hash.',
+            escrowAddress: process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E13Ba3b1b3c042e28a',
+            requiredAmount: args.budgetUsdc,
+            instructions: 'Send USDC on Arc Testnet to the escrow address, then call this tool with the txHash parameter.'
+          };
+        }
+
         // Create bounty
         const bountyRes = await apiFetch('/api/bounties', {
           method: 'POST',
@@ -665,13 +676,13 @@ async function handleTool(name, args, token) {
         const bountyData = await bountyRes.json();
         if (!bountyRes.ok) return { error: bountyData.error };
 
-        // Fund bounty
+        // Fund bounty with real txHash
         const fundRes = await apiFetch(`/api/bounties/${bountyData.bounty.id}/fund`, {
           method: 'POST',
           body: JSON.stringify({
             clientWallet: auth.wallet,
             budgetUsdc: args.budgetUsdc,
-            txHash: `sim-${Date.now()}`,
+            txHash: args.txHash,
           }),
         }, token);
         const fundData = await fundRes.json();
