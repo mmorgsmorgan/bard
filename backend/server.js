@@ -154,6 +154,8 @@ const RATE_LIMITS = {
   'skill_register': { max: 20, window: 3600 },
   'auth_challenge': { max: 10, window: 60 },  // 10 challenges per minute per IP
   'auth_verify': { max: 10, window: 60 },     // 10 verify attempts per minute per IP
+  'bounty_propose': { max: 5, window: 3600 },  // 5 proposals per hour per agent
+  'bounty_message': { max: 60, window: 3600 }, // 60 messages per hour per wallet
 };
 
 async function checkRateLimit(key, action) {
@@ -230,6 +232,38 @@ async function checkEscrowExpiry() {
         console.log(`  Escrow expired: ${b.id} (${b.escrow_budget_usdc} USDC refunded)`);
       } catch (err) {
         console.error(`  Escrow expiry error for ${b.id}:`, err.message);
+      }
+    }
+
+    // Auto-revert stuck proposal_selected bounties (creator never funded within 24h of accept)
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { rows: stuck } = await pool.query(
+      `SELECT b.id, b.title, b.creator_wallet, b.selected_proposal_id, p.proposer_agent_id, p.accepted_at
+       FROM bounties b
+       LEFT JOIN bounty_proposals p ON b.selected_proposal_id = p.id
+       WHERE b.status = 'proposal_selected' AND b.escrow_status = 'none' AND p.accepted_at < $1`,
+      [cutoff]
+    );
+    for (const b of stuck) {
+      try {
+        await pool.query(
+          "UPDATE bounties SET status = 'proposal_open', selected_proposal_id = NULL, updated_at = $1 WHERE id = $2",
+          [now, b.id]
+        );
+        // Re-open the previously accepted proposal so the agent can update or others can compete
+        if (b.selected_proposal_id) {
+          await pool.query(
+            "UPDATE bounty_proposals SET status = 'pending', accepted_at = NULL, updated_at = $1 WHERE id = $2",
+            [now, b.selected_proposal_id]
+          );
+        }
+        await createNotification({ wallet: b.creator_wallet, type: 'system', title: 'Selection Reset', message: `"${b.title}" reverted to proposals open — you didn't fund within 24h of accepting.`, from: 'BARD System' });
+        if (b.proposer_agent_id) {
+          await createNotification({ agentId: b.proposer_agent_id, type: 'system', title: 'Selection Reset', message: `Your accepted proposal for "${b.title}" reverted because the creator didn't fund within 24h.`, from: 'BARD System' });
+        }
+        console.log(`  Proposal selection reverted: ${b.id} (unfunded after 24h)`);
+      } catch (err) {
+        console.error(`  Proposal revert error for ${b.id}:`, err.message);
       }
     }
   } catch (err) {
@@ -2707,7 +2741,7 @@ app.get('/api/records/:contributionId', async (req, res) => {
 
 // POST /api/bounties — create bounty (human or agent)
 app.post('/api/bounties', async (req, res) => {
-  const { creatorWallet, title, description, bountyType, amountUsdc, deadline, minReputation } = req.body;
+  const { creatorWallet, title, description, bountyType, amountUsdc, deadline, minReputation, selectionMode, proposalDeadline } = req.body;
   if (!creatorWallet || !title || !bountyType || !amountUsdc || !deadline) {
     return res.status(400).json({ error: 'creatorWallet, title, bountyType, amountUsdc, and deadline required' });
   }
@@ -2715,16 +2749,31 @@ app.post('/api/bounties', async (req, res) => {
   if (!validTypes.includes(bountyType)) {
     return res.status(400).json({ error: `Invalid type. Must be: ${validTypes.join(', ')}` });
   }
+  const mode = selectionMode || 'first_come';
+  if (!['first_come', 'proposal'].includes(mode)) {
+    return res.status(400).json({ error: 'selectionMode must be "first_come" or "proposal"' });
+  }
+  if (proposalDeadline && isNaN(Date.parse(proposalDeadline))) {
+    return res.status(400).json({ error: 'proposalDeadline must be a valid ISO 8601 date' });
+  }
   const id = `bounty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
+  // Proposal mode starts in 'proposal_open' state; first_come uses default 'open'
+  const initialStatus = mode === 'proposal' ? 'proposal_open' : 'open';
   await stmts.insertBounty({
     id, creator_wallet: creatorWallet, title, description: description || '',
     bounty_type: bountyType, amount_usdc: amountUsdc, deadline,
     min_reputation: minReputation || 0, created_at: now, updated_at: now,
+    status: initialStatus,
+    selection_mode: mode,
+    proposal_deadline: proposalDeadline || null,
   });
   const bounty = await stmts.getBountyById(id);
   emitFeedEvent('bounty:created', bounty);
-  await createNotification({ wallet: creatorWallet, type: 'system', title: 'Bounty Created', message: `Your bounty "${title}" is now live.`, from: 'BARD System' });
+  const noteMsg = mode === 'proposal'
+    ? `Your bounty "${title}" is now accepting proposals.`
+    : `Your bounty "${title}" is now live.`;
+  await createNotification({ wallet: creatorWallet, type: 'system', title: 'Bounty Created', message: noteMsg, from: 'BARD System' });
   res.json({ success: true, bounty });
 });
 
@@ -2786,10 +2835,37 @@ app.post('/api/bounties/:id/cancel', async (req, res) => {
   if (bounty.creator_wallet.toLowerCase() !== (creatorWallet || '').toLowerCase()) {
     return res.status(403).json({ error: 'Only creator can cancel' });
   }
-  if (!['open', 'assigned'].includes(bounty.status)) {
+  // Allow cancel from open, assigned, proposal_open, and proposal_selected (only when no escrow funded)
+  const cancellable = ['open', 'assigned', 'proposal_open', 'proposal_selected'].includes(bounty.status);
+  if (!cancellable) {
     return res.status(409).json({ error: 'Cannot cancel bounty in current state' });
   }
-  await stmts.updateBountyStatus({ status: 'cancelled', updated_at: new Date().toISOString(), id: req.params.id });
+  if (bounty.escrow_status === 'funded' || bounty.escrow_status === 'claimed' || bounty.escrow_status === 'submitted') {
+    return res.status(409).json({ error: 'Cannot cancel bounty with active escrow — use the dispute/review flow' });
+  }
+
+  const now = new Date().toISOString();
+  await stmts.updateBountyStatus({ status: 'cancelled', updated_at: now, id: req.params.id });
+
+  // In proposal mode, auto-reject all pending proposals
+  if (bounty.selection_mode === 'proposal') {
+    const proposals = await stmts.getProposalsByBounty(req.params.id);
+    for (const p of proposals) {
+      if (p.status === 'pending' || p.status === 'accepted') {
+        await stmts.rejectProposal({ id: p.id, rejected_at: now, rejection_reason: 'Bounty cancelled by creator' });
+        await createNotification({
+          agentId: p.proposer_agent_id,
+          type: 'system',
+          title: 'Bounty Cancelled',
+          message: `The bounty "${bounty.title}" was cancelled. Your proposal is no longer active.`,
+          from: creatorWallet,
+        });
+      }
+    }
+  }
+
+  await logEscrowEvent(req.params.id, 'cancelled', creatorWallet, 'human', 'Creator cancelled bounty', '');
+  emitFeedEvent('bounty:cancelled', { bountyId: req.params.id });
   res.json({ success: true });
 });
 
@@ -3002,6 +3078,35 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
   if (bounty.creator_wallet.toLowerCase() !== clientWallet.toLowerCase()) return res.status(403).json({ error: 'Only bounty creator can fund' });
   if (bounty.escrow_status !== 'none') return res.status(409).json({ error: `Bounty already in escrow state: ${bounty.escrow_status}` });
 
+  // Proposal mode: enforce selection-first, exact amount match, then auto-claim to selected agent
+  let selectedAgent = null;
+  if (bounty.selection_mode === 'proposal') {
+    if (bounty.status !== 'proposal_selected' || !bounty.selected_proposal_id) {
+      return res.status(409).json({
+        error: 'Proposal-mode bounty must have a selected proposal before funding. Accept a proposal first.'
+      });
+    }
+    if (Math.abs(parseFloat(budgetUsdc) - parseFloat(bounty.amount_usdc)) > 0.001) {
+      return res.status(400).json({
+        error: `budgetUsdc must match accepted proposal price (${bounty.amount_usdc} USDC)`,
+        expected: bounty.amount_usdc,
+        provided: budgetUsdc,
+      });
+    }
+    const proposal = await stmts.getProposalById(bounty.selected_proposal_id);
+    if (!proposal || proposal.status !== 'accepted') {
+      return res.status(409).json({ error: 'Selected proposal is no longer valid' });
+    }
+    selectedAgent = await stmts.getAgentById(proposal.proposer_agent_id);
+    if (!selectedAgent) return res.status(404).json({ error: 'Selected proposer agent not found' });
+    if (!selectedAgent.turnkey_address) {
+      return res.status(400).json({
+        error: 'Selected agent has no Turnkey wallet — cannot receive payment. Reject this proposal and pick another, or ask agent to create a wallet first.',
+        action_required: 'create_wallet_or_reject',
+      });
+    }
+  }
+
   // Verify transaction on-chain if txHash is provided
   if (txHash) {
     console.log(`Verifying transaction ${txHash} for bounty ${req.params.id}...`);
@@ -3028,6 +3133,53 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
 
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(); // 72h from fund
+
+  if (bounty.selection_mode === 'proposal' && selectedAgent) {
+    // Atomic fund + auto-claim for proposal-selected bounty
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Re-check selection inside transaction to defend against race with reject/withdraw
+      const fresh = (await client.query('SELECT status, selected_proposal_id, escrow_status FROM bounties WHERE id = $1 FOR UPDATE', [req.params.id])).rows[0];
+      if (!fresh || fresh.status !== 'proposal_selected' || !fresh.selected_proposal_id || fresh.escrow_status !== 'none') {
+        throw new Error(`Race: bounty state changed (status=${fresh?.status}, escrow=${fresh?.escrow_status})`);
+      }
+      // Mark escrow funded
+      await client.query(
+        `UPDATE bounties SET escrow_status = 'funded', escrow_budget_usdc = $1, escrow_tx_hash = $2, expires_at = $3, updated_at = $4 WHERE id = $5`,
+        [parseFloat(budgetUsdc), txHash || '', expiresAt, now, req.params.id]
+      );
+      // Auto-claim to selected agent
+      await client.query(
+        `UPDATE bounties SET provider_agent_id = $1, provider_wallet = $2, escrow_status = 'claimed', status = 'assigned', claimed_at = $3, updated_at = $3 WHERE id = $4`,
+        [selectedAgent.id, selectedAgent.turnkey_address || selectedAgent.owner_wallet, now, req.params.id]
+      );
+      // Log both events
+      const ev1 = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const ev2 = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-c`;
+      await client.query(
+        `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [ev1, req.params.id, 'funded', clientWallet, 'human', `${budgetUsdc} USDC locked (proposal mode)`, txHash || '', now]
+      );
+      await client.query(
+        `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [ev2, req.params.id, 'claimed', selectedAgent.owner_wallet, 'agent', `Auto-claimed by ${selectedAgent.agent_name} (selected proposal)`, '', now]
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+      return res.status(409).json({ error: err.message });
+    }
+    client.release();
+
+    emitFeedEvent('escrow:funded', { bountyId: req.params.id, budgetUsdc, mode: 'proposal' });
+    emitFeedEvent('escrow:claimed', { bountyId: req.params.id, agentId: selectedAgent.id, agentName: selectedAgent.agent_name });
+    await createNotification({ agentId: selectedAgent.id, type: 'system', title: 'Bounty Funded — You Can Start', message: `"${bounty.title}" has been funded with ${budgetUsdc} USDC. Begin work and submit your deliverable.`, from: clientWallet });
+    return res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
+  }
+
+  // First-come path (existing behavior)
   await stmts.updateBountyEscrow({ escrow_status: 'funded', escrow_budget_usdc: parseFloat(budgetUsdc), escrow_tx_hash: txHash || '', expires_at: expiresAt, updated_at: now, id: req.params.id });
   await logEscrowEvent(req.params.id, 'funded', clientWallet, 'human', `${budgetUsdc} USDC locked`, txHash);
   emitFeedEvent('escrow:funded', { bountyId: req.params.id, budgetUsdc });
@@ -3051,6 +3203,12 @@ app.post('/api/bounties/:id/claim', async (req, res) => {
 
   const bounty = await stmts.getBountyById(req.params.id);
   if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+  if (bounty.selection_mode === 'proposal') {
+    return res.status(409).json({
+      error: 'This bounty uses proposal selection. Submit a proposal via POST /api/bounties/:id/proposals instead.',
+      hint: 'Use bard_submit_proposal MCP tool or the proposal endpoint.'
+    });
+  }
   if (bounty.status !== 'open' || !['funded', 'none'].includes(bounty.escrow_status)) {
     return res.status(409).json({ error: 'Bounty is not available for claiming' });
   }
@@ -3430,6 +3588,504 @@ app.get('/api/bounties/:id/escrow', async (req, res) => {
   const events = await stmts.getEscrowEvents(req.params.id);
   const decisions = await stmts.getVerificationDecisions(req.params.id);
   res.json({ bounty, events, decisions });
+});
+
+// ══════════════════════════════════════════════════════
+// ── Bounty Proposals (Hybrid Mode) ──
+// ══════════════════════════════════════════════════════
+
+// Helper: validate that portfolio_refs all belong to the agent's owner_wallet
+async function validatePortfolioRefs(refs, ownerWallet) {
+  if (!Array.isArray(refs) || refs.length === 0) return { valid: true };
+  const wallet = (ownerWallet || '').toLowerCase();
+  const { rows } = await pool.query(
+    `SELECT id FROM portfolio WHERE id = ANY($1::text[]) AND LOWER(wallet) = $2`,
+    [refs, wallet]
+  );
+  if (rows.length !== refs.length) {
+    return { valid: false, error: 'One or more portfolio_refs do not belong to your wallet' };
+  }
+  return { valid: true };
+}
+
+// POST /api/bounties/:id/proposals — Agent submits a proposal
+app.post('/api/bounties/:id/proposals', requireAuth, async (req, res) => {
+  try {
+    const { plan, proposedPriceUsdc, estimatedHours, portfolioRefs } = req.body;
+    if (!plan || !proposedPriceUsdc) {
+      return res.status(400).json({ error: 'plan and proposedPriceUsdc required' });
+    }
+    if (typeof plan !== 'string' || plan.length < 10) {
+      return res.status(400).json({ error: 'plan must be at least 10 characters' });
+    }
+    if (plan.length > 8000) {
+      return res.status(400).json({ error: 'plan must be 8000 characters or less' });
+    }
+    const price = parseFloat(proposedPriceUsdc);
+    if (isNaN(price) || price < 1) {
+      return res.status(400).json({ error: 'proposedPriceUsdc must be at least 1 USDC' });
+    }
+    const hours = parseInt(estimatedHours) || 0;
+    if (hours < 0 || hours > 10000) {
+      return res.status(400).json({ error: 'estimatedHours must be 0–10000' });
+    }
+    const refs = Array.isArray(portfolioRefs) ? portfolioRefs : [];
+
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+    if (bounty.selection_mode !== 'proposal') {
+      return res.status(409).json({ error: 'This bounty is first-come — use POST /api/bounties/:id/claim instead' });
+    }
+    if (bounty.status !== 'proposal_open') {
+      return res.status(409).json({ error: `Bounty is not accepting proposals (status: ${bounty.status})` });
+    }
+    if (bounty.proposal_deadline && new Date(bounty.proposal_deadline) < new Date()) {
+      return res.status(409).json({ error: 'Proposal deadline has passed' });
+    }
+
+    const agent = await stmts.getAgentById(req.auth.agentId);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+    if (agent.reputation_score < (bounty.min_reputation || 0)) {
+      return res.status(403).json({ error: `Agent needs reputation >= ${bounty.min_reputation}` });
+    }
+    if (!(await checkRateLimit(agent.id, 'bounty_propose'))) {
+      return res.status(429).json({ error: 'Rate limit exceeded — max 5 proposals per hour' });
+    }
+
+    const portfolioCheck = await validatePortfolioRefs(refs, agent.owner_wallet);
+    if (!portfolioCheck.valid) {
+      return res.status(400).json({ error: portfolioCheck.error });
+    }
+
+    // Check if this agent already has a proposal (UNIQUE constraint will catch it too)
+    const existing = await stmts.getProposalByBountyAndAgent(req.params.id, agent.id);
+    if (existing) {
+      return res.status(409).json({
+        error: 'You already submitted a proposal for this bounty. Use PUT to update it.',
+        existing_proposal_id: existing.id,
+      });
+    }
+
+    const id = `proposal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const now = new Date().toISOString();
+    await stmts.insertProposal({
+      id, bounty_id: req.params.id,
+      proposer_agent_id: agent.id,
+      proposer_wallet: (agent.owner_wallet || '').toLowerCase(),
+      plan,
+      proposed_price_usdc: price,
+      estimated_hours: hours,
+      portfolio_refs: JSON.stringify(refs),
+      created_at: now, updated_at: now,
+    });
+
+    await createNotification({
+      wallet: bounty.creator_wallet,
+      type: 'system',
+      title: 'New Proposal',
+      message: `${agent.agent_name} proposed ${price} USDC for "${bounty.title}".`,
+      from: agent.owner_wallet,
+    });
+    emitFeedEvent('proposal:submitted', { bountyId: req.params.id, proposalId: id, agentId: agent.id });
+
+    res.json({ success: true, proposal: await stmts.getProposalById(id) });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'You already submitted a proposal for this bounty' });
+    }
+    console.error('Submit proposal error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/bounties/:id/proposals — List proposals (creator only — or proposer sees own)
+app.get('/api/bounties/:id/proposals', async (req, res) => {
+  try {
+    const callerWallet = (req.query.callerWallet || '').toLowerCase();
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+
+    const isCreator = bounty.creator_wallet.toLowerCase() === callerWallet;
+    const proposals = await stmts.getProposalsByBounty(req.params.id);
+    // If not the creator, only return the caller's own proposal (if any)
+    const visible = isCreator
+      ? proposals
+      : proposals.filter((p) => (p.proposer_wallet || '').toLowerCase() === callerWallet);
+
+    res.json({ proposals: visible, isCreator });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/bounties/:id/proposals/mine — Agent's own proposal for this bounty
+app.get('/api/bounties/:id/proposals/mine', requireAuth, async (req, res) => {
+  try {
+    const proposal = await stmts.getProposalByBountyAndAgent(req.params.id, req.auth.agentId);
+    if (!proposal) return res.status(404).json({ error: 'No proposal found' });
+    res.json({ proposal });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/agents/:id/proposals — All proposals by an agent
+app.get('/api/agents/:id/proposals', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) {
+      return res.status(403).json({ error: 'Can only view your own proposals' });
+    }
+    const proposals = await stmts.getProposalsByAgent(req.params.id);
+    res.json({ proposals });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/bounties/:id/proposals/:proposalId — Update own proposal
+app.put('/api/bounties/:id/proposals/:proposalId', requireAuth, async (req, res) => {
+  try {
+    const proposal = await stmts.getProposalById(req.params.proposalId);
+    if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
+    if (proposal.bounty_id !== req.params.id) return res.status(400).json({ error: 'Proposal does not belong to this bounty' });
+    if (proposal.proposer_agent_id !== req.auth.agentId) {
+      return res.status(403).json({ error: 'You can only update your own proposal' });
+    }
+    if (proposal.status !== 'pending') {
+      return res.status(409).json({ error: `Cannot update proposal in status: ${proposal.status}` });
+    }
+
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (!bounty || bounty.status !== 'proposal_open') {
+      return res.status(409).json({ error: 'Bounty is no longer accepting proposal updates' });
+    }
+
+    const { plan, proposedPriceUsdc, estimatedHours, portfolioRefs } = req.body;
+    const newPlan = plan !== undefined ? plan : proposal.plan;
+    const newPrice = proposedPriceUsdc !== undefined ? parseFloat(proposedPriceUsdc) : proposal.proposed_price_usdc;
+    const newHours = estimatedHours !== undefined ? parseInt(estimatedHours) : proposal.estimated_hours;
+    const newRefs = portfolioRefs !== undefined ? portfolioRefs : JSON.parse(proposal.portfolio_refs || '[]');
+
+    if (newPlan.length < 10 || newPlan.length > 8000) {
+      return res.status(400).json({ error: 'plan must be 10–8000 characters' });
+    }
+    if (isNaN(newPrice) || newPrice < 1) {
+      return res.status(400).json({ error: 'proposedPriceUsdc must be at least 1 USDC' });
+    }
+
+    if (Array.isArray(newRefs) && newRefs.length > 0) {
+      const agent = await stmts.getAgentById(req.auth.agentId);
+      const portfolioCheck = await validatePortfolioRefs(newRefs, agent.owner_wallet);
+      if (!portfolioCheck.valid) return res.status(400).json({ error: portfolioCheck.error });
+    }
+
+    const now = new Date().toISOString();
+    await stmts.updateProposal({
+      id: req.params.proposalId,
+      plan: newPlan,
+      proposed_price_usdc: newPrice,
+      estimated_hours: newHours,
+      portfolio_refs: JSON.stringify(Array.isArray(newRefs) ? newRefs : []),
+      updated_at: now,
+    });
+
+    res.json({ success: true, proposal: await stmts.getProposalById(req.params.proposalId) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/bounties/:id/proposals/:proposalId — Withdraw own proposal
+app.delete('/api/bounties/:id/proposals/:proposalId', requireAuth, async (req, res) => {
+  try {
+    const proposal = await stmts.getProposalById(req.params.proposalId);
+    if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
+    if (proposal.bounty_id !== req.params.id) return res.status(400).json({ error: 'Proposal does not belong to this bounty' });
+    if (proposal.proposer_agent_id !== req.auth.agentId) {
+      return res.status(403).json({ error: 'You can only withdraw your own proposal' });
+    }
+    if (proposal.status !== 'pending') {
+      return res.status(409).json({ error: `Cannot withdraw proposal in status: ${proposal.status}` });
+    }
+
+    const now = new Date().toISOString();
+    await stmts.withdrawProposal({ id: req.params.proposalId, withdrawn_at: now });
+
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (bounty) {
+      await createNotification({
+        wallet: bounty.creator_wallet,
+        type: 'system',
+        title: 'Proposal Withdrawn',
+        message: `An agent withdrew their proposal for "${bounty.title}".`,
+        from: 'BARD System',
+      });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/bounties/:id/proposals/:proposalId/accept — Creator selects proposal (atomic)
+app.post('/api/bounties/:id/proposals/:proposalId/accept', async (req, res) => {
+  const { callerWallet } = req.body;
+  if (!callerWallet) return res.status(400).json({ error: 'callerWallet required' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Re-read bounty + proposal under transaction lock
+    const bountyRow = (await client.query('SELECT * FROM bounties WHERE id = $1 FOR UPDATE', [req.params.id])).rows[0];
+    if (!bountyRow) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(404).json({ error: 'Bounty not found' });
+    }
+    if (bountyRow.creator_wallet.toLowerCase() !== callerWallet.toLowerCase()) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(403).json({ error: 'Only the creator can accept proposals' });
+    }
+    if (bountyRow.selection_mode !== 'proposal') {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(409).json({ error: 'Bounty does not use proposal mode' });
+    }
+    if (bountyRow.status !== 'proposal_open') {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(409).json({ error: `Bounty is not in proposal_open state (current: ${bountyRow.status})` });
+    }
+
+    const propRow = (await client.query('SELECT * FROM bounty_proposals WHERE id = $1 FOR UPDATE', [req.params.proposalId])).rows[0];
+    if (!propRow) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(404).json({ error: 'Proposal not found' });
+    }
+    if (propRow.bounty_id !== req.params.id) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(400).json({ error: 'Proposal does not belong to this bounty' });
+    }
+    if (propRow.status !== 'pending') {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(409).json({ error: `Cannot accept proposal in status: ${propRow.status}` });
+    }
+
+    const now = new Date().toISOString();
+    const acceptedPrice = parseFloat(propRow.proposed_price_usdc);
+
+    // Mark this proposal accepted
+    await client.query(
+      `UPDATE bounty_proposals SET status = 'accepted', accepted_at = $1, updated_at = $1 WHERE id = $2`,
+      [now, req.params.proposalId]
+    );
+
+    // Update bounty: set selected, transition to proposal_selected, snapshot price
+    await client.query(
+      `UPDATE bounties SET selected_proposal_id = $1, status = 'proposal_selected', amount_usdc = $2, updated_at = $3 WHERE id = $4`,
+      [req.params.proposalId, String(acceptedPrice), now, req.params.id]
+    );
+
+    // Auto-reject all other pending proposals on this bounty
+    const { rows: others } = await client.query(
+      `SELECT id, proposer_agent_id FROM bounty_proposals WHERE bounty_id = $1 AND status = 'pending' AND id <> $2`,
+      [req.params.id, req.params.proposalId]
+    );
+    for (const o of others) {
+      await client.query(
+        `UPDATE bounty_proposals SET status = 'rejected', rejected_at = $1, rejection_reason = $2, updated_at = $1 WHERE id = $3`,
+        [now, 'Another proposal was selected', o.id]
+      );
+    }
+
+    await client.query('COMMIT');
+    client.release();
+
+    // Post-commit notifications + events
+    await logEscrowEvent(req.params.id, 'proposal_accepted', callerWallet, 'human', `Proposal ${req.params.proposalId} accepted at ${acceptedPrice} USDC`, '');
+    await createNotification({
+      agentId: propRow.proposer_agent_id,
+      type: 'system',
+      title: 'Proposal Accepted!',
+      message: `Your proposal for "${bountyRow.title}" was accepted. Awaiting client funding.`,
+      from: callerWallet,
+    });
+    for (const o of others) {
+      await createNotification({
+        agentId: o.proposer_agent_id,
+        type: 'system',
+        title: 'Proposal Not Selected',
+        message: `Your proposal for "${bountyRow.title}" was not selected. Another proposal was accepted.`,
+        from: callerWallet,
+      });
+    }
+    emitFeedEvent('proposal:accepted', { bountyId: req.params.id, proposalId: req.params.proposalId });
+
+    res.json({
+      success: true,
+      bounty: await stmts.getBountyById(req.params.id),
+      acceptedProposalId: req.params.proposalId,
+      rejectedProposalCount: others.length,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    client.release();
+    console.error('Accept proposal error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/bounties/:id/proposals/:proposalId/reject — Creator rejects a specific proposal
+app.post('/api/bounties/:id/proposals/:proposalId/reject', async (req, res) => {
+  try {
+    const { callerWallet, reason } = req.body;
+    if (!callerWallet) return res.status(400).json({ error: 'callerWallet required' });
+
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+    if (bounty.creator_wallet.toLowerCase() !== callerWallet.toLowerCase()) {
+      return res.status(403).json({ error: 'Only the creator can reject proposals' });
+    }
+    if (bounty.status !== 'proposal_open') {
+      return res.status(409).json({ error: `Cannot reject proposals in bounty status: ${bounty.status}` });
+    }
+    const proposal = await stmts.getProposalById(req.params.proposalId);
+    if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
+    if (proposal.bounty_id !== req.params.id) return res.status(400).json({ error: 'Proposal does not belong to this bounty' });
+    if (proposal.status !== 'pending') {
+      return res.status(409).json({ error: `Cannot reject proposal in status: ${proposal.status}` });
+    }
+
+    const now = new Date().toISOString();
+    await stmts.rejectProposal({ id: req.params.proposalId, rejected_at: now, rejection_reason: reason || '' });
+
+    await createNotification({
+      agentId: proposal.proposer_agent_id,
+      type: 'system',
+      title: 'Proposal Rejected',
+      message: reason
+        ? `Your proposal for "${bounty.title}" was rejected: ${reason}`
+        : `Your proposal for "${bounty.title}" was rejected.`,
+      from: callerWallet,
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Bounty Messages (Creator <-> Proposer Threads) ──
+
+// POST /api/bounties/:id/messages — Send a message in the thread
+app.post('/api/bounties/:id/messages', async (req, res) => {
+  try {
+    const { proposalId, message, callerWallet, callerAgentId } = req.body;
+    if (!proposalId || !message || !callerWallet) {
+      return res.status(400).json({ error: 'proposalId, message, and callerWallet required' });
+    }
+    if (typeof message !== 'string' || message.trim().length === 0) {
+      return res.status(400).json({ error: 'message must be non-empty' });
+    }
+    if (message.length > 4000) {
+      return res.status(400).json({ error: 'message must be 4000 characters or less' });
+    }
+
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+    const proposal = await stmts.getProposalById(proposalId);
+    if (!proposal || proposal.bounty_id !== req.params.id) {
+      return res.status(404).json({ error: 'Proposal not found' });
+    }
+
+    const caller = (callerWallet || '').toLowerCase();
+    const isCreator = bounty.creator_wallet.toLowerCase() === caller;
+    const isProposer = (proposal.proposer_wallet || '').toLowerCase() === caller;
+    if (!isCreator && !isProposer) {
+      return res.status(403).json({ error: 'Only the creator or proposer can use this thread' });
+    }
+
+    if (!(await checkRateLimit(caller, 'bounty_message'))) {
+      return res.status(429).json({ error: 'Rate limit exceeded — max 60 messages per hour' });
+    }
+
+    // Resolve recipient
+    const toWallet = isCreator ? proposal.proposer_wallet : bounty.creator_wallet;
+    const toAgentId = isCreator ? proposal.proposer_agent_id : null;
+    const fromAgentId = isProposer ? proposal.proposer_agent_id : (callerAgentId || null);
+
+    const id = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const now = new Date().toISOString();
+    await stmts.insertBountyMessage({
+      id,
+      bounty_id: req.params.id,
+      proposal_id: proposalId,
+      from_wallet: caller,
+      from_agent_id: fromAgentId,
+      to_wallet: toWallet,
+      to_agent_id: toAgentId,
+      message: message.trim(),
+      created_at: now,
+    });
+
+    // Notify the other party
+    if (toAgentId) {
+      await createNotification({
+        agentId: toAgentId,
+        type: 'system',
+        title: 'New Message',
+        message: `New message about "${bounty.title}": ${message.slice(0, 80)}${message.length > 80 ? '…' : ''}`,
+        from: caller,
+      });
+    } else {
+      await createNotification({
+        wallet: toWallet,
+        type: 'system',
+        title: 'New Message',
+        message: `New message about "${bounty.title}": ${message.slice(0, 80)}${message.length > 80 ? '…' : ''}`,
+        from: caller,
+      });
+    }
+    emitFeedEvent('bounty:message', { bountyId: req.params.id, proposalId, from: caller });
+    res.json({ success: true, id });
+  } catch (err) {
+    console.error('Send message error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/bounties/:id/messages?proposalId=... — Get thread messages
+app.get('/api/bounties/:id/messages', async (req, res) => {
+  try {
+    const proposalId = req.query.proposalId;
+    const callerWallet = (req.query.callerWallet || '').toLowerCase();
+    if (!proposalId) return res.status(400).json({ error: 'proposalId query param required' });
+
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+    const proposal = await stmts.getProposalById(proposalId);
+    if (!proposal || proposal.bounty_id !== req.params.id) {
+      return res.status(404).json({ error: 'Proposal not found' });
+    }
+
+    const isCreator = bounty.creator_wallet.toLowerCase() === callerWallet;
+    const isProposer = (proposal.proposer_wallet || '').toLowerCase() === callerWallet;
+    if (!isCreator && !isProposer) {
+      return res.status(403).json({ error: 'Only the creator or proposer can read this thread' });
+    }
+
+    const messages = await stmts.getBountyMessages(req.params.id, proposalId);
+    // Mark unread messages addressed to caller as read
+    await stmts.markMessagesRead(req.params.id, proposalId, callerWallet);
+
+    res.json({ messages, isCreator, isProposer });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════
