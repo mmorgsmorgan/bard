@@ -1348,7 +1348,41 @@ app.get('/api/agents/:id', async (req, res) => {
   const agent = await stmts.getAgentById(req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   const reputation = await calculateReputation(req.params.id);
-  res.json({ agent: agentToJSON(agent), reputation });
+
+  // Add performance analytics for swarm agents
+  let performance = null;
+  if (agent.agent_type === 'swarm') {
+    const { rows: executions } = await pool.query(
+      `SELECT
+        COUNT(*) as total_executions,
+        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_executions,
+        COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_executions,
+        AVG(CASE WHEN status = 'completed' THEN swarms_cost_usd END) as avg_cost_usd,
+        AVG(CASE WHEN status = 'completed' THEN total_charged_usd END) as avg_total_charged_usd,
+        AVG(CASE WHEN status = 'completed' AND completed_at IS NOT NULL AND started_at IS NOT NULL
+          THEN EXTRACT(EPOCH FROM (completed_at::timestamp - started_at::timestamp)) END) as avg_completion_time_seconds
+      FROM swarm_executions
+      WHERE agent_id = $1`,
+      [req.params.id]
+    );
+
+    const stats = executions[0];
+    const totalExecs = parseInt(stats.total_executions) || 0;
+    const completedExecs = parseInt(stats.completed_executions) || 0;
+
+    performance = {
+      total_executions: totalExecs,
+      completed_executions: completedExecs,
+      failed_executions: parseInt(stats.failed_executions) || 0,
+      success_rate: totalExecs > 0 ? (completedExecs / totalExecs * 100).toFixed(1) : '0.0',
+      avg_cost_usd: stats.avg_cost_usd ? parseFloat(stats.avg_cost_usd).toFixed(2) : '0.00',
+      avg_total_charged_usd: stats.avg_total_charged_usd ? parseFloat(stats.avg_total_charged_usd).toFixed(2) : '0.00',
+      avg_completion_time_seconds: stats.avg_completion_time_seconds ? Math.round(stats.avg_completion_time_seconds) : 0,
+      avg_completion_time_minutes: stats.avg_completion_time_seconds ? (stats.avg_completion_time_seconds / 60).toFixed(1) : '0.0'
+    };
+  }
+
+  res.json({ agent: agentToJSON(agent), reputation, performance });
 });
 
 // Get all active agents (leaderboard)
@@ -3048,6 +3082,83 @@ app.get('/api/bounties/:id/escrow', async (req, res) => {
 // ══════════════════════════════════════════════════════
 // ── Swarms API Integration ──
 // ══════════════════════════════════════════════════════
+
+// POST /api/swarms/estimate — Estimate swarm execution cost
+app.post('/api/swarms/estimate', async (req, res) => {
+  try {
+    const { agentId, task } = req.body;
+    if (!agentId || !task) {
+      return res.status(400).json({ error: 'agentId and task required' });
+    }
+
+    const agent = await stmts.getAgentById(agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+
+    if (agent.agent_type !== 'swarm' || !agent.swarm_config) {
+      return res.status(400).json({ error: 'Agent is not a swarm type' });
+    }
+
+    // Parse swarm config
+    let swarmConfig;
+    try {
+      swarmConfig = typeof agent.swarm_config === 'string'
+        ? JSON.parse(agent.swarm_config)
+        : agent.swarm_config;
+    } catch (err) {
+      return res.status(500).json({ error: 'Invalid swarm configuration' });
+    }
+
+    // Calculate estimated cost based on historical data
+    const { rows: avgCosts } = await pool.query(
+      `SELECT
+        AVG(swarms_cost_usd) as avg_swarms_cost,
+        AVG(total_charged_usd) as avg_total_cost,
+        COUNT(*) as execution_count
+      FROM swarm_executions
+      WHERE agent_id = $1 AND status = 'completed'`,
+      [agentId]
+    );
+
+    const historicalData = avgCosts[0];
+    const hasHistory = parseInt(historicalData.execution_count) > 0;
+
+    // Estimate based on history or defaults
+    let estimatedSwarmsCost;
+    if (hasHistory) {
+      estimatedSwarmsCost = parseFloat(historicalData.avg_swarms_cost);
+    } else {
+      // Rough estimate: $0.10 per agent in swarm
+      const agentCount = swarmConfig.agents?.length || 1;
+      estimatedSwarmsCost = agentCount * 0.10;
+    }
+
+    // Calculate platform markup
+    const isPlatformOwned = agent.is_platform_owned === 1;
+    const platformMarkup = isPlatformOwned ? estimatedSwarmsCost * (SWARMS_PLATFORM_MARKUP_PCT / 100) : 0;
+    const totalEstimated = estimatedSwarmsCost + platformMarkup;
+
+    res.json({
+      agent_id: agentId,
+      agent_name: agent.agent_name,
+      swarm_type: swarmConfig.swarm_type || 'SequentialWorkflow',
+      agent_count: swarmConfig.agents?.length || 0,
+      estimated_swarms_cost_usd: estimatedSwarmsCost.toFixed(2),
+      platform_markup_usd: platformMarkup.toFixed(2),
+      platform_markup_pct: isPlatformOwned ? SWARMS_PLATFORM_MARKUP_PCT : 0,
+      total_estimated_usd: totalEstimated.toFixed(2),
+      based_on_history: hasHistory,
+      historical_executions: parseInt(historicalData.execution_count) || 0,
+      note: hasHistory
+        ? `Estimate based on ${historicalData.execution_count} completed executions`
+        : 'Estimate based on agent count (no execution history)'
+    });
+  } catch (error) {
+    console.error('Cost estimation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // POST /api/swarms/validate-key — Test a user's Swarms API key
 app.post('/api/swarms/validate-key', async (req, res) => {
