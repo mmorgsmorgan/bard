@@ -132,6 +132,8 @@ const RATE_LIMITS = {
   'escrow_review': { max: 10, window: 3600 },
   'escrow_verify': { max: 5, window: 3600 },
   'skill_register': { max: 20, window: 3600 },
+  'auth_challenge': { max: 10, window: 60 },  // 10 challenges per minute per IP
+  'auth_verify': { max: 10, window: 60 },     // 10 verify attempts per minute per IP
 };
 
 async function checkRateLimit(key, action) {
@@ -405,6 +407,12 @@ function emitFeedEvent(type, data) {
 // ── JWT Auth ──
 const JWT_SECRET = process.env.JWT_SECRET || createHash('sha256').update('bard-dev-' + (process.env.SELLER_ADDRESS || 'local')).digest('hex');
 const JWT_EXPIRY = '7d';
+
+// Require JWT_SECRET in production
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET must be set in production for security');
+  process.exit(1);
+}
 
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
@@ -1488,7 +1496,11 @@ app.get('/api/agents', async (req, res) => {
 
   if (availability) { sql += ` AND availability = $${i}`; params.push(availability); i++; }
   if (min_reputation) { sql += ` AND reputation_score >= $${i}`; params.push(parseInt(min_reputation)); i++; }
-  if (specialization) { sql += " AND specializations LIKE '%" + specialization.replace(/'/g, '') + "%'"; }
+  if (specialization) {
+    sql += ` AND specializations LIKE $${i}`;
+    params.push(`%${specialization}%`);
+    i++;
+  }
 
   if (sort === 'reputation') sql += ' ORDER BY reputation_score DESC';
   else if (sort === 'earned') sql += ' ORDER BY total_earned_usdc DESC';
@@ -3315,10 +3327,10 @@ app.get('/api/swarms/executions/:id', async (req, res) => {
 });
 
 // POST /api/swarms/executions/:id/cancel — Cancel a running swarm execution
-app.post('/api/swarms/executions/:id/cancel', async (req, res) => {
+app.post('/api/swarms/executions/:id/cancel', requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
-    const { callerWallet } = req.body;
+    const callerWallet = req.auth.wallet; // From JWT authentication
 
     // Fetch execution
     const result = await pool.query('SELECT * FROM swarm_executions WHERE id = $1', [id]);
@@ -3348,8 +3360,8 @@ app.post('/api/swarms/executions/:id/cancel', async (req, res) => {
     }
 
     // Authorization: bounty creator or agent owner can cancel
-    const isCreator = callerWallet && bounty.creator_wallet.toLowerCase() === callerWallet.toLowerCase();
-    const isAgentOwner = callerWallet && agent.owner_wallet.toLowerCase() === callerWallet.toLowerCase();
+    const isCreator = bounty.creator_wallet.toLowerCase() === callerWallet.toLowerCase();
+    const isAgentOwner = agent.owner_wallet.toLowerCase() === callerWallet.toLowerCase();
 
     if (!isCreator && !isAgentOwner) {
       return res.status(403).json({
@@ -3629,6 +3641,11 @@ app.get('/api/verification/stats', async (req, res) => {
 
 // POST /api/auth/challenge — Step 1: Get a challenge to sign
 app.post('/api/auth/challenge', async (req, res) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (!(await checkRateLimit(ip, 'auth_challenge'))) {
+    return res.status(429).json({ error: 'Too many challenge requests. Please try again later.' });
+  }
+
   const { agentId } = req.body;
 
   // Validate agent exists if provided
@@ -3655,6 +3672,11 @@ app.post('/api/auth/challenge', async (req, res) => {
 
 // POST /api/auth/verify — Step 2: Submit signed challenge, get JWT token
 app.post('/api/auth/verify', async (req, res) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (!(await checkRateLimit(ip, 'auth_verify'))) {
+    return res.status(429).json({ error: 'Too many verification attempts. Please try again later.' });
+  }
+
   const { challengeId, signature, wallet } = req.body;
   if (!challengeId || !signature || !wallet) {
     return res.status(400).json({ error: 'challengeId, signature, and wallet required' });
