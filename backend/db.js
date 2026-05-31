@@ -418,6 +418,10 @@ export async function initSchema() {
     `CREATE INDEX IF NOT EXISTS idx_agent_skills_status ON agent_skills(status)`,
     `CREATE INDEX IF NOT EXISTS idx_escrow_events_bounty ON escrow_events(bounty_id)`,
     `CREATE INDEX IF NOT EXISTS idx_verification_decisions_bounty ON verification_decisions(bounty_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_bounties_swarm_execution ON bounties(swarm_execution_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_swarm_executions_bounty ON swarm_executions(bounty_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_swarm_executions_agent ON swarm_executions(agent_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_swarm_executions_status ON swarm_executions(status)`,
   ];
 
   for (const sql of statements) {

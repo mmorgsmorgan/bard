@@ -783,9 +783,22 @@ app.post('/api/upload/portfolio', upload.single('file'), async (req, res) => {
     let url, filename;
 
     if (isR2Enabled) {
-      // Upload to R2
-      filename = generateFilename(req.file.originalname, req.body.wallet);
-      url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+      try {
+        // Upload to R2
+        filename = generateFilename(req.file.originalname, req.body.wallet);
+        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+      } catch (r2Error) {
+        console.error('R2 upload failed, falling back to local storage:', r2Error.message);
+        // Fallback to local disk storage
+        const wallet = (req.body.wallet || 'unknown').toLowerCase().slice(0, 12);
+        const ext = path.extname(req.file.originalname) || '.png';
+        filename = `${wallet}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+        const dir = path.join(UPLOADS_DIR, 'portfolio');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, filename);
+        fs.writeFileSync(filePath, req.file.buffer);
+        url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
+      }
     } else {
       // Local disk storage
       filename = req.file.filename;
@@ -805,9 +818,22 @@ app.post('/api/upload/pfp', upload.single('file'), async (req, res) => {
     let url, filename;
 
     if (isR2Enabled) {
-      // Upload to R2
-      filename = generateFilename(req.file.originalname, req.body.wallet);
-      url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'pfp');
+      try {
+        // Upload to R2
+        filename = generateFilename(req.file.originalname, req.body.wallet);
+        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'pfp');
+      } catch (r2Error) {
+        console.error('R2 upload failed, falling back to local storage:', r2Error.message);
+        // Fallback to local disk storage
+        const wallet = (req.body.wallet || 'unknown').toLowerCase().slice(0, 12);
+        const ext = path.extname(req.file.originalname) || '.png';
+        filename = `${wallet}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+        const dir = path.join(UPLOADS_DIR, 'pfp');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, filename);
+        fs.writeFileSync(filePath, req.file.buffer);
+        url = `${req.protocol}://${req.get('host')}/uploads/pfp/${filename}`;
+      }
     } else {
       // Local disk storage
       filename = req.file.filename;
@@ -865,9 +891,22 @@ app.post('/api/upload/proof', upload.single('file'), async (req, res) => {
     let url, filename;
 
     if (isR2Enabled) {
-      // Upload to R2
-      filename = generateFilename(req.file.originalname, wallet);
-      url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+      try {
+        // Upload to R2
+        filename = generateFilename(req.file.originalname, wallet);
+        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
+      } catch (r2Error) {
+        console.error('R2 upload failed, falling back to local storage:', r2Error.message);
+        // Fallback to local disk storage
+        const walletPrefix = (wallet || 'unknown').toLowerCase().slice(0, 12);
+        const ext = path.extname(req.file.originalname) || '.png';
+        filename = `${walletPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+        const dir = path.join(UPLOADS_DIR, 'portfolio');
+        fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, filename);
+        fs.writeFileSync(filePath, req.file.buffer);
+        url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
+      }
     } else {
       // Local disk storage
       filename = req.file.filename;
@@ -1091,40 +1130,54 @@ async function executeSwarm(agent, task, bountyId) {
       [executionId, bountyId, agent.id, swarm_type, task, 'running', now, now]
     );
 
-    // Call Swarms API with correct endpoint and format
-    const response = await fetch(`${SWARMS_API_BASE}/v1/swarm/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey
-      },
-      body: JSON.stringify({
-        name: agent.agent_name,
-        description: agent.description || 'BARD swarm execution',
-        task: task,
-        swarm_type: swarm_type,
-        agents: swarmAgents.map(a => ({
-          agent_name: a.role,
-          system_prompt: a.system_prompt,
-          model_name: a.model,
-          description: `${a.role} agent`,
-          role: 'worker'
-        })),
-        max_loops: 1,
-        stream: false
-      })
-    });
+    // Call Swarms API with correct endpoint and format (5 minute timeout)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Swarms API error: ${response.status} ${errorText}`);
+    try {
+      const response = await fetch(`${SWARMS_API_BASE}/v1/swarm/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey
+        },
+        body: JSON.stringify({
+          name: agent.agent_name,
+          description: agent.description || 'BARD swarm execution',
+          task: task,
+          swarm_type: swarm_type,
+          agents: swarmAgents.map(a => ({
+            agent_name: a.role,
+            system_prompt: a.system_prompt,
+            model_name: a.model,
+            description: `${a.role} agent`,
+            role: 'worker'
+          })),
+          max_loops: 1,
+          stream: false
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Swarms API error: ${response.status} ${errorText}`);
+      }
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      if (fetchError.name === 'AbortError') {
+        throw new Error('Swarm execution timed out after 5 minutes');
+      }
+      throw fetchError;
     }
 
     const result = await response.json();
     const deliverable = result.output || result.completion || JSON.stringify(result);
 
-    // Extract cost from response (if available)
-    const swarmsCostUsd = result.total_cost || result.cost_usd || 0.10;
+    // Extract cost from response (default to $1.00 if not provided)
+    const swarmsCostUsd = result.total_cost || result.cost_usd || 1.00;
     const platformMarkupUsd = agent.is_platform_owned === 1
       ? swarmsCostUsd * (SWARMS_PLATFORM_MARKUP_PCT / 100)
       : 0;
@@ -2910,6 +2963,44 @@ app.post('/api/swarms/validate-key', async (req, res) => {
     }
   } catch (error) {
     res.json({ valid: false, error: error.message });
+  }
+});
+
+// GET /api/swarms/executions/:id — Poll swarm execution status
+app.get('/api/swarms/executions/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query('SELECT * FROM swarm_executions WHERE id = $1', [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Execution not found' });
+    }
+
+    const execution = result.rows[0];
+
+    // Return execution details with progress info
+    res.json({
+      execution: {
+        id: execution.id,
+        bounty_id: execution.bounty_id,
+        agent_id: execution.agent_id,
+        swarm_type: execution.swarm_type,
+        task: execution.task,
+        status: execution.status,
+        swarms_cost_usd: execution.swarms_cost_usd,
+        platform_markup_usd: execution.platform_markup_usd,
+        total_charged_usd: execution.total_charged_usd,
+        started_at: execution.started_at,
+        completed_at: execution.completed_at,
+        created_at: execution.created_at,
+        // Include response if completed
+        response: execution.status === 'completed' ? execution.swarms_api_response : null
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching swarm execution:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
