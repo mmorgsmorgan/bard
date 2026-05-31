@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
+import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
 import { createHash, randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto';
@@ -63,6 +64,24 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || '')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+// ── Security headers (helmet) ──
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:", "blob:"],
+      connectSrc: ["'self'", "https:", "wss:"],
+      fontSrc: ["'self'", "data:"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+    }
+  },
+  crossOriginEmbedderPolicy: false, // Allow R2 cross-origin loads
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow R2 image loads
+}));
+
 app.use(cors({
   origin: (origin, callback) => {
     const allowed = [...DEFAULT_ALLOWED_ORIGINS, ...ALLOWED_ORIGINS];
@@ -72,6 +91,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id', 'Accept'],
 }));
 app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ══════════════════════════════════════════════════════
 // ── MCP redirect → standalone MCP service ──
@@ -512,12 +532,24 @@ app.get('/api/health', async (req, res) => {
   try {
     const profileCount = (await pool.query('SELECT COUNT(*) as count FROM profiles')).rows[0].count;
     const paymentStats = await stmts.getPaymentStats();
+
+    // Check platform wallet balance (non-blocking, optional)
+    let walletBalance = null;
+    try {
+      const balance = await getPlatformWalletBalance();
+      walletBalance = { balance_usdc: balance.toFixed(2), status: balance > 100 ? 'ok' : 'low' };
+    } catch (err) {
+      walletBalance = { error: 'Balance check unavailable' };
+    }
+
     res.json({
       status: 'ok', uptime: process.uptime(), profiles: Number(profileCount), db: 'postgres',
       x402: !!gateway, sellerAddress: SELLER_ADDRESS,
       payments: { total: Number(paymentStats.total_payments), volumeUSDC: Number(paymentStats.total_amount) },
       storage: isR2Enabled ? 'r2' : 'local',
       r2Bucket: isR2Enabled ? process.env.R2_BUCKET_NAME : null,
+      turnkey: isTurnkeyEnabled(),
+      platformWallet: walletBalance,
     });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
@@ -544,6 +576,81 @@ app.get('/api/storage/stats', async (req, res) => {
       success_rate: stats.total_operations > 0
         ? ((stats.successful_operations / stats.total_operations) * 100).toFixed(1)
         : '0.0'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/platform/wallet/balance — Platform escrow wallet balance and obligations
+app.get('/api/platform/wallet/balance', async (req, res) => {
+  try {
+    // Get on-chain balance
+    const balance = await getPlatformWalletBalance();
+
+    // Calculate pending obligations (funded but not yet released/refunded)
+    const obligationsResult = await pool.query(
+      `SELECT
+        COALESCE(SUM(escrow_budget_usdc), 0) as total_obligations,
+        COUNT(*) as obligation_count
+      FROM bounties
+      WHERE escrow_status IN ('funded', 'claimed', 'submitted', 'client_approved', 'disputed')`
+    );
+
+    const obligations = obligationsResult.rows[0];
+    const totalObligations = parseFloat(obligations.total_obligations) || 0;
+    const obligationCount = parseInt(obligations.obligation_count) || 0;
+    const availableBalance = balance - totalObligations;
+
+    // Determine health status
+    let status = 'healthy';
+    let warning = null;
+    if (availableBalance < 0) {
+      status = 'critical';
+      warning = 'Platform wallet does NOT have enough USDC to cover all obligations!';
+    } else if (availableBalance < 100) {
+      status = 'low';
+      warning = 'Platform wallet balance is running low. Consider refunding.';
+    } else if (availableBalance < 500) {
+      status = 'warning';
+      warning = 'Platform wallet balance is below recommended threshold.';
+    }
+
+    res.json({
+      address: SELLER_ADDRESS,
+      network: 'Arc Testnet',
+      balance_usdc: balance.toFixed(2),
+      pending_obligations_usdc: totalObligations.toFixed(2),
+      pending_obligation_count: obligationCount,
+      available_balance_usdc: availableBalance.toFixed(2),
+      status,
+      warning,
+      explorer_url: `https://testnet.arcscan.app/address/${SELLER_ADDRESS}`
+    });
+  } catch (err) {
+    console.error('Platform wallet balance check failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/platform/wallet/transfers — Recent platform wallet transfers
+app.get('/api/platform/wallet/transfers', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+
+    // Get recent escrow events with transaction hashes
+    const { rows: transfers } = await pool.query(
+      `SELECT id, bounty_id, event_type, actor_wallet, details, tx_hash, created_at
+       FROM escrow_events
+       WHERE event_type IN ('released', 'refunded', 'platform_fee') AND tx_hash != ''
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+
+    res.json({
+      transfers,
+      count: transfers.length
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2774,6 +2881,30 @@ async function verifyTransaction(txHash, expectedFrom, expectedTo, expectedAmoun
   }
 }
 
+// Get USDC balance of platform wallet
+async function getPlatformWalletBalance() {
+  try {
+    // ERC-20 balanceOf(address) returns uint256
+    const balanceWei = await arcTestnetClient.readContract({
+      address: USDC_CONTRACT_ADDRESS,
+      abi: [{
+        name: 'balanceOf',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [{ name: 'account', type: 'address' }],
+        outputs: [{ name: '', type: 'uint256' }],
+      }],
+      functionName: 'balanceOf',
+      args: [SELLER_ADDRESS],
+    });
+
+    return Number(balanceWei) / 1e6; // USDC has 6 decimals
+  } catch (error) {
+    console.error('Failed to get platform wallet balance:', error);
+    throw new Error(`Balance check failed: ${error.message}`);
+  }
+}
+
 // Transfer USDC from platform escrow wallet to recipient
 async function transferUSDCFromPlatform(toAddress, amountUsdc) {
   if (!isTurnkeyEnabled()) {
@@ -2788,7 +2919,13 @@ async function transferUSDCFromPlatform(toAddress, amountUsdc) {
     throw new Error('Amount must be positive');
   }
 
-  console.log(`[Platform Transfer] Sending ${amountUsdc} USDC to ${toAddress}...`);
+  // Check platform wallet balance before attempting transfer
+  const balance = await getPlatformWalletBalance();
+  if (balance < amountUsdc) {
+    throw new Error(`Insufficient platform wallet balance. Required: ${amountUsdc} USDC, Available: ${balance.toFixed(2)} USDC. Please fund the platform wallet.`);
+  }
+
+  console.log(`[Platform Transfer] Sending ${amountUsdc} USDC to ${toAddress}... (balance: ${balance.toFixed(2)} USDC)`);
 
   try {
     const { Turnkey } = await import('@turnkey/sdk-server');
