@@ -34,11 +34,20 @@ const c = {
   cyan: '\x1b[36m', dim: '\x1b[2m', magenta: '\x1b[35m', bold: '\x1b[1m',
 };
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+// BARD_AUTO_PACE=N runs without prompts and sleeps N seconds between
+// transitions — useful when the script is driven by an agent (no TTY)
+// and the user is watching the frontend on a wall clock.
+const AUTO_PACE = parseInt(process.env.BARD_AUTO_PACE || '0', 10);
+const rl = AUTO_PACE > 0 ? null : readline.createInterface({ input: process.stdin, output: process.stdout });
 const pause = (msg) => new Promise((resolve) => {
   console.log(`\n${c.yellow}⏸  ${msg}${c.reset}`);
-  console.log(`${c.dim}   (press Enter to continue, Ctrl-C to stop)${c.reset}`);
-  rl.question('', () => resolve());
+  if (AUTO_PACE > 0) {
+    console.log(`${c.dim}   (auto-pace: sleeping ${AUTO_PACE}s — refresh the frontend now)${c.reset}`);
+    setTimeout(resolve, AUTO_PACE * 1000);
+  } else {
+    console.log(`${c.dim}   (press Enter to continue, Ctrl-C to stop)${c.reset}`);
+    rl.question('', () => resolve());
+  }
 });
 
 // ── HTTP helpers ──────────────────────────────────────
@@ -53,20 +62,29 @@ async function apiFetch(path, opts = {}) {
 }
 
 let rpcId = 0;
-async function mcp(token, method, params = {}) {
+async function mcp(token, method, params = {}, attempt = 1) {
   const id = ++rpcId;
-  const res = await fetch(`${MCP}/mcp`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
-  });
-  if (res.status === 204) return null;
-  const out = await res.json();
-  if (out.error) throw new Error(`MCP ${method}: ${out.error.message}`);
-  return out.result;
+  try {
+    const res = await fetch(`${MCP}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+    });
+    if (res.status === 204) return null;
+    const out = await res.json();
+    if (out.error) throw new Error(`MCP ${method}: ${out.error.message}`);
+    return out.result;
+  } catch (err) {
+    // Retry transient network errors (Railway edge can drop the first connection)
+    if (attempt < 3 && (err.cause?.code || err.message).match(/fetch failed|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i)) {
+      await new Promise(r => setTimeout(r, 800 * attempt));
+      return mcp(token, method, params, attempt + 1);
+    }
+    throw new Error(`MCP ${method} (attempt ${attempt}): ${err.message}${err.cause ? ' / ' + err.cause.code : ''}`);
+  }
 }
 
 async function mcpTool(token, tool, args = {}) {
@@ -323,12 +341,12 @@ async function run() {
   console.log(`  winning bid:  B at ${acc.bounty.amount_usdc} USDC → ${B.wallet}`);
   console.log(`  losing bids:  A (${submits[0].proposal?.proposed_price_usdc}) + C (${submits[2].proposal?.proposed_price_usdc}) auto-rejected\n`);
 
-  rl.close();
+  if (rl) rl.close();
   process.exit(0);
 }
 
 run().catch((err) => {
   console.error(`\n${c.red}✗ Test failed:${c.reset} ${err.message}\n`);
-  rl.close();
+  if (rl) rl.close();
   process.exit(1);
 });
