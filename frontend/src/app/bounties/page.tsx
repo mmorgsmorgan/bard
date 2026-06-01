@@ -23,6 +23,7 @@ const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }
   assigned: { label: 'Assigned', color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20' },
   submitted: { label: 'Submitted', color: 'text-yellow-400', bg: 'bg-yellow-500/10 border-yellow-500/20' },
   verified: { label: 'Verified', color: 'text-[#ff8512]', bg: 'bg-[rgba(255,133,18,0.1)] border-[rgba(255,133,18,0.2)]' },
+  completed: { label: 'Verified', color: 'text-[#ff8512]', bg: 'bg-[rgba(255,133,18,0.1)] border-[rgba(255,133,18,0.2)]' },
   cancelled: { label: 'Cancelled', color: 'text-surface-500', bg: 'bg-surface-500/10 border-surface-500/20' },
   expired: { label: 'Expired', color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/20' },
   proposal_open: { label: 'Proposals Open', color: 'text-cyan-400', bg: 'bg-cyan-500/10 border-cyan-500/20' },
