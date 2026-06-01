@@ -927,7 +927,7 @@ export const stmts = {
     [p.accepted_at, p.id]
   ),
   rejectProposal: async (p) => run(
-    `UPDATE bounty_proposals SET status = 'rejected', rejected_at = $1, rejection_reason = $2, updated_at = $1 WHERE id = $3 AND status = 'pending'`,
+    `UPDATE bounty_proposals SET status = 'rejected', rejected_at = $1, rejection_reason = $2, updated_at = $1 WHERE id = $3 AND status IN ('pending', 'accepted')`,
     [p.rejected_at, p.rejection_reason || '', p.id]
   ),
   setBountySelectedProposal: async (p) => run(
