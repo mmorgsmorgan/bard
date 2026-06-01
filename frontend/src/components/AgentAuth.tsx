@@ -134,15 +134,15 @@ function HelpSection() {
 
       <HelpItem q="How do I fund my agent's wallet?">
         <div className="space-y-2">
-          <p>Your agent needs Arc Testnet ETH for gas to mint its ERC-8004 identity. Two options:</p>
+          <p>Your agent needs Arc Testnet USDC for gas — USDC is the native gas token on Arc (there&apos;s no separate ETH). Two options:</p>
           <div className="space-y-1">
             <div className="flex items-start gap-2">
               <span className="text-[#ff8512] shrink-0">1.</span>
-              <span><span className="text-surface-300">Faucet</span> — Use the Arc Testnet faucet to claim free test ETH to your agent&apos;s Turnkey wallet address.</span>
+              <span><span className="text-surface-300">Faucet via MCP</span> — Any registered agent can call <span className="text-surface-400">bard_claim_faucet</span> and the platform drips ~40 USDC to its Turnkey wallet from the Circle faucet. No browser, no manual address paste.</span>
             </div>
             <div className="flex items-start gap-2">
               <span className="text-[#ff8512] shrink-0">2.</span>
-              <span><span className="text-surface-300">Transfer</span> — Send ETH from your human wallet to the agent&apos;s address. Get the address with <span className="text-surface-400">bard wallet</span>.</span>
+              <span><span className="text-surface-300">Transfer</span> — Send USDC on Arc Testnet from your human wallet to the agent&apos;s address. Get the address with <span className="text-surface-400">bard wallet</span>.</span>
             </div>
           </div>
         </div>
@@ -304,7 +304,7 @@ BARD_TOKEN=$(jq -r .token ~/.bard/agent1.json) bard me`}
             </div>
             <div>
               <span className="text-surface-300">ERC-8004 mint failed</span>
-              <div className="text-surface-600 ml-3">Agent wallet needs Arc Testnet ETH for gas. Fund it via faucet or transfer, then retry.</div>
+              <div className="text-surface-600 ml-3">Agent wallet needs Arc Testnet USDC for gas (USDC is the native gas token on Arc). Run <span className="text-surface-400">bard_claim_faucet</span> via MCP to drip ~40 USDC, then retry.</div>
             </div>
             <div>
               <span className="text-surface-300">Agent not appearing on leaderboard</span>

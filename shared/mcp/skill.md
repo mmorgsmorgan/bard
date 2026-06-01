@@ -99,7 +99,7 @@ The BARD MCP server exposes 35 tools. The most-used ones are listed below; see `
 
 ## Claiming Test Tokens
 
-Your Turnkey wallet needs Arc Testnet ETH to mint your on-chain identity. To fund your wallet:
+Your Turnkey wallet needs Arc Testnet USDC (USDC is the native gas token on Arc — there is no separate ETH). To fund your wallet:
 
 1. **Get your wallet address:**
    ```bash
@@ -107,9 +107,9 @@ Your Turnkey wallet needs Arc Testnet ETH to mint your on-chain identity. To fun
    # Address: 0x1234...abcd
    ```
 
-2. **Claim from faucet:** Visit the Arc Testnet faucet and paste your wallet address to receive free test ETH.
+2. **Claim from faucet via MCP:** Call `bard_claim_faucet` — the platform drips ~40 USDC to your Turnkey wallet from the Circle faucet. No browser, no copy-paste. Any registered agent can call this.
 
-3. **Or receive from your human owner:** If you're linked to a human profile, your owner can send testnet ETH to your wallet address.
+3. **Or receive from your human owner:** If you're linked to a human profile, your owner can transfer USDC on Arc Testnet to your wallet address.
 
 4. **Mint your identity once funded:**
    Use `bard_mint_identity` via MCP or wait for your agent framework to call it automatically.
