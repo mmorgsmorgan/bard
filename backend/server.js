@@ -2814,7 +2814,7 @@ app.get('/api/records/:contributionId', async (req, res) => {
 
 // POST /api/bounties — create bounty (human or agent)
 app.post('/api/bounties', async (req, res) => {
-  const { creatorWallet, title, description, bountyType, amountUsdc, deadline, minReputation, selectionMode, proposalDeadline } = req.body;
+  let { creatorWallet, title, description, bountyType, amountUsdc, deadline, minReputation, selectionMode, proposalDeadline } = req.body;
   if (!creatorWallet || !title || !bountyType || !amountUsdc || !deadline) {
     return res.status(400).json({ error: 'creatorWallet, title, bountyType, amountUsdc, and deadline required' });
   }
@@ -2829,6 +2829,45 @@ app.post('/api/bounties', async (req, res) => {
   if (proposalDeadline && isNaN(Date.parse(proposalDeadline))) {
     return res.status(400).json({ error: 'proposalDeadline must be a valid ISO 8601 date' });
   }
+
+  // Creator-identity resolution.
+  //
+  // Two callers reach this endpoint:
+  //   - Humans via the frontend, passing their real wallet (e.g. MetaMask)
+  //     as creatorWallet. That wallet is the bounty's identity.
+  //   - Agents via MCP. The MCP wrapper sets creatorWallet = auth.me.wallet,
+  //     which for Turnkey-provisioned agents is the zero-address placeholder
+  //     (because the JWT was minted before the Turnkey wallet existed).
+  //     Without resolution, the bounty would be filed under 0x000…0000 —
+  //     i.e. orphaned, cancellable by anyone passing creatorWallet=0x000.
+  //
+  // If a bearer token is present, prefer the token's resolved wallet:
+  // agent.owner_wallet, falling back to agent.turnkey_address. We refuse
+  // to create a bounty owned by the zero placeholder.
+  const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+  const authHeader = req.headers.authorization || '';
+  if (authHeader.startsWith('Bearer ')) {
+    try {
+      const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
+      const agentId = decoded.agentId || decoded.sub;
+      if (agentId) {
+        const tokenAgent = await stmts.getAgentById(agentId);
+        if (tokenAgent) {
+          const resolved = (tokenAgent.owner_wallet && tokenAgent.owner_wallet.toLowerCase() !== ZERO_ADDR)
+            ? tokenAgent.owner_wallet
+            : tokenAgent.turnkey_address;
+          if (resolved) creatorWallet = resolved;
+        }
+      }
+    } catch { /* invalid token — fall through, request body's creatorWallet is used */ }
+  }
+  if (!creatorWallet || creatorWallet.toLowerCase() === ZERO_ADDR) {
+    return res.status(400).json({
+      error: 'creatorWallet resolved to the zero address — refusing to create an orphan bounty. If you are using a Turnkey-provisioned agent, run bard_create_wallet first so your agent has a real wallet on this backend, then re-try.',
+      hint: 'creator_unresolved',
+    });
+  }
+
   const id = `bounty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   // Proposal mode starts in 'proposal_open' state; first_come uses default 'open'
