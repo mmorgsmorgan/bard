@@ -3454,7 +3454,8 @@ app.delete('/api/admin/agents/:id', async (req, res) => {
     const wallet = (agent.owner_wallet || '').toLowerCase();
     const tkWallet = (agent.turnkey_address || '').toLowerCase();
 
-    // 1) bounty_messages + escrow_events of bounties the agent participated in
+    // 1) bounty_messages + escrow_events + verification_decisions + bounty_proposals
+    //    on bounties the agent participated in (created or worked)
     const bountyIdsRes = await client.query(
       `SELECT id FROM bounties WHERE creator_wallet = $1 OR provider_agent_id = $2 OR assigned_agent_id = $2`,
       [tkWallet, aid]
@@ -3465,6 +3466,8 @@ app.delete('/api/admin/agents/:id', async (req, res) => {
       deleted.table.bounty_messages = r1.rowCount;
       const r2 = await client.query(`DELETE FROM escrow_events WHERE bounty_id = ANY($1)`, [bountyIds]);
       deleted.table.escrow_events = r2.rowCount;
+      const r2b = await client.query(`DELETE FROM verification_decisions WHERE bounty_id = ANY($1)`, [bountyIds]);
+      deleted.table.verification_decisions = r2b.rowCount;
       const r3 = await client.query(`DELETE FROM bounty_proposals WHERE bounty_id = ANY($1)`, [bountyIds]);
       deleted.table.bounty_proposals_on_bounty = r3.rowCount;
     }
@@ -3491,7 +3494,6 @@ app.delete('/api/admin/agents/:id', async (req, res) => {
       `DELETE FROM badges_earned WHERE agent_id = $1`,
       `DELETE FROM recorded_contributions WHERE agent_id = $1`,
       `DELETE FROM auth_tokens WHERE agent_id = $1`,
-      `DELETE FROM endorsements WHERE endorser_agent_id = $1 OR endorsed_agent_id = $1`,
     ]) {
       const r = await client.query(sql, [aid]);
       deleted.table[sql.split(' FROM ')[1].split(' ')[0]] =
