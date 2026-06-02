@@ -73,7 +73,10 @@ export function isTurnkeyEnabled() {
 
 /**
  * Create a Turnkey wallet for an agent.
- * Returns { walletId, address } or null if Turnkey is not configured.
+ * Returns { walletId, address } on success.
+ * Returns { error, detail } on Turnkey API failure (the caller decides
+ *   whether to surface or log it).
+ * Returns null only when Turnkey is unconfigured.
  */
 export async function createAgentWallet(agentId, agentName) {
   const tk = getTurnkey();
@@ -101,8 +104,14 @@ export async function createAgentWallet(agentId, agentName) {
     console.log(`  Turnkey wallet created for agent ${agentName}: ${address}`);
     return { walletId, address };
   } catch (err) {
+    // Bubble the Turnkey error up. Used to log+return null which made
+    // diagnosis impossible without backend log access (Railway).
     console.error(`  Turnkey wallet creation failed for ${agentName}:`, err.message);
-    return null;
+    return {
+      error: 'turnkey_create_wallet_failed',
+      detail: err?.message || String(err),
+      code: err?.code,
+    };
   }
 }
 
@@ -126,7 +135,8 @@ export async function getOrCreateAgentWallet(db, agentId, agentName) {
 
   // Create new wallet
   const wallet = await createAgentWallet(agentId, agentName);
-  if (!wallet) return null;
+  if (!wallet) return null;                  // Turnkey not configured
+  if (wallet.error) return wallet;           // Turnkey API failed — pass through
 
   // Store in DB
   await db.query(

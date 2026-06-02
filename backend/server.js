@@ -1887,6 +1887,19 @@ app.post('/api/agents/:id/wallet', async (req, res) => {
     }
 
     const wallet = await getOrCreateAgentWallet(pool, agent.id, agent.agent_name);
+    // wallet can be: { walletId, address }, null (turnkey disabled), or { error, detail }
+    if (wallet?.error) {
+      // Turnkey API call failed — bubble the actual error up to the caller
+      // instead of silently returning address:null (which the MCP wrapper
+      // used to misreport as 'Turnkey not configured').
+      return res.status(502).json({
+        turnkeyEnabled: true,
+        address: null,
+        error: wallet.error,
+        detail: wallet.detail,
+        code: wallet.code,
+      });
+    }
     if (wallet?.address && agent.owner_wallet === '0x0000000000000000000000000000000000000000') {
       await pool.query('UPDATE agents SET owner_wallet = $1 WHERE id = $2', [wallet.address, agent.id]);
     }
