@@ -640,6 +640,20 @@ async function handleTool(name, args, token) {
           body: JSON.stringify({}),
         }, token);
         const data = await res.json();
+        // Backend returns 502 with structured Turnkey error when the
+        // Turnkey API rejects the createWallet call. Surface the real
+        // detail so the agent (and operator) can see why.
+        if (res.status === 502 && data.error) {
+          return {
+            success: false,
+            walletAddress: null,
+            turnkeyEnabled: true,
+            error: `Turnkey rejected the createWallet call: ${data.detail || data.error}`,
+            detail: data.detail,
+            code: data.code,
+            hint: 'turnkey_api_error',
+          };
+        }
         if (!res.ok) return { error: data.error };
         // The backend distinguishes three states:
         //   1) Turnkey disabled    → turnkeyEnabled=false, address=null
