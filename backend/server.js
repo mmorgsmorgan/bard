@@ -3406,6 +3406,120 @@ app.delete('/api/admin/platform-verifiers/:wallet', async (req, res) => {
   }
 });
 
+// DELETE /api/admin/agents/:id — Platform-owner-only test-artifact deletion.
+//
+// Wipes one agent and EVERY child row across the schema, in a single transaction.
+// Designed for cleaning up test pollution from automated test runs — NOT for
+// any user-facing flow. Guard: caller must be a platform verifier.
+//
+// Safety: caller must pass `confirm: true` in the body and the agent's
+// `turnkey_address` is checked for non-zero USDC by the CLI BEFORE calling
+// this endpoint (the endpoint trusts the caller did that). If you want
+// server-side balance guard, set `requireZeroBalance: true` and the endpoint
+// reads on-chain balance and refuses if > 0.
+app.delete('/api/admin/agents/:id', async (req, res) => {
+  const { verifierWallet, confirm, requireZeroBalance } = req.body || {};
+  if (!verifierWallet) return res.status(400).json({ error: 'verifierWallet required' });
+  if (confirm !== true) return res.status(400).json({ error: 'confirm:true required (this is destructive)' });
+  if (!(await stmts.isPlatformVerifier(verifierWallet))) {
+    return res.status(403).json({ error: 'Caller is not a platform verifier' });
+  }
+
+  const agent = await stmts.getAgentById(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+  // Optional server-side balance guard (extra safety net)
+  if (requireZeroBalance === true && agent.turnkey_address) {
+    try {
+      const raw = await arcTestnetClient.readContract({
+        address: process.env.USDC_CONTRACT_ADDRESS || '0x3600000000000000000000000000000000000000',
+        abi: [{ name: 'balanceOf', type: 'function', stateMutability: 'view',
+                inputs: [{ name: 'a', type: 'address' }], outputs: [{ name: '', type: 'uint256' }] }],
+        functionName: 'balanceOf',
+        args: [agent.turnkey_address],
+      });
+      const bal = Number(raw) / 1_000_000;
+      if (bal > 0) return res.status(409).json({ error: `Agent wallet holds ${bal} USDC — refusing to delete (set requireZeroBalance:false to override)` });
+    } catch (e) {
+      // RPC unreachable — fail closed if caller asked for guard
+      return res.status(503).json({ error: `Cannot verify balance: ${e.message}` });
+    }
+  }
+
+  const client = await pool.connect();
+  const deleted = { table: {} };
+  try {
+    await client.query('BEGIN');
+    const aid = req.params.id;
+    const wallet = (agent.owner_wallet || '').toLowerCase();
+    const tkWallet = (agent.turnkey_address || '').toLowerCase();
+
+    // 1) bounty_messages + escrow_events of bounties the agent participated in
+    const bountyIdsRes = await client.query(
+      `SELECT id FROM bounties WHERE creator_wallet = $1 OR provider_agent_id = $2 OR assigned_agent_id = $2`,
+      [tkWallet, aid]
+    );
+    const bountyIds = bountyIdsRes.rows.map(r => r.id);
+    if (bountyIds.length > 0) {
+      const r1 = await client.query(`DELETE FROM bounty_messages WHERE bounty_id = ANY($1)`, [bountyIds]);
+      deleted.table.bounty_messages = r1.rowCount;
+      const r2 = await client.query(`DELETE FROM escrow_events WHERE bounty_id = ANY($1)`, [bountyIds]);
+      deleted.table.escrow_events = r2.rowCount;
+      const r3 = await client.query(`DELETE FROM bounty_proposals WHERE bounty_id = ANY($1)`, [bountyIds]);
+      deleted.table.bounty_proposals_on_bounty = r3.rowCount;
+    }
+
+    // 2) Proposals BY this agent on OTHER bounties
+    const r4 = await client.query(`DELETE FROM bounty_proposals WHERE proposer_agent_id = $1`, [aid]);
+    deleted.table.bounty_proposals_by_agent = r4.rowCount;
+
+    // 3) Bounties created OR worked by the agent
+    if (bountyIds.length > 0) {
+      const r5 = await client.query(`DELETE FROM bounties WHERE id = ANY($1)`, [bountyIds]);
+      deleted.table.bounties = r5.rowCount;
+    }
+
+    // 4) Direct child tables of agents
+    for (const sql of [
+      `DELETE FROM contributions WHERE agent_id = $1`,
+      `DELETE FROM agent_state WHERE agent_id = $1`,
+      `DELETE FROM commitments WHERE agent_id = $1`,
+      `DELETE FROM swarm_executions WHERE agent_id = $1`,
+      `DELETE FROM agent_verifications WHERE verifier_agent_id = $1`,
+      `DELETE FROM collaborations WHERE proposer_agent_id = $1`,
+      `DELETE FROM agent_skills WHERE agent_id = $1`,
+      `DELETE FROM badges_earned WHERE agent_id = $1`,
+      `DELETE FROM recorded_contributions WHERE agent_id = $1`,
+      `DELETE FROM auth_tokens WHERE agent_id = $1`,
+      `DELETE FROM endorsements WHERE endorser_agent_id = $1 OR endorsed_agent_id = $1`,
+    ]) {
+      const r = await client.query(sql, [aid]);
+      deleted.table[sql.split(' FROM ')[1].split(' ')[0]] =
+        (deleted.table[sql.split(' FROM ')[1].split(' ')[0]] || 0) + r.rowCount;
+    }
+
+    // 5) Notifications keyed by wallet (no FK so deletion is best-effort)
+    if (wallet) {
+      const rn = await client.query(`DELETE FROM notifications WHERE wallet = $1`, [wallet]);
+      deleted.table.notifications = rn.rowCount;
+    }
+
+    // 6) Finally, the agent
+    const ra = await client.query(`DELETE FROM agents WHERE id = $1`, [aid]);
+    deleted.table.agents = ra.rowCount;
+
+    await client.query('COMMIT');
+    console.log(`[admin] Deleted agent ${aid} (${agent.agent_name})  child rows: ${JSON.stringify(deleted.table)}`);
+    res.json({ success: true, agentId: aid, agentName: agent.agent_name, deleted });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error(`[admin] Delete agent ${req.params.id} failed:`, err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // POST /api/bounties/:id/platform-verify — Platform owner verifies (Stage 1)
 app.post('/api/bounties/:id/platform-verify', async (req, res) => {
   const { verifierWallet, decision, reasoning } = req.body;
