@@ -72,10 +72,13 @@ export function isTurnkeyEnabled() {
 }
 
 /**
- * Create a Turnkey wallet for an agent.
+ * Create a Turnkey wallet for an agent. Idempotent — if a previous attempt
+ * succeeded in Turnkey but failed before the DB record landed, this finds
+ * the orphaned wallet by its deterministic name and adopts it.
+ *
  * Returns { walletId, address } on success.
- * Returns { error, detail } on Turnkey API failure (the caller decides
- *   whether to surface or log it).
+ * Returns { error, detail, code } on Turnkey API failure the caller can't
+ *   resolve (the caller decides whether to surface or log).
  * Returns null only when Turnkey is unconfigured.
  */
 export async function createAgentWallet(agentId, agentName) {
@@ -83,11 +86,11 @@ export async function createAgentWallet(agentId, agentName) {
   if (!tk) return null;
 
   const apiClient = tk.apiClient();
+  const walletName = `bard-agent-${agentId}`;
 
   try {
-    // Create a wallet named after the agent
     const walletResponse = await apiClient.createWallet({
-      walletName: `bard-agent-${agentId}`,
+      walletName,
       accounts: [
         {
           curve: 'CURVE_SECP256K1',
@@ -100,16 +103,43 @@ export async function createAgentWallet(agentId, agentName) {
 
     const walletId = walletResponse.walletId;
     const address = walletResponse.addresses?.[0];
-
     console.log(`  Turnkey wallet created for agent ${agentName}: ${address}`);
     return { walletId, address };
   } catch (err) {
-    // Bubble the Turnkey error up. Used to log+return null which made
-    // diagnosis impossible without backend log access (Railway).
-    console.error(`  Turnkey wallet creation failed for ${agentName}:`, err.message);
+    const msg = err?.message || String(err);
+
+    // Idempotency recovery: a previous run created the wallet in Turnkey
+    // but failed before the DB UPDATE persisted turnkey_wallet_id /
+    // turnkey_address. Subsequent attempts hit "wallet label must be
+    // unique." Look up the existing wallet by its deterministic name and
+    // adopt it — the caller will then write the row.
+    if (/wallet label must be unique/i.test(msg) || err?.code === 3) {
+      try {
+        const orgId = process.env.TURNKEY_ORGANIZATION_ID;
+        const { wallets } = await apiClient.getWallets({ organizationId: orgId });
+        const match = wallets.find((w) => w.walletName === walletName);
+        if (match) {
+          const { accounts } = await apiClient.getWalletAccounts({
+            organizationId: orgId,
+            walletId: match.walletId,
+          });
+          const addr = accounts?.[0]?.address;
+          if (addr) {
+            console.log(`  Turnkey wallet recovered (adopted orphan) for ${agentName}: ${addr}`);
+            return { walletId: match.walletId, address: addr };
+          }
+        }
+        // Unique-name collision but couldn't find the matching wallet —
+        // pass through the original error so the caller sees something.
+      } catch (recoveryErr) {
+        console.error(`  Turnkey orphan-recovery failed for ${agentName}:`, recoveryErr.message);
+      }
+    }
+
+    console.error(`  Turnkey wallet creation failed for ${agentName}:`, msg);
     return {
       error: 'turnkey_create_wallet_failed',
-      detail: err?.message || String(err),
+      detail: msg,
       code: err?.code,
     };
   }
