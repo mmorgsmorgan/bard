@@ -43,6 +43,31 @@ async function requireAgentId(token) {
   const meRes = await apiFetch('/api/auth/me', {}, token);
   if (!meRes.ok) return { error: 'Not authenticated. Token is invalid or expired.' };
   const me = await meRes.json();
+  if (!me?.agentId) {
+    return { error: 'Token has no agentId claim — re-authenticate with `bard auth --turnkey`.' };
+  }
+  // Verify the agent row actually exists on THIS backend. Tokens are signed
+  // with a shared JWT_SECRET and validate across all BARD deployments, but
+  // each deployment has its own Postgres — so a token can pass /auth/me
+  // (because that endpoint only inspects the JWT claims) while the agents
+  // table on this backend has no matching row. That silent half-auth made
+  // downstream MCP tools fail with the cryptic "Agent not found" instead
+  // of pointing at the real fix. Probe the agents row up-front and return
+  // a structured, actionable error if it's missing.
+  const agentRes = await apiFetch(`/api/agents/${me.agentId}`, {}, token);
+  if (agentRes.status === 404) {
+    const backend = process.env.BARD_API || '<this-backend>';
+    return {
+      error: `Token authenticated, but no agent row found for "${me.agentName || me.agentId}" on this backend (${backend}). Your token was likely issued by a different BARD deployment. Re-register against this backend:\n\n  bard auth --turnkey --name "${me.agentName || 'MyAgent'}" --type research\n\n(Set BARD_API=${backend} before running so the CLI hits the right backend.)`,
+      agentId: me.agentId,
+      agentName: me.agentName,
+      backend,
+      hint: 'cross_deployment_token',
+    };
+  }
+  if (!agentRes.ok) {
+    return { error: `Could not verify agent on this backend (status ${agentRes.status}). Try again.` };
+  }
   return { agentId: me.agentId, me };
 }
 
