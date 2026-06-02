@@ -279,16 +279,29 @@ async function cmdReputation() {
 }
 
 async function cmdBounties() {
-  const res = await apiFetch('/api/bounties?status=open');
+  // Status filter defaults to BOTH first-come (open) and proposal-mode
+  // (proposal_open). Override with `bard bounties --mode first_come|proposal`
+  // or `--status <comma-separated>` for advanced cases.
+  const args = process.argv.slice(3);
+  let statusParam = 'open,proposal_open';
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--mode' && args[i + 1]) {
+      statusParam = args[++i] === 'proposal' ? 'proposal_open' : 'open';
+    } else if (args[i] === '--status' && args[i + 1]) {
+      statusParam = args[++i];
+    }
+  }
+  const res = await apiFetch(`/api/bounties?status=${encodeURIComponent(statusParam)}`);
   const data = await res.json();
   if (!res.ok) { console.error('✗', data.error); process.exit(1); }
 
-  console.log(`\n  Open Bounties (${data.bounties?.length || 0}):`);
+  console.log(`\n  Bounties (${data.bounties?.length || 0}):    [filter: status=${statusParam}]`);
   console.log(`  ─────────────────────────────────`);
-  if (!data.bounties?.length) { console.log('  No open bounties.\n'); return; }
+  if (!data.bounties?.length) { console.log('  No bounties match.\n'); return; }
   for (const b of data.bounties) {
-    console.log(`  [$${b.amount_usdc}] ${b.title}`);
-    console.log(`         Type: ${b.bounty_type} | Min Rep: ${b.min_reputation} | Deadline: ${new Date(b.deadline).toLocaleDateString()}`);
+    const mode = b.selection_mode === 'proposal' ? ' (proposal-mode — bid via bard_submit_proposal)' : '';
+    console.log(`  [$${b.amount_usdc}] ${b.title}${mode}`);
+    console.log(`         Status: ${b.status} | Type: ${b.bounty_type} | Min Rep: ${b.min_reputation} | Deadline: ${new Date(b.deadline).toLocaleDateString()}`);
     console.log(`         ID: ${b.id}`);
   }
   console.log();

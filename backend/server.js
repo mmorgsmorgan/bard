@@ -1478,6 +1478,76 @@ async function executeSwarm(agent, task, bountyId) {
 // ══════════════════════════════════════════════════════
 
 // Register a new agent (owner signs with wallet)
+// POST /api/agents/register-from-token — Cross-deployment recovery.
+//
+// When a JWT issued by one BARD deployment lands on another that doesn't
+// have the agent row, every MCP tool fails with "Agent not found" (caught
+// up-front by the tightened requireAgentId). This endpoint is the recovery
+// path: validate the bearer token, read its claims (sub/agentName/wallet),
+// and insert a matching agent row IF one doesn't exist for that id yet.
+// Idempotent — calling twice returns the existing row.
+//
+// Auth: the Bearer token itself is the auth. We trust JWT_SECRET — any
+// token that verifies was issued by us (whichever deployment shares the
+// secret).
+app.post('/api/agents/register-from-token', async (req, res) => {
+  const auth = req.headers.authorization || '';
+  const tokenStr = auth.replace(/^Bearer\s+/i, '');
+  if (!tokenStr) return res.status(401).json({ error: 'Bearer token required in Authorization header' });
+
+  let claims;
+  try {
+    claims = jwt.verify(tokenStr, JWT_SECRET);
+  } catch (err) {
+    return res.status(401).json({ error: `Invalid or expired token: ${err.message}` });
+  }
+
+  const agentId = claims.sub;
+  const agentName = claims.agentName;
+  const wallet = (claims.wallet || '').toLowerCase();
+  if (!agentId || !agentName) {
+    return res.status(400).json({ error: 'Token has no sub/agentName claim — re-auth and retry' });
+  }
+
+  // Idempotent: if the row already exists on THIS backend, just return it
+  const existing = await stmts.getAgentById(agentId);
+  if (existing) {
+    return res.json({
+      success: true,
+      created: false,
+      message: `Agent ${agentName} already exists on this backend`,
+      agent: existing,
+    });
+  }
+
+  // Allow optional refinement of fields via body (agentType, description),
+  // but the identity (id/name/wallet) comes from the JWT only.
+  const agentType = (req.body?.agentType) || 'general';
+  const description = (req.body?.description) || `Recovered from cross-deployment token`;
+
+  try {
+    await stmts.insertAgent({
+      id: agentId,
+      owner_wallet: wallet,
+      agent_name: agentName,
+      agent_public_key: wallet, // best-effort; full Turnkey wallet provisioning is a separate step
+      agent_type: agentType,
+      description,
+      created_at: new Date().toISOString(),
+    });
+    const agent = await stmts.getAgentById(agentId);
+    console.log(`[register-from-token] Created agent ${agentId} (${agentName}) from JWT claims`);
+    return res.json({
+      success: true,
+      created: true,
+      message: `Agent ${agentName} registered on this backend from your JWT claims. Run bard_create_wallet next to provision a Turnkey wallet here.`,
+      agent,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/agents/register', async (req, res) => {
   const { ownerWallet, agentName, agentPublicKey, agentType, description, swarmConfig } = req.body;
   if (!ownerWallet || !agentName || !agentPublicKey) {
@@ -2784,9 +2854,19 @@ app.post('/api/bounties', async (req, res) => {
 app.get('/api/bounties', async (req, res) => {
   const status = req.query.status;
   const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-  const bounties = status
-    ? await stmts.getOpenBounties(status, limit)
-    : await stmts.getAllBounties();
+  // `status` accepts a single value ("open") OR a comma-separated list
+  // ("open,proposal_open") so the CLI/MCP can list every claimable bounty
+  // in one round-trip. Before, only the first state was queryable, which
+  // hid every proposal-mode bounty from `bard bounties` / similar tools.
+  let bounties;
+  if (status && status.includes(',')) {
+    const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
+    bounties = await stmts.getOpenBountiesIn(statuses, limit);
+  } else if (status) {
+    bounties = await stmts.getOpenBounties(status, limit);
+  } else {
+    bounties = await stmts.getAllBounties();
+  }
   res.json({ bounties });
 });
 
