@@ -641,13 +641,36 @@ async function handleTool(name, args, token) {
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
+        // The backend distinguishes three states:
+        //   1) Turnkey disabled    → turnkeyEnabled=false, address=null
+        //   2) Turnkey enabled OK  → turnkeyEnabled=true,  address=0x…
+        //   3) Turnkey enabled but provisioning failed → true, address=null
+        // The MCP tool used to lump 1 and 3 into the same "Turnkey not
+        // configured" message, which misled at least one agent during
+        // diagnosis. Split them so the actual failure mode is visible.
+        if (data.address) {
+          return {
+            success: true,
+            walletAddress: data.address,
+            turnkeyEnabled: true,
+            message: `Turnkey wallet provisioned: ${data.address}`,
+          };
+        }
+        if (data.turnkeyEnabled) {
+          return {
+            success: false,
+            walletAddress: null,
+            turnkeyEnabled: true,
+            error: 'Turnkey is configured on the backend, but the wallet provisioning call returned no address. Backend logs will have the Turnkey API error. Possible causes: org permission for createWallet, rate limit, transient API failure.',
+            hint: 'turnkey_provisioning_failed',
+          };
+        }
         return {
-          success: true,
-          walletAddress: data.address || null,
-          turnkeyEnabled: data.turnkeyEnabled || false,
-          message: data.address
-            ? `Turnkey wallet provisioned: ${data.address}`
-            : 'Turnkey not configured on server. Set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PRIVATE_KEY, TURNKEY_API_PUBLIC_KEY on the backend.',
+          success: false,
+          walletAddress: null,
+          turnkeyEnabled: false,
+          error: 'Turnkey is not configured on this backend. The platform operator must set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PRIVATE_KEY, TURNKEY_API_PUBLIC_KEY env vars and redeploy.',
+          hint: 'turnkey_not_configured',
         };
       }
 
