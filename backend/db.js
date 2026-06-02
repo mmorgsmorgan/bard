@@ -691,6 +691,10 @@ export const stmts = {
     'SELECT * FROM bounties WHERE status = $1 ORDER BY created_at DESC LIMIT $2',
     [status, limit]
   ),
+  getOpenBountiesIn: async (statuses, limit) => many(
+    'SELECT * FROM bounties WHERE status = ANY($1) ORDER BY created_at DESC LIMIT $2',
+    [statuses, limit]
+  ),
   getAllBounties: async () => many('SELECT * FROM bounties ORDER BY created_at DESC LIMIT 50'),
   getBountiesByCreator: async (wallet) => many(
     'SELECT * FROM bounties WHERE creator_wallet = $1 ORDER BY created_at DESC',

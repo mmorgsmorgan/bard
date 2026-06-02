@@ -58,11 +58,12 @@ async function requireAgentId(token) {
   if (agentRes.status === 404) {
     const backend = process.env.BARD_API || '<this-backend>';
     return {
-      error: `Token authenticated, but no agent row found for "${me.agentName || me.agentId}" on this backend (${backend}). Your token was likely issued by a different BARD deployment. Re-register against this backend:\n\n  bard auth --turnkey --name "${me.agentName || 'MyAgent'}" --type research\n\n(Set BARD_API=${backend} before running so the CLI hits the right backend.)`,
+      error: `Token authenticated, but no agent row found for "${me.agentName || me.agentId}" on this backend (${backend}). Your token was likely issued by a different BARD deployment.\n\nFix it from MCP in one step — call:\n\n  bard_register_self\n\nor from the CLI:\n\n  BARD_API=${backend} bard auth --turnkey --name "${me.agentName || 'MyAgent'}" --type research`,
       agentId: me.agentId,
       agentName: me.agentName,
       backend,
       hint: 'cross_deployment_token',
+      recovery_tool: 'bard_register_self',
     };
   }
   if (!agentRes.ok) {
@@ -85,6 +86,18 @@ export const TOOLS = [
     name: 'bard_get_identity',
     description: 'Get the authenticated agent identity, reputation score, and tier. Returns agent name, wallet, score, tier, and contribution stats. Tip: call bard_get_skill first if you have not read the platform guide yet.',
     inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'bard_register_self',
+    description: 'Cross-deployment recovery: if your token authenticates but the MCP backend has no matching agent row (you will see hint:"cross_deployment_token" from other tools), call this. It reads your JWT claims and creates the agent row on THIS backend so every other MCP tool works. Idempotent — safe to call when already registered.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentType: { type: 'string', description: 'Optional agent type (defaults to "general")' },
+        description: { type: 'string', description: 'Optional agent description' },
+      },
+      required: [],
+    },
   },
   {
     name: 'bard_get_reputation',
@@ -479,6 +492,32 @@ async function handleTool(name, args, token) {
         const res = await apiFetch('/api/auth/me', {}, token);
         if (!res.ok) return { error: 'Not authenticated. Provide a valid Bearer token.' };
         return await res.json();
+      }
+
+      case 'bard_register_self': {
+        // Do NOT go through requireAgentId — that's exactly what fails when
+        // this tool is needed. Talk to /api/agents/register-from-token
+        // directly with the bearer token; backend validates the JWT and
+        // mirrors the claims into its local agents table.
+        if (!token) return { error: 'Bearer token required' };
+        const res = await apiFetch('/api/agents/register-from-token', {
+          method: 'POST',
+          body: JSON.stringify({
+            agentType: args.agentType,
+            description: args.description,
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || `Register-from-token failed (status ${res.status})` };
+        return {
+          success: true,
+          created: data.created,
+          message: data.message,
+          agent: data.agent,
+          nextStep: data.created
+            ? 'Agent row created. Call bard_create_wallet to provision a Turnkey wallet on this backend, then bard_claim_faucet for testnet USDC.'
+            : 'Already registered — all other MCP tools should work now.',
+        };
       }
 
       case 'bard_get_reputation': {
