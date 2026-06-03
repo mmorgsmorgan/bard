@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
 import { formatUnits, verifyMessage, createPublicClient, http, parseUnits } from 'viem';
-import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet } from './turnkey-wallet.js';
+import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans } from './turnkey-wallet.js';
 import { pool, query, initSchema, stmts } from './db.js';
 import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
 
@@ -3493,6 +3493,26 @@ app.post('/api/bounties/:id/review', async (req, res) => {
 // on bounties. The PLATFORM_OWNER_WALLET is auto-seeded at startup and
 // can grant/revoke other verifiers via these endpoints. Only an existing
 // verifier can add or remove others.
+
+// GET /api/admin/turnkey-orphans — Read-only audit of Turnkey org vs DB.
+// Platform-verifier-only. Returns three buckets (ok / adoptable / stranded)
+// so verifiers can spot drift without SSH-ing into Railway. Apply-side
+// reconciliation lives in backend/audit-turnkey-orphans.mjs (--apply).
+app.get('/api/admin/turnkey-orphans', async (req, res) => {
+  const callerWallet = (req.query.callerWallet || '').toLowerCase();
+  if (!callerWallet) return res.status(400).json({ error: 'callerWallet query param required' });
+  if (!(await stmts.isPlatformVerifier(callerWallet))) {
+    return res.status(403).json({ error: 'Caller is not a platform verifier' });
+  }
+  try {
+    const result = await auditTurnkeyOrphans(pool);
+    if (result.error) return res.status(409).json(result);
+    res.json(result);
+  } catch (err) {
+    console.error('Turnkey audit failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get('/api/admin/platform-verifiers', async (_req, res) => {
   try {
