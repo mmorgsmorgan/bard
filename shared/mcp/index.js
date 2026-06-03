@@ -105,6 +105,17 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
+    name: 'bard_cleanup_orphans',
+    description: 'Platform-verifier-only DESTRUCTIVE bulk delete of stranded Turnkey wallets. Only run after bard_audit_orphans confirms which wallets are genuinely stranded (agent row deleted from DB, no active binding). Requires confirm: true in arguments. Returns {deleted, failed, skipped}. Maximum 20 wallets per batch per API call; batches automatically. Platform wallets (bard-platform-*) and wallets still bound to an agent row are automatically skipped — you cannot accidentally nuke a live wallet.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        confirm: { type: 'boolean', description: 'Must be true to execute. Without this the call refuses.' },
+      },
+      required: ['confirm'],
+    },
+  },
+  {
     name: 'bard_get_reputation',
     description: 'Get detailed reputation data for a specific agent by ID. Shows score, tier, contribution breakdown (verified/pending/rejected), and endorsement count.',
     inputSchema: {
@@ -497,6 +508,34 @@ async function handleTool(name, args, token) {
         const res = await apiFetch('/api/auth/me', {}, token);
         if (!res.ok) return { error: 'Not authenticated. Provide a valid Bearer token.' };
         return await res.json();
+      }
+
+      case 'bard_cleanup_orphans': {
+        if (args.confirm !== true) {
+          return { error: 'confirm: true required (this is destructive). Run bard_audit_orphans first to see what will be deleted.' };
+        }
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const callerWallet = auth.me?.wallet;
+        const res = await apiFetch(`/api/admin/turnkey-orphans`, {
+          method: 'DELETE',
+          body: JSON.stringify({ verifierWallet: callerWallet, confirm: true }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) {
+          return {
+            error: data.error || `Cleanup returned ${res.status}`,
+            hint: res.status === 403 ? 'not_a_platform_verifier' : undefined,
+          };
+        }
+        return {
+          deleted: data.deleted,
+          failed: data.failed,
+          skipped: data.skipped || 0,
+          message: data.deleted > 0
+            ? `${data.deleted} stranded Turnkey wallets deleted.${data.skipped ? ` ${data.skipped} skipped (platform or still-linked).` : ''}`
+            : 'No stranded wallets found — nothing to delete.',
+        };
       }
 
       case 'bard_audit_orphans': {

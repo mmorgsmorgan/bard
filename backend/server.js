@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
 import { formatUnits, verifyMessage, createPublicClient, http, parseUnits } from 'viem';
-import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans } from './turnkey-wallet.js';
+import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans, deleteStrandedWallets } from './turnkey-wallet.js';
 import { pool, query, initSchema, stmts } from './db.js';
 import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
 
@@ -3510,6 +3510,33 @@ app.get('/api/admin/turnkey-orphans', async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('Turnkey audit failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/turnkey-orphans — Bulk-delete stranded Turnkey wallets.
+// Platform-verifier-only. Requires confirm:true in body. First runs the
+// same audit as the GET to identify genuinely stranded IDs, then batch-
+// deletes via Turnkey's deleteWallets API. Returns { deleted, failed, skipped }.
+app.delete('/api/admin/turnkey-orphans', async (req, res) => {
+  const { verifierWallet, confirm } = req.body || {};
+  if (!verifierWallet) return res.status(400).json({ error: 'verifierWallet required' });
+  if (confirm !== true) return res.status(400).json({ error: 'confirm:true required (this is destructive)' });
+  if (!(await stmts.isPlatformVerifier(verifierWallet))) {
+    return res.status(403).json({ error: 'Caller is not a platform verifier' });
+  }
+  try {
+    const audit = await auditTurnkeyOrphans(pool);
+    if (audit.error) return res.status(409).json(audit);
+    if (audit.stranded.length === 0) {
+      return res.json({ deleted: 0, failed: 0, message: 'No stranded wallets to delete.' });
+    }
+    const walletIds = audit.stranded.map(s => s.walletId);
+    const result = await deleteStrandedWallets(pool, walletIds);
+    if (result.error) return res.status(409).json(result);
+    res.json(result);
+  } catch (err) {
+    console.error('Delete stranded wallets failed:', err);
     res.status(500).json({ error: err.message });
   }
 });

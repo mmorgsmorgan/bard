@@ -333,3 +333,58 @@ export async function auditTurnkeyOrphans(db) {
     stranded,
   };
 }
+
+/**
+ * Bulk-delete one or more Turnkey wallets by walletId. Used to clean up
+ * stranded agent wallets after DB-side test-artifact purges leave orphaned
+ * Turnkey state. Returns { deleted, failed } counts. Skip-list avoids
+ * touching platform wallets or any wallet still bound to an agent in this
+ * backend's agent table.
+ *
+ * Irreversible. Standalone function — auditTurnkeyOrphans should be run
+ * first (read-only) to confirm which wallets are genuinely stranded.
+ */
+export async function deleteStrandedWallets(db, walletIds) {
+  const tk = getTurnkey();
+  if (!tk) return { error: 'turnkey_not_configured' };
+
+  if (!walletIds?.length) return { deleted: 0, failed: 0 };
+
+  // Safety: refuse if any of these IDs belong to a platform wallet or an
+  // agent wallet that still has a matching DB row.
+  const { rows: linkedAgents } = await db.query(
+    `SELECT turnkey_wallet_id FROM agents WHERE turnkey_wallet_id = ANY($1)`,
+    [walletIds]
+  );
+  const linkedIds = new Set(linkedAgents.map(a => a.turnkey_wallet_id));
+  const { wallets: allWallets } = await tk.apiClient().getWallets({
+    organizationId: process.env.TURNKEY_ORGANIZATION_ID,
+  });
+  const platformIds = new Set(
+    allWallets.filter(w => (w.walletName || '').startsWith('bard-platform-')).map(w => w.walletId)
+  );
+
+  const safe = walletIds.filter(id => !linkedIds.has(id) && !platformIds.has(id));
+  const skipped = walletIds.length - safe.length;
+  if (safe.length === 0) {
+    return { deleted: 0, failed: 0, skipped };
+  }
+
+  const apiClient = tk.apiClient();
+  let deleted = 0, failed = 0;
+  // Turnkey deletes up to 20 wallets per call
+  for (let i = 0; i < safe.length; i += 20) {
+    try {
+      await apiClient.deleteWallets({
+        organizationId: process.env.TURNKEY_ORGANIZATION_ID,
+        walletIds: safe.slice(i, i + 20),
+      });
+      deleted += Math.min(20, safe.length - i);
+    } catch (err) {
+      console.error(`  Batch delete failed (${i}-${i + 20}):`, err.message);
+      failed += Math.min(20, safe.length - i);
+    }
+  }
+
+  return { deleted, failed, skipped };
+}
