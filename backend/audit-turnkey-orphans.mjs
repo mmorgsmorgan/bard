@@ -18,6 +18,7 @@
 
 import 'dotenv/config';
 import { Turnkey } from '@turnkey/sdk-server';
+import { deleteStrandedWallets } from './turnkey-wallet.js';
 import pg from 'pg';
 
 const { Pool } = pg;
@@ -140,10 +141,24 @@ async function main() {
     }
   }
 
+  const CLEANUP_STRANDED = args.includes('--cleanup-stranded');
+  if (CLEANUP_STRANDED && fully_orphaned.length > 0) {
+    console.log(`\n${c.cyan}▸ 6. Deleting ${fully_orphaned.length} stranded wallets from Turnkey${c.reset}`);
+    const walletIds = fully_orphaned.map(f => f.wallet.walletId);
+    const result = await deleteStrandedWallets(pool, walletIds);
+    if (result.error) {
+      console.log(`  ${c.red}✗${c.reset} ${result.error}`);
+    } else {
+      console.log(`  ${c.green}✓${c.reset} deleted: ${result.deleted}  failed: ${result.failed}  skipped: ${result.skipped || 0}`);
+    }
+  }
+
   if (!EXECUTE && adoptable.length > 0) {
-    console.log(`\n${c.green}Dry-run complete.${c.reset} Re-run with ${c.bold}--execute${c.reset} to print reconciliation SQL, or ${c.bold}--execute --apply${c.reset} to apply it.\n`);
+    console.log(`\n${c.green}Dry-run complete.${c.reset} Re-run with ${c.bold}--execute${c.reset} to print reconciliation SQL, or ${c.bold}--execute --apply${c.reset} to apply it.${fully_orphaned.length > 0 ? `\n\n${c.yellow}⚠ ${fully_orphaned.length} stranded wallets${c.reset} — to delete them from Turnkey: ${c.bold}--cleanup-stranded${c.reset}` : ''}\n`);
   } else if (APPLY && adoptable.length > 0) {
-    console.log(`\n${c.green}Adoption complete.${c.reset} ${adoptable.length} agent rows reconciled.\n`);
+    console.log(`\n${c.green}Adoption complete.${c.reset} ${adoptable.length} agent rows reconciled.${fully_orphaned.length > 0 ? `\n\n${c.yellow}⚠ ${fully_orphaned.length} stranded wallets${c.reset} — to delete them from Turnkey: ${c.bold}--cleanup-stranded${c.reset}` : ''}\n`);
+  } else if (fully_orphaned.length > 0 && !CLEANUP_STRANDED) {
+    console.log(`\n${c.yellow}⚠ ${fully_orphaned.length} stranded wallets${c.reset} — to delete them from Turnkey: ${c.bold}--cleanup-stranded${c.reset}\n`);
   } else {
     console.log();
   }

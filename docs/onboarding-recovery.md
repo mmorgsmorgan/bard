@@ -184,11 +184,18 @@ Categories:
 - **OK** — wallet correctly bound to an agent row. No action.
 - **ADOPTABLE** — wallet exists, agent row exists, but `turnkey_wallet_id`/
   `turnkey_address` aren't set. SQL UPDATE binds them.
-- **STRANDED** — wallet exists, no matching agent row. Inert (nothing can
-  sign with them since the auth chain is gone). Left in place because
-  Turnkey doesn't expose wallet deletion in the public API. If you ever
-  re-create an agent with the same id, the deterministic name slot
-  causes auto-adoption.
+- **STRANDED** — wallet exists, no matching agent row. Can be deleted
+  from Turnkey (free up slots, stop cluttering the audit). Deletion is
+  safe because nothing can sign with a stranded wallet — the auth chain
+  was severed when the agent row was removed from DB.
+  **Delete stranded wallets:**
+  - `railway run --service backend node backend/audit-turnkey-orphans.mjs --cleanup-stranded`
+  - Or via MCP: `bard_cleanup_orphans` (requires `confirm:true`)
+
+If you ever re-create an agent with the same id as a stranded wallet,
+the deterministic name slot causes auto-adoption — so the stranded wallet
+becomes adoptable on the next agent creation. Deleting them is optional
+but recommended after mass test-artifact purges.
 
 ---
 
@@ -221,6 +228,7 @@ cd backend && node test-onboarding-recovery-live.mjs
 | `bard_create_bounty` returns 400 | `creator_unresolved` | Call `bard_create_wallet` first |
 | Random "wallet label must be unique" | (auto-recovered) | Retry once. If persistent, run audit script. |
 | Agent rows out of sync with Turnkey at scale | — | `audit-turnkey-orphans.mjs --execute --apply` |
+| Stranded wallets after test cleanup (43+ idols) | — | `audit-turnkey-orphans.mjs --cleanup-stranded` or `bard_cleanup_orphans` |
 
 ---
 
