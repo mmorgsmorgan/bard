@@ -244,3 +244,76 @@ export async function listTurnkeyWallets() {
   const response = await apiClient.getWallets();
   return response.wallets || [];
 }
+
+/**
+ * Audit Turnkey org against the agents table. Returns three buckets:
+ *   - ok:        wallet correctly bound to an agent row
+ *   - adoptable: wallet exists, agent row exists, but DB link is missing
+ *   - stranded:  wallet exists in Turnkey, agent row deleted
+ *
+ * Read-only. The caller decides whether to apply reconciliation SQL
+ * (typically via audit-turnkey-orphans.mjs with --apply).
+ */
+export async function auditTurnkeyOrphans(db) {
+  const tk = getTurnkey();
+  if (!tk) return { error: 'turnkey_not_configured' };
+
+  const apiClient = tk.apiClient();
+  const orgId = process.env.TURNKEY_ORGANIZATION_ID;
+  const { wallets } = await apiClient.getWallets({ organizationId: orgId });
+
+  const agentWallets = wallets.filter(w => (w.walletName || '').startsWith('bard-agent-'));
+  const platformWallets = wallets.filter(w => (w.walletName || '').startsWith('bard-platform-'));
+
+  const { rows: dbAgents } = await db.query(
+    `SELECT id, agent_name, turnkey_wallet_id, turnkey_address, owner_wallet
+       FROM agents WHERE turnkey_wallet_id IS NOT NULL OR turnkey_address IS NOT NULL`
+  );
+  const dbByWalletId = new Map(
+    dbAgents.filter(a => a.turnkey_wallet_id).map(a => [a.turnkey_wallet_id, a])
+  );
+
+  const ok = [];
+  const adoptable = [];
+  const stranded = [];
+
+  for (const w of agentWallets) {
+    if (dbByWalletId.has(w.walletId)) {
+      ok.push({ walletId: w.walletId, walletName: w.walletName });
+      continue;
+    }
+    const expectedAgentId = w.walletName.replace(/^bard-agent-/, '');
+    const { rows: matchRows } = await db.query(
+      `SELECT id, agent_name FROM agents WHERE id = $1`, [expectedAgentId]
+    );
+    const matchAgent = matchRows[0];
+    if (matchAgent) {
+      let addr = null;
+      try {
+        const { accounts } = await apiClient.getWalletAccounts({ organizationId: orgId, walletId: w.walletId });
+        addr = accounts?.[0]?.address || null;
+      } catch { /* leave addr null */ }
+      adoptable.push({
+        walletId: w.walletId,
+        walletName: w.walletName,
+        agentId: matchAgent.id,
+        agentName: matchAgent.agent_name,
+        address: addr,
+      });
+    } else {
+      stranded.push({ walletId: w.walletId, walletName: w.walletName });
+    }
+  }
+
+  return {
+    summary: {
+      totalAgentWallets: agentWallets.length,
+      platformWallets: platformWallets.length,
+      ok: ok.length,
+      adoptable: adoptable.length,
+      stranded: stranded.length,
+    },
+    adoptable,
+    stranded,
+  };
+}

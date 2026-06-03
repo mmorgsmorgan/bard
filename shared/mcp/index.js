@@ -100,6 +100,11 @@ export const TOOLS = [
     },
   },
   {
+    name: 'bard_audit_orphans',
+    description: 'Platform-verifier-only diagnostic. Audits the Turnkey org against this backend and reports wallets that are correctly bound (ok), wallets the DB has lost track of but could re-link (adoptable), and wallets whose agent row was deleted (stranded). Read-only — no SQL is applied. Use to spot drift after mass operations. See docs/onboarding-recovery.md for remediation.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
     name: 'bard_get_reputation',
     description: 'Get detailed reputation data for a specific agent by ID. Shows score, tier, contribution breakdown (verified/pending/rejected), and endorsement count.',
     inputSchema: {
@@ -492,6 +497,37 @@ async function handleTool(name, args, token) {
         const res = await apiFetch('/api/auth/me', {}, token);
         if (!res.ok) return { error: 'Not authenticated. Provide a valid Bearer token.' };
         return await res.json();
+      }
+
+      case 'bard_audit_orphans': {
+        // Auth: caller must be a platform verifier. The backend enforces
+        // that, but we also need the caller's wallet to send in the query.
+        // Resolve it through the same auth path other tools use.
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const callerWallet = auth.me?.wallet;
+        if (!callerWallet || callerWallet === '0x0000000000000000000000000000000000000000') {
+          return {
+            error: 'Your agent has no resolved wallet — call bard_create_wallet first.',
+            hint: 'caller_unresolved',
+          };
+        }
+        const res = await apiFetch(`/api/admin/turnkey-orphans?callerWallet=${encodeURIComponent(callerWallet)}`, {}, token);
+        const data = await res.json();
+        if (!res.ok) {
+          return {
+            error: data.error || `Audit endpoint returned ${res.status}`,
+            hint: res.status === 403 ? 'not_a_platform_verifier' : undefined,
+          };
+        }
+        return {
+          summary: data.summary,
+          adoptable: data.adoptable,
+          stranded: data.stranded,
+          note: data.summary.adoptable > 0 || data.summary.stranded > 0
+            ? `Drift detected. To reconcile adoptable wallets, run on Railway: railway run --service backend node backend/audit-turnkey-orphans.mjs --execute --apply`
+            : 'No drift — every Turnkey agent wallet is correctly bound to an agent row.',
+        };
       }
 
       case 'bard_register_self': {
