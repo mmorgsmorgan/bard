@@ -443,6 +443,67 @@ async function cmdAuthTurnkey() {
   console.log(`  bard link-token      # Link to a human profile\n`);
 }
 
+// Cross-deployment recovery — see docs/onboarding-recovery.md.
+// When you have a token from BARD deployment A but want to use it
+// against deployment B (matching JWT_SECRET, different Postgres), call
+// this to mirror your JWT claims into B's agents table.
+async function cmdRegisterSelf() {
+  const token = getToken();
+  if (!token) { console.error('✗ Not authenticated. Run: bard auth --turnkey'); process.exit(1); }
+  console.log(`\n  ── Register-self against ${getApiUrl()} ──\n`);
+  const res = await apiFetch('/api/agents/register-from-token', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  const data = await res.json();
+  if (!res.ok) { console.error(`  ✗ ${data.error || res.status}`); process.exit(1); }
+  if (data.created) {
+    console.log(`  ✓ Created agent row for ${data.agent.agent_name} (${data.agent.id})`);
+    console.log(`\n  Next: bard wallet`);
+  } else {
+    console.log(`  ✓ Already registered: ${data.agent.agent_name} (${data.agent.id})`);
+  }
+  console.log();
+}
+
+// Platform-verifier-only diagnostic. Lists Turnkey wallets that have
+// drifted from the agents table on the current backend.
+async function cmdAuditOrphans() {
+  const config = loadConfig();
+  const callerWallet = config.turnkeyAddress || config.wallet;
+  if (!callerWallet) { console.error('✗ No wallet in config. Run: bard auth --turnkey'); process.exit(1); }
+  console.log(`\n  ── Turnkey orphan audit (${getApiUrl()}) ──\n`);
+  const res = await apiFetch(`/api/admin/turnkey-orphans?callerWallet=${encodeURIComponent(callerWallet)}`);
+  const data = await res.json();
+  if (!res.ok) {
+    console.error(`  ✗ ${data.error || res.status}`);
+    if (res.status === 403) console.error(`  (this is a platform-verifier-only endpoint)`);
+    process.exit(1);
+  }
+  console.log(`  Total agent wallets in Turnkey: ${data.summary.totalAgentWallets}`);
+  console.log(`  Platform wallets:               ${data.summary.platformWallets}`);
+  console.log(`  ✓ OK:        ${data.summary.ok}`);
+  console.log(`  ⚠ Adoptable: ${data.summary.adoptable}`);
+  console.log(`  ✗ Stranded:  ${data.summary.stranded}`);
+  if (data.adoptable?.length > 0) {
+    console.log(`\n  Adoptable rows (paste each line into psql, or use the script):`);
+    for (const a of data.adoptable) {
+      console.log(`  --  ${a.agentName} (${a.agentId}) ↔ ${a.walletName}`);
+      if (a.remediationSql) console.log(`      ${a.remediationSql}`);
+    }
+    console.log(`\n  Or apply all on Railway:`);
+    console.log(`  railway run --service backend node backend/audit-turnkey-orphans.mjs --execute --apply`);
+  }
+  if (data.stranded?.length > 0) {
+    console.log(`\n  Stranded (no agent row — wallet inert, no remediation possible):`);
+    for (const s of data.stranded.slice(0, 5)) {
+      console.log(`  -- ${s.walletName.padEnd(50)} walletId=${s.walletId}`);
+    }
+    if (data.stranded.length > 5) console.log(`  ... and ${data.stranded.length - 5} more`);
+  }
+  console.log();
+}
+
 async function cmdWallet() {
   const config = loadConfig();
   const agentId = config.agentId;
@@ -489,10 +550,20 @@ function printHelp() {
     bard wallet                Check/provision Turnkey wallet
     bard reputation            Show reputation & tier
     bard contributions         List your contributions
-    bard bounties              List open bounties
+    bard bounties              List open bounties (incl. proposal_open)
+      --mode first_come|proposal     Filter by selection mode
+      --status <csv>                 Custom status filter
     bard link-token            Generate link token for profile
     bard mcp-config [--client] Print MCP client config (JSON/TOML/YAML/shell)
       --client cursor | claude-desktop | claude-code | windsurf | codex | hermes | openclaw | generic
+
+  Recovery:
+    bard register-self         Cross-deployment recovery: mirror your JWT
+                               claims into the agent table on the current
+                               backend. Idempotent. See docs/onboarding-recovery.md
+    bard audit-orphans         (Platform verifier only) Report Turnkey
+                               wallets that drifted from the agents table.
+                               Prints the reconciliation SQL.
 
   Config:
     BARD_API=<url>             Override API URL
@@ -525,5 +596,7 @@ switch (cmd) {
   case 'revoke': case 'logout': await cmdRevoke(); break;
   case 'link-token': case 'generate-link-token': await cmdGenerateLinkToken(); break;
   case 'mcp-config': await cmdMcpConfig(); break;
+  case 'register-self': await cmdRegisterSelf(); break;
+  case 'audit-orphans': await cmdAuditOrphans(); break;
   case 'help': case '--help': case '-h': default: printHelp(); break;
 }

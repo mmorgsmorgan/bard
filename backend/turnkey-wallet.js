@@ -293,12 +293,28 @@ export async function auditTurnkeyOrphans(db) {
         const { accounts } = await apiClient.getWalletAccounts({ organizationId: orgId, walletId: w.walletId });
         addr = accounts?.[0]?.address || null;
       } catch { /* leave addr null */ }
+      // Pull owner_wallet so the remediation SQL can include it when
+      // the agent is still on the 0x000 placeholder.
+      const { rows: ownerRows } = await db.query(
+        `SELECT owner_wallet FROM agents WHERE id = $1`, [matchAgent.id]
+      );
+      const ownerWallet = ownerRows[0]?.owner_wallet || '';
+      const ZERO = '0x0000000000000000000000000000000000000000';
+      // Build the exact UPDATE statement an operator can paste into psql
+      // (or audit-turnkey-orphans.mjs --apply). Quotes are single-quoted
+      // PostgreSQL string literals; identifiers are not user-supplied.
+      const sql = addr
+        ? `UPDATE agents SET turnkey_wallet_id = '${w.walletId}', turnkey_address = '${addr}'${
+            ownerWallet.toLowerCase() === ZERO ? `, owner_wallet = '${addr}'` : ''
+          } WHERE id = '${matchAgent.id}';`
+        : null;
       adoptable.push({
         walletId: w.walletId,
         walletName: w.walletName,
         agentId: matchAgent.id,
         agentName: matchAgent.agent_name,
         address: addr,
+        remediationSql: sql,
       });
     } else {
       stranded.push({ walletId: w.walletId, walletName: w.walletName });
