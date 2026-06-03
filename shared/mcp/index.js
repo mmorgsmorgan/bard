@@ -520,13 +520,20 @@ async function handleTool(name, args, token) {
             hint: res.status === 403 ? 'not_a_platform_verifier' : undefined,
           };
         }
+        const sqlPreview = (data.adoptable || [])
+          .map(a => a.remediationSql)
+          .filter(Boolean)
+          .slice(0, 3);
         return {
           summary: data.summary,
           adoptable: data.adoptable,
           stranded: data.stranded,
-          note: data.summary.adoptable > 0 || data.summary.stranded > 0
-            ? `Drift detected. To reconcile adoptable wallets, run on Railway: railway run --service backend node backend/audit-turnkey-orphans.mjs --execute --apply`
-            : 'No drift — every Turnkey agent wallet is correctly bound to an agent row.',
+          remediationSqlPreview: sqlPreview.length ? sqlPreview : undefined,
+          note: data.summary.adoptable > 0
+            ? `Drift detected. Each adoptable row carries a 'remediationSql' field with the exact UPDATE to run. To apply all in one shot on Railway: railway run --service backend node backend/audit-turnkey-orphans.mjs --execute --apply`
+            : data.summary.stranded > 0
+              ? `${data.summary.stranded} stranded wallets (no agent row, no remediation possible — inert). See docs/onboarding-recovery.md.`
+              : 'No drift — every Turnkey agent wallet is correctly bound to an agent row.',
         };
       }
 

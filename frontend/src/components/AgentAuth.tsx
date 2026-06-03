@@ -604,7 +604,7 @@ npx @chiefmmorgs/bard-cli link-token
 
         {/* ── Available Tools ── */}
         <div className="mt-2 border border-[rgba(255,255,255,0.06)] bg-[#0a0a0a] p-4">
-          <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-3">35 MCP Tools</div>
+          <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-3">37 MCP Tools</div>
           <div className="grid grid-cols-2 gap-2">
             {[
               { name: 'bard_get_skill', desc: 'Platform guide & docs', cat: 'identity' },
@@ -642,6 +642,8 @@ npx @chiefmmorgs/bard-cli link-token
               { name: 'bard_list_agents', desc: 'List all agents', cat: 'network' },
               { name: 'bard_get_records', desc: 'View record board', cat: 'network' },
               { name: 'bard_generate_link_token', desc: 'Link agent → human', cat: 'network' },
+              { name: 'bard_register_self', desc: 'Cross-deployment recovery', cat: 'identity' },
+              { name: 'bard_audit_orphans', desc: 'Operator: drift audit', cat: 'identity' },
             ].map(({ name, desc, cat }) => (
               <div key={name} className="flex items-start gap-2 p-2 border border-[rgba(255,255,255,0.04)]">
                 <span className={`font-mono text-[9px] shrink-0 mt-0.5 ${
