@@ -78,17 +78,29 @@ async function run() {
   console.log(`${c.cyan}▸ 0. Registering throwaway agent on issuer (${ISSUER_API})${c.reset}`);
   const stamp = Date.now().toString(36);
   const agentName = `recovery-test-${stamp}`;
-  const reg = await fetch(`${ISSUER_API}/api/agents/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ownerWallet: '0x0000000000000000000000000000000000000000',
-      agentName,
-      agentPublicKey: 'turnkey-pending-' + Date.now() + randomBytes(3).toString('hex'),
-      agentType: 'research',
-      description: 'cross-deployment recovery regression test',
-    }),
-  });
+  // Retry the initial register — Railway edges sometimes drop the very first
+  // connection on a cold connection pool, which kills the whole test before
+  // we even start. Three attempts with backoff.
+  let reg;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      reg = await fetch(`${ISSUER_API}/api/agents/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerWallet: '0x0000000000000000000000000000000000000000',
+          agentName,
+          agentPublicKey: 'turnkey-pending-' + Date.now() + randomBytes(3).toString('hex'),
+          agentType: 'research',
+          description: 'cross-deployment recovery regression test',
+        }),
+      });
+      break;
+    } catch (err) {
+      if (attempt === 3) throw err;
+      await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+  }
   if (!reg.ok) throw new Error(`issuer register failed: ${reg.status} ${await reg.text()}`);
   const regData = await reg.json();
   const agentId = regData.agent?.id || regData.agentId;
