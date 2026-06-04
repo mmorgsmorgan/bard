@@ -372,12 +372,17 @@ export async function deleteStrandedWallets(db, walletIds) {
 
   const apiClient = tk.apiClient();
   let deleted = 0, failed = 0;
-  // Turnkey deletes up to 20 wallets per call
+  // Turnkey deletes up to 20 wallets per call. deleteWithoutExport=true
+  // is required — Turnkey refuses to delete a wallet that hasn't been
+  // exported (i.e. operator hasn't acknowledged "I have the seed phrase,
+  // I accept losing access"). For stranded BARD agent wallets the seed
+  // never existed on our side, so the flag is safe.
   for (let i = 0; i < safe.length; i += 20) {
     try {
       await apiClient.deleteWallets({
         organizationId: process.env.TURNKEY_ORGANIZATION_ID,
         walletIds: safe.slice(i, i + 20),
+        deleteWithoutExport: true,
       });
       deleted += Math.min(20, safe.length - i);
     } catch (err) {
