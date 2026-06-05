@@ -213,14 +213,42 @@ async function runReputationDecay() {
 }
 
 // ── Escrow Expiry Check ──
-async function checkEscrowExpiry() {
+async function checkEscrowExpiry({ onlyBountyId = null } = {}) {
+  const summary = { refunded: [], failed: [], skipped: [] };
   try {
     const now = new Date().toISOString();
-    const { rows: expired } = await pool.query(
-      "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status FROM bounties WHERE expires_at IS NOT NULL AND expires_at < $1 AND escrow_status IN ('funded', 'claimed', 'submitted')",
-      [now]
-    );
+    const query = onlyBountyId
+      ? { text: "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status FROM bounties WHERE id = $1 AND expires_at IS NOT NULL AND expires_at < $2 AND escrow_status IN ('funded', 'claimed', 'submitted')", values: [onlyBountyId, now] }
+      : { text: "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status FROM bounties WHERE expires_at IS NOT NULL AND expires_at < $1 AND escrow_status IN ('funded', 'claimed', 'submitted')", values: [now] };
+    const { rows: expired } = await pool.query(query.text, query.values);
+
+    // Without Turnkey we can't actually move USDC. Skip the sweep entirely
+    // rather than lie in the DB (the old behavior was to flip escrow_status
+    // to 'refunded' even though the platform wallet still held the funds).
+    if (expired.length > 0 && !isTurnkeyEnabled()) {
+      console.warn(`  Escrow expiry: ${expired.length} bounty(ies) past expires_at, but Turnkey is not configured. Skipping auto-refund.`);
+      for (const b of expired) summary.skipped.push({ id: b.id, reason: 'turnkey_disabled' });
+      return summary;
+    }
+
     for (const b of expired) {
+      // Move USDC FIRST. If the transfer throws, leave the row in its
+      // current state so the next sweep retries. This is the same
+      // ordering as the rejection refund at the verify endpoint
+      // (transferUSDCFromPlatform → DB update), which is critical: a
+      // DB-only flip with a failed transfer would strand the creator's
+      // funds on the platform wallet forever.
+      const amount = parseFloat(b.escrow_budget_usdc);
+      let refundTx;
+      try {
+        console.log(`[Escrow Expiry] Refunding ${amount} USDC to ${b.creator_wallet} for bounty ${b.id} (was ${b.escrow_status})...`);
+        refundTx = await transferUSDCFromPlatform(b.creator_wallet, amount);
+      } catch (err) {
+        console.error(`  Escrow expiry refund failed for ${b.id}: ${err.message}. Will retry next tick.`);
+        summary.failed.push({ id: b.id, error: err.message });
+        continue;
+      }
+
       try {
         await pool.query(
           "UPDATE bounties SET escrow_status = 'refunded', status = 'expired', updated_at = $1 WHERE id = $2",
@@ -230,15 +258,40 @@ async function checkEscrowExpiry() {
         await pool.query(
           `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [evtId, b.id, 'expired', '', 'system', `Escrow expired. ${b.escrow_budget_usdc} USDC auto-refunded.`, '', now]
+          [evtId, b.id, 'expired', '', 'system', `Escrow expired. ${amount} USDC auto-refunded to creator.`, refundTx, now]
         );
-        console.log(`  Escrow expired: ${b.id} (${b.escrow_budget_usdc} USDC refunded)`);
+        console.log(`  Escrow expired: ${b.id} (${amount} USDC refunded, tx: ${refundTx})`);
+        summary.refunded.push({ id: b.id, amount, tx: refundTx, creatorWallet: b.creator_wallet });
+
+        await createNotification({
+          wallet: b.creator_wallet,
+          type: 'send',
+          title: 'Escrow Auto-Refunded',
+          message: `"${b.title}" expired before completion. ${amount} USDC refunded to your wallet.`,
+          from: 'BARD System',
+          amount,
+        }).catch(() => {});
+
+        if (b.provider_agent_id) {
+          await createNotification({
+            agentId: b.provider_agent_id,
+            type: 'system',
+            title: 'Bounty Expired',
+            message: `"${b.title}" expired before verification. Escrow returned to the creator.`,
+            from: 'BARD System',
+          }).catch(() => {});
+        }
       } catch (err) {
-        console.error(`  Escrow expiry error for ${b.id}:`, err.message);
+        // DB write failed AFTER on-chain transfer — log loudly so an
+        // operator can reconcile. The funds already moved; the row will
+        // look stale until manually fixed.
+        console.error(`  Escrow expiry DB update failed for ${b.id} AFTER refund tx ${refundTx}: ${err.message}. MANUAL RECONCILIATION REQUIRED.`);
       }
     }
 
-    // Auto-revert stuck proposal_selected bounties (creator never funded within 24h of accept)
+    // Auto-revert stuck proposal_selected bounties (creator never funded within 24h of accept).
+    // Skip when onlyBountyId is set — that path is for one-shot refund testing/ops.
+    if (onlyBountyId) return summary;
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { rows: stuck } = await pool.query(
       `SELECT b.id, b.title, b.creator_wallet, b.selected_proposal_id, p.proposer_agent_id, p.accepted_at
@@ -272,6 +325,7 @@ async function checkEscrowExpiry() {
   } catch (err) {
     console.error('Escrow expiry sweep error:', err.message);
   }
+  return summary;
 }
 
 // ── Daily Turnkey orphan-wallet audit ──
@@ -3619,6 +3673,56 @@ app.delete('/api/admin/platform-verifiers/:wallet', async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: 'Not a verifier' });
     res.json({ success: true, removed: target.toLowerCase() });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/expiry-sweep — Run the escrow expiry sweep on demand.
+//
+// Same logic the hourly cron runs. Platform-verifier-gated. Returns the
+// summary so operators can see which bounties refunded, failed, or were
+// skipped (e.g. when Turnkey is offline). Safe to call repeatedly: the
+// sweep only touches bounties whose expires_at is already in the past.
+app.post('/api/admin/expiry-sweep', async (req, res) => {
+  const { verifierWallet } = req.body || {};
+  if (!verifierWallet) return res.status(400).json({ error: 'verifierWallet required' });
+  if (!(await stmts.isPlatformVerifier(verifierWallet))) {
+    return res.status(403).json({ error: 'Caller is not a platform verifier' });
+  }
+  try {
+    const summary = await checkEscrowExpiry();
+    res.json({ success: true, ...summary });
+  } catch (err) {
+    console.error('Manual expiry sweep failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/bounties/:id/force-expire — Force a bounty's expires_at
+// into the past and run the expiry sweep on just that row.
+//
+// Platform-verifier-gated. Used by the live expiry test and as an operator
+// escape hatch when a bounty is stuck (e.g. claimed agent went silent and
+// the creator wants their USDC back before the natural 72h expiry).
+// Bounty must currently be in funded/claimed/submitted escrow state.
+app.post('/api/admin/bounties/:id/force-expire', async (req, res) => {
+  const { verifierWallet } = req.body || {};
+  if (!verifierWallet) return res.status(400).json({ error: 'verifierWallet required' });
+  if (!(await stmts.isPlatformVerifier(verifierWallet))) {
+    return res.status(403).json({ error: 'Caller is not a platform verifier' });
+  }
+  const bounty = await stmts.getBountyById(req.params.id);
+  if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+  if (!['funded', 'claimed', 'submitted'].includes(bounty.escrow_status)) {
+    return res.status(409).json({ error: `Cannot force-expire in escrow state: ${bounty.escrow_status}` });
+  }
+  try {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    await pool.query('UPDATE bounties SET expires_at = $1, updated_at = $1 WHERE id = $2', [past, req.params.id]);
+    const summary = await checkEscrowExpiry({ onlyBountyId: req.params.id });
+    res.json({ success: true, bounty: await stmts.getBountyById(req.params.id), ...summary });
+  } catch (err) {
+    console.error(`Force-expire failed for ${req.params.id}:`, err);
     res.status(500).json({ error: err.message });
   }
 });
