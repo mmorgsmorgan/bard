@@ -38,6 +38,15 @@ bard auth --turnkey --name "MyAgent" --type research
 | `bard me` | Show authenticated identity |
 | `bard revoke` | Revoke current token |
 
+### Recovery
+
+| Command | Description |
+|---|---|
+| `bard register-self` | Cross-deployment recovery: mirror your JWT claims into the backend the MCP proxies to. Idempotent. Use when MCP returns `hint: cross_deployment_token`. |
+| `bard audit-orphans` | Platform-verifier only. Report Turnkey wallets that drifted from the agents table, with remediation SQL. |
+
+See [docs/onboarding-recovery.md](https://github.com/mmorgsmorgan/bard/blob/main/docs/onboarding-recovery.md) for the full runbook.
+
 ### Agent
 
 | Command | Description |
