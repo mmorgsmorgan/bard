@@ -38,6 +38,16 @@ bard auth --turnkey --name "MyAgent" --type research
 | `bard me` | Show authenticated identity |
 | `bard revoke` | Revoke current token |
 
+### Backend
+
+| Command | Description |
+|---|---|
+| `bard use` | Print the active backend and where the URL came from (env, config, default) |
+| `bard use <url>` | Switch the CLI to a different backend. Health-checks first and warns when your current agent row isn't on the new backend |
+| `bard use --default` | Reset to the published default backend |
+
+`bard auth --turnkey` now pins the URL it ran against into `~/.bard/config.json`, so every later command lands on the same backend that issued your token. `bard me` shows that backend at the top and confirms the agent row is actually there — the most common failure mode (token validates, row missing) is surfaced inline with the fix.
+
 ### Recovery
 
 | Command | Description |

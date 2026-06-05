@@ -245,13 +245,29 @@ async function cmdMe() {
   const token = getToken();
   if (!token) { console.error('✗ Not authenticated. Run: bard challenge && bard sign <KEY>'); process.exit(1); }
 
+  const apiUrl = getApiUrl();
   const res = await apiFetch('/api/auth/me');
   const data = await res.json();
   if (!res.ok) { console.error('✗', data.error); process.exit(1); }
 
+  // Cross-deployment check: a token with shared JWT_SECRET validates
+  // everywhere, but the agent row only exists on the backend that issued
+  // it. If /api/auth/me works but /api/agents/:id 404s, we're talking to
+  // the wrong backend and the frontend reading this same backend will
+  // not see this agent. Surface that loudly here.
+  let rowOk = null;
+  if (data.agentId) {
+    try {
+      const a = await apiFetch(`/api/agents/${data.agentId}`);
+      rowOk = a.ok;
+    } catch { rowOk = false; }
+  }
+
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║   BARD Agent Identity                  ║`);
   console.log(`  ╚═══════════════════════════════════════╝\n`);
+  console.log(`  Backend:      ${apiUrl}`);
+  console.log(`  Agent row:    ${rowOk === true ? '✓ found on this backend' : rowOk === false ? '✗ MISSING — token is cross-deployment' : 'unknown'}`);
   console.log(`  Agent:        ${data.agentName} (${data.agentId})`);
   console.log(`  Wallet:       ${data.wallet}`);
   console.log(`  Scope:        ${data.scope}`);
@@ -259,6 +275,13 @@ async function cmdMe() {
   console.log(`  Tier:         ${data.reputation?.tier} (Level ${data.reputation?.level})`);
   console.log(`  Contributions: ${data.reputation?.totalContributions} (${data.reputation?.verified} verified)`);
   console.log(`  Endorsements: ${data.reputation?.totalEndorsements}\n`);
+  if (rowOk === false) {
+    console.log(`  ⚠  Your JWT validates here (shared JWT_SECRET), but this backend has`);
+    console.log(`     no row for ${data.agentId}. The frontend reading this backend will`);
+    console.log(`     not show your agent. Two ways out:`);
+    console.log(`       1.  bard register-self   ← mirror your JWT claims into this backend`);
+    console.log(`       2.  bard use <url>       ← point the CLI at the backend that DID issue this token\n`);
+  }
 }
 
 async function cmdReputation() {
@@ -377,11 +400,19 @@ async function cmdAuthTurnkey() {
     if (args[i] === '--type' && args[i + 1]) type = args[++i];
   }
 
+  // Pin the backend URL that will issue this agent's JWT. Without this the
+  // next command (or a future install) could resolve a different URL via
+  // BARD_API or DEFAULT_API and end up cross-deployment (token validates,
+  // agent row not found) — exactly the failure mode docs/onboarding-recovery.md
+  // exists to clean up. Stamp it now so every later command goes to the same
+  // backend that created the row.
+  const apiUrl = getApiUrl();
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║   BARD Turnkey Agent Setup             ║`);
   console.log(`  ╚═══════════════════════════════════════╝\n`);
-  console.log(`  Name: ${name}`);
-  console.log(`  Type: ${type}\n`);
+  console.log(`  Backend: ${apiUrl}`);
+  console.log(`  Name:    ${name}`);
+  console.log(`  Type:    ${type}\n`);
 
   // Step 1: Register agent (the backend creates the agent with a placeholder key)
   console.log('  [1/3] Registering agent...');
@@ -404,6 +435,7 @@ async function cmdAuthTurnkey() {
 
   // Save token immediately
   const config = loadConfig();
+  config.apiUrl = apiUrl;
   config.token = token;
   config.agentId = agentId;
   config.agentName = name;
@@ -529,6 +561,71 @@ async function cmdWallet() {
   }
 }
 
+async function cmdUse(target) {
+  if (!target) {
+    const apiUrl = getApiUrl();
+    const source = process.env.BARD_API
+      ? 'BARD_API env var'
+      : loadConfig().apiUrl ? '~/.bard/config.json' : 'CLI default';
+    console.log(`\n  Active backend: ${apiUrl}`);
+    console.log(`  Source:         ${source}`);
+    console.log(`  Default:        ${DEFAULT_API}\n`);
+    console.log(`  Switch with: bard use <url>`);
+    console.log(`  Reset to default: bard use --default\n`);
+    return;
+  }
+
+  let url = target === '--default' ? DEFAULT_API : target.replace(/\/$/, '');
+  if (!/^https?:\/\//.test(url)) {
+    console.error(`✗ URL must start with http:// or https:// — got: ${url}`);
+    process.exit(1);
+  }
+
+  // Health probe so we don't silently point at a dead backend.
+  let healthOk = false;
+  try {
+    const res = await fetch(`${url}/api/health`);
+    if (res.ok) { const j = await res.json(); healthOk = j.status === 'ok'; }
+  } catch { /* fall through */ }
+  if (!healthOk) {
+    console.error(`✗ ${url}/api/health did not return ok. Refusing to switch.`);
+    process.exit(1);
+  }
+
+  const config = loadConfig();
+  const oldUrl = config.apiUrl || DEFAULT_API;
+  config.apiUrl = url;
+  saveConfig(config);
+  console.log(`\n  ✓ Active backend: ${oldUrl}`);
+  console.log(`              →  ${url}\n`);
+
+  // Cross-deployment row check. If we have a token, see whether the
+  // current agent row exists on the new backend. The most common failure
+  // is exactly the one that brought you here: token validates, agent row
+  // missing. Surface the fix without making the user ask /api/auth/me.
+  const token = getToken();
+  const agentId = config.agentId;
+  if (token && agentId) {
+    try {
+      const res = await fetch(`${url}/api/agents/${agentId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        console.log(`  Agent row for ${agentId}: ✓ found on the new backend.\n`);
+      } else if (res.status === 404) {
+        console.log(`  ⚠  Agent row for ${agentId}: NOT FOUND on ${url}.`);
+        console.log(`     Your JWT will validate (shared JWT_SECRET) but this`);
+        console.log(`     backend has no record of your agent. Mirror it now:\n`);
+        console.log(`       bard register-self\n`);
+      } else {
+        console.log(`  ⚠  Agent row check returned ${res.status}. Run \`bard me\` to verify.\n`);
+      }
+    } catch (err) {
+      console.log(`  ⚠  Could not verify agent row: ${err.message}\n`);
+    }
+  }
+}
+
 function printHelp() {
   console.log(`
   ╔═══════════════════════════════════════════╗
@@ -557,6 +654,13 @@ function printHelp() {
     bard mcp-config [--client] Print MCP client config (JSON/TOML/YAML/shell)
       --client cursor | claude-desktop | claude-code | windsurf | codex | hermes | openclaw | generic
 
+  Backend:
+    bard use                   Show the active backend (and where the URL is from)
+    bard use <url>             Point the CLI at a different backend. Health-checks
+                               it first and warns if your current agent row isn't
+                               on the new backend.
+    bard use --default         Reset to the published default
+
   Recovery:
     bard register-self         Cross-deployment recovery: mirror your JWT
                                claims into the agent table on the current
@@ -566,7 +670,7 @@ function printHelp() {
                                Prints the reconciliation SQL.
 
   Config:
-    BARD_API=<url>             Override API URL
+    BARD_API=<url>             Override API URL (per-shell, beats config.json)
     BARD_MCP_URL=<url>         Override MCP server URL
     BARD_TOKEN=<token>         Use token from env
 
@@ -597,6 +701,7 @@ switch (cmd) {
   case 'link-token': case 'generate-link-token': await cmdGenerateLinkToken(); break;
   case 'mcp-config': await cmdMcpConfig(); break;
   case 'register-self': await cmdRegisterSelf(); break;
+  case 'use': await cmdUse(arg); break;
   case 'audit-orphans': await cmdAuditOrphans(); break;
   case 'help': case '--help': case '-h': default: printHelp(); break;
 }
