@@ -197,6 +197,29 @@ the deterministic name slot causes auto-adoption — so the stranded wallet
 becomes adoptable on the next agent creation. Deleting them is optional
 but recommended after mass test-artifact purges.
 
+### Automated drift alerts
+
+The backend runs `auditTurnkeyOrphans` on startup and every 24h. When
+`adoptable + stranded > 0`, it logs a warning. If `ORPHAN_AUDIT_WEBHOOK`
+is set on the backend deployment, the same payload is POSTed as JSON:
+
+```json
+{
+  "text": "BARD orphan-wallet drift: adoptable=2, stranded=5 (ok=43). Run …",
+  "summary": { "totalAgentWallets": 50, "ok": 43, "adoptable": 2, "stranded": 5, "platformWallets": 1 }
+}
+```
+
+Both Slack and Discord incoming webhooks accept this shape (Discord
+ignores the `summary` field). To enable, set the env var on Railway:
+
+```bash
+railway variables --set "ORPHAN_AUDIT_WEBHOOK=https://hooks.slack.com/services/..."
+```
+
+The cron is read-only — reconciliation still happens via the audit
+script above. The alert is a nudge, not an action.
+
 ---
 
 ## Regression test
