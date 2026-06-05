@@ -274,6 +274,44 @@ async function checkEscrowExpiry() {
   }
 }
 
+// ── Daily Turnkey orphan-wallet audit ──
+// Read-only sweep. If anything is adoptable or stranded, log it and POST
+// a summary to ORPHAN_AUDIT_WEBHOOK (Slack/Discord-compatible JSON) when set.
+// Operator still has to run audit-turnkey-orphans.mjs --apply / --cleanup-stranded
+// to actually reconcile — this just surfaces drift before it piles up.
+async function runOrphanAudit() {
+  if (!isTurnkeyEnabled()) return;
+  try {
+    const result = await auditTurnkeyOrphans(pool);
+    if (result?.error) {
+      console.error('Orphan audit error:', result.error);
+      return;
+    }
+    const { summary } = result;
+    const drift = (summary.adoptable || 0) + (summary.stranded || 0);
+    if (drift === 0) {
+      console.log(`  Orphan audit: clean (${summary.ok} ok, ${summary.totalAgentWallets} agent wallets, ${summary.platformWallets} platform)`);
+      return;
+    }
+    console.warn(`  Orphan audit: drift detected — adoptable=${summary.adoptable}, stranded=${summary.stranded}, ok=${summary.ok}`);
+    const webhook = process.env.ORPHAN_AUDIT_WEBHOOK;
+    if (webhook) {
+      const text = `BARD orphan-wallet drift: adoptable=${summary.adoptable}, stranded=${summary.stranded} (ok=${summary.ok}). Run \`audit-turnkey-orphans.mjs --execute --apply\` and/or \`--cleanup-stranded\`.`;
+      try {
+        await fetch(webhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, summary }),
+        });
+      } catch (err) {
+        console.error('  Orphan audit webhook post failed:', err.message);
+      }
+    }
+  } catch (err) {
+    console.error('Orphan audit sweep error:', err.message);
+  }
+}
+
 // ── Helper: row → frontend format ──
 function profileToJSON(row) {
   if (!row) return null;
@@ -5056,6 +5094,8 @@ process.on('SIGTERM', async () => { try { await pool.end(); } catch {} process.e
   setInterval(runReputationDecay, 60 * 60 * 1000);
   checkEscrowExpiry();
   setInterval(checkEscrowExpiry, 60 * 60 * 1000);
+  runOrphanAudit();
+  setInterval(runOrphanAudit, 24 * 60 * 60 * 1000);
 
   app.listen(PORT, () => {
     console.log(`\n  BARD API Server (Postgres + x402 + Agent Reputation)`);
