@@ -484,6 +484,8 @@ export async function initSchema() {
     `CREATE INDEX IF NOT EXISTS idx_msgs_bounty ON bounty_messages(bounty_id)`,
     `CREATE INDEX IF NOT EXISTS idx_msgs_proposal ON bounty_messages(proposal_id)`,
     `CREATE INDEX IF NOT EXISTS idx_msgs_thread ON bounty_messages(bounty_id, proposal_id, created_at)`,
+
+    `UPDATE agents SET owner_wallet = LOWER(owner_wallet) WHERE owner_wallet <> LOWER(owner_wallet)`,
   ];
 
   for (const sql of statements) {
@@ -578,7 +580,7 @@ export const stmts = {
     [p.id, p.owner_wallet, p.agent_name, p.agent_public_key, p.agent_type, p.description, p.created_at, p.swarm_config || null, p.is_platform_owned || 0]
   ),
   getAgentById: async (id) => one('SELECT * FROM agents WHERE id = $1', [id]),
-  getAgentsByOwner: async (owner) => many('SELECT * FROM agents WHERE owner_wallet = $1 ORDER BY created_at DESC', [owner]),
+  getAgentsByOwner: async (owner) => many('SELECT * FROM agents WHERE LOWER(owner_wallet) = LOWER($1) ORDER BY created_at DESC', [owner]),
   getAllAgents: async (status) => many('SELECT * FROM agents WHERE status = $1 ORDER BY reputation_score DESC', [status]),
   updateAgentReputation: async (score, totalContributions, totalEndorsements, id) => run(
     'UPDATE agents SET reputation_score = $1, total_contributions = $2, total_endorsements = $3 WHERE id = $4',
