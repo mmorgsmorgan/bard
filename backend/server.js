@@ -1648,7 +1648,7 @@ app.post('/api/agents/register', async (req, res) => {
   const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     const insertData = {
-      id, owner_wallet: ownerWallet, agent_name: agentName,
+      id, owner_wallet: ownerWallet.toLowerCase(), agent_name: agentName,
       agent_public_key: agentPublicKey, agent_type: agentType || 'general',
       description: description || '', created_at: new Date().toISOString(),
     };
@@ -1957,13 +1957,6 @@ app.post('/api/agents/:id/unlink', requireAuth, async (req, res) => {
   res.json({ success: true, agent: agentToJSON(updated), message: 'Agent unlinked from human profile.' });
 });
 
-// ── Agents by Owner Wallet ──
-app.get('/api/agents/owner/:wallet', async (req, res) => {
-  const wallet = req.params.wallet.toLowerCase();
-  const { rows: agents } = await pool.query('SELECT * FROM agents WHERE LOWER(owner_wallet) = $1', [wallet]);
-  res.json({ agents: agents.map(agentToJSON) });
-});
-
 // ── Agent Turnkey Wallet Provisioning ──
 app.post('/api/agents/:id/wallet', async (req, res) => {
   try {
@@ -1993,7 +1986,7 @@ app.post('/api/agents/:id/wallet', async (req, res) => {
       });
     }
     if (wallet?.address && agent.owner_wallet === '0x0000000000000000000000000000000000000000') {
-      await pool.query('UPDATE agents SET owner_wallet = $1 WHERE id = $2', [wallet.address, agent.id]);
+      await pool.query('UPDATE agents SET owner_wallet = $1 WHERE id = $2', [wallet.address.toLowerCase(), agent.id]);
     }
     res.json({
       turnkeyEnabled: true,
