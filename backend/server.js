@@ -2111,14 +2111,34 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Agent has no Turnkey wallet. Use bard_create_wallet first.' });
     }
 
-    const { to, amount } = req.body;
-    if (!to || !amount) {
-      return res.status(400).json({ error: 'Missing required fields: to (address), amount (USDC string e.g. "1.00")' });
+    const { to, toUsername, amount } = req.body;
+    if (!amount) {
+      return res.status(400).json({ error: 'Missing required field: amount (USDC string e.g. "1.00")' });
+    }
+    if (!to && !toUsername) {
+      return res.status(400).json({ error: 'Missing recipient: provide either `to` (0x address) or `toUsername` (BARD profile username)' });
+    }
+    if (to && toUsername) {
+      return res.status(400).json({ error: 'Provide only one of: `to` or `toUsername`' });
     }
 
-    // Validate address
-    if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
-      return res.status(400).json({ error: 'Invalid recipient address' });
+    // Resolve recipient — either a raw address or a BARD profile username.
+    // Username lookups query the `profiles` table (UNIQUE on username) and
+    // return the registered wallet. Agent names are not unique on prod, so
+    // agent recipients still pass a raw `to` address (see memory
+    // bard-name-uniqueness).
+    let resolvedTo;
+    if (toUsername) {
+      const profile = await stmts.getProfileByUsername(toUsername);
+      if (!profile || !profile.wallet) {
+        return res.status(404).json({ error: `No BARD profile registered for username "${toUsername}"`, hint: 'profile_not_found' });
+      }
+      resolvedTo = profile.wallet.toLowerCase();
+    } else {
+      if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
+        return res.status(400).json({ error: 'Invalid recipient address' });
+      }
+      resolvedTo = to;
     }
 
     // Parse amount (USDC has 6 decimals via ERC-20 interface)
@@ -2182,7 +2202,7 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
         outputs: [{ name: '', type: 'bool' }],
       }],
       functionName: 'transfer',
-      args: [to, amountWei],
+      args: [resolvedTo, amountWei],
     });
 
     const txHash = await walletClient.sendTransaction({
@@ -2191,18 +2211,20 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       value: 0n,
     });
 
-    console.log(`[Send USDC] ${agent.agent_name}: ${parsedAmount} USDC → ${to} | tx: ${txHash}`);
+    console.log(`[Send USDC] ${agent.agent_name}: ${parsedAmount} USDC → ${resolvedTo}${toUsername ? ` (@${toUsername})` : ''} | tx: ${txHash}`);
 
     // Update agent's last active
     await pool.query('UPDATE agents SET last_active_at = $1 WHERE id = $2', [Math.floor(Date.now() / 1000), agent.id]);
-    emitFeedEvent('agent:send-usdc', { agentId: agent.id, agentName: agent.agent_name, to, amount: parsedAmount, txHash });
-    await createNotification({ agentId: agent.id, type: 'send', title: 'USDC Sent', message: `${agent.agent_name} sent ${parsedAmount} USDC to ${to.slice(0,6)}...${to.slice(-4)}.`, from: walletAddress, amount: String(parsedAmount) });
-    await createNotification({ wallet: to, type: 'send', title: 'USDC Received', message: `Received ${parsedAmount} USDC from agent ${agent.agent_name}.`, from: walletAddress, amount: String(parsedAmount) });
+    emitFeedEvent('agent:send-usdc', { agentId: agent.id, agentName: agent.agent_name, to: resolvedTo, toUsername: toUsername || null, amount: parsedAmount, txHash });
+    const displayRecipient = toUsername ? `@${toUsername}` : `${resolvedTo.slice(0,6)}...${resolvedTo.slice(-4)}`;
+    await createNotification({ agentId: agent.id, type: 'send', title: 'USDC Sent', message: `${agent.agent_name} sent ${parsedAmount} USDC to ${displayRecipient}.`, from: walletAddress, amount: String(parsedAmount) });
+    await createNotification({ wallet: resolvedTo, type: 'send', title: 'USDC Received', message: `Received ${parsedAmount} USDC from agent ${agent.agent_name}.`, from: walletAddress, amount: String(parsedAmount) });
 
     res.json({
       success: true,
       from: walletAddress,
-      to,
+      to: resolvedTo,
+      toUsername: toUsername || null,
       amount: parsedAmount,
       token: ARC_USDC,
       chain: 'Arc Testnet',
