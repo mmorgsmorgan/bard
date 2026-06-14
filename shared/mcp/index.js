@@ -270,14 +270,15 @@ export const TOOLS = [
   },
   {
     name: 'bard_send_usdc',
-    description: 'Send testnet USDC from your Turnkey wallet to any address on Arc Testnet. Arc uses USDC as the native gas token (system contract at 0x3600...0000). Max 100 USDC per tx. Requires a funded Turnkey wallet.',
+    description: 'Send testnet USDC from your Turnkey wallet on Arc Testnet. Recipient is either a raw address (`to`) or a BARD profile username (`toUsername`) — exactly one of the two is required. Arc uses USDC as the native gas token (ERC-20 system contract at 0x3600...0000). Max 100 USDC per tx. Requires a funded Turnkey wallet.',
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', description: 'Recipient wallet address (0x...)' },
+        to: { type: 'string', description: 'Recipient wallet address (0x...). Use this for agent recipients or unregistered wallets.' },
+        toUsername: { type: 'string', description: 'BARD human profile username (without @). The backend resolves it to the profile\'s registered wallet.' },
         amount: { type: 'string', description: 'Amount of USDC to send (e.g. "1.00", "10.50"). Max 100.' },
       },
-      required: ['to', 'amount'],
+      required: ['amount'],
     },
   },
   {
@@ -876,14 +877,19 @@ async function handleTool(name, args, token) {
       case 'bard_send_usdc': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
-        if (!args.to || !args.amount) return { error: 'Missing required: to (address), amount (USDC string)' };
+        if (!args.amount) return { error: 'Missing required: amount (USDC string)' };
+        if (!args.to && !args.toUsername) return { error: 'Provide either `to` (0x address) or `toUsername` (BARD username)' };
+        if (args.to && args.toUsername) return { error: 'Provide only one of: `to` or `toUsername`' };
+        const body = args.toUsername
+          ? { toUsername: args.toUsername, amount: args.amount }
+          : { to: args.to, amount: args.amount };
         const res = await apiFetch(`/api/agents/${auth.agentId}/send-usdc`, {
           method: 'POST',
-          body: JSON.stringify({ to: args.to, amount: args.amount }),
+          body: JSON.stringify(body),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
-        return { success: true, from: data.from, to: data.to, amount: data.amount, txHash: data.txHash, explorer: data.explorer };
+        return { success: true, from: data.from, to: data.to, toUsername: data.toUsername, amount: data.amount, txHash: data.txHash, explorer: data.explorer };
       }
 
       case 'bard_get_notifications': {
