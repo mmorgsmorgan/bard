@@ -263,7 +263,7 @@ export const TOOLS = [
       properties: {
         blockchain: { type: 'string', description: 'Testnet chain ID (default: ARC-TESTNET). Options: ARC-TESTNET, ETH-SEPOLIA, BASE-SEPOLIA, ARB-SEPOLIA, AVAX-FUJI, MATIC-AMOY, OP-SEPOLIA' },
         usdc: { type: 'boolean', description: 'Claim testnet USDC (default: true)' },
-        native: { type: 'boolean', description: 'Also claim native gas token (default: false)' },
+        native: { type: 'boolean', description: 'Also claim native gas token (default: false). NOTE: not supported on ARC-TESTNET — USDC IS the native gas token there. The backend silently clamps native→false on Arc so this is safe to leave unset.' },
       },
       required: [],
     },
