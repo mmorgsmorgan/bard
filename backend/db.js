@@ -486,6 +486,36 @@ export async function initSchema() {
     `CREATE INDEX IF NOT EXISTS idx_msgs_thread ON bounty_messages(bounty_id, proposal_id, created_at)`,
 
     `UPDATE agents SET owner_wallet = LOWER(owner_wallet) WHERE owner_wallet <> LOWER(owner_wallet)`,
+
+    // Backfill: rename case-insensitive duplicate agent_names so we can add a
+    // UNIQUE(LOWER(agent_name)) index. Keep the oldest of each group as-is,
+    // suffix the rest with the last 6 chars of their id (which is already
+    // globally unique). Idempotent: re-runs find no dups and no-op.
+    `WITH dups AS (
+       SELECT id, agent_name,
+              ROW_NUMBER() OVER (PARTITION BY LOWER(agent_name) ORDER BY created_at ASC, id ASC) AS rn
+       FROM agents
+     )
+     UPDATE agents a
+     SET agent_name = a.agent_name || '-' || RIGHT(a.id, 6)
+     FROM dups
+     WHERE a.id = dups.id AND dups.rn > 1`,
+
+    // Defensive second pass: if the suffix pass above happened to generate a
+    // name that collides with another existing agent (rare — would require
+    // someone manually named an agent matching another's id suffix), fall back
+    // to the full id as a suffix. No-op in the common case.
+    `WITH dups AS (
+       SELECT id, agent_name,
+              ROW_NUMBER() OVER (PARTITION BY LOWER(agent_name) ORDER BY created_at ASC, id ASC) AS rn
+       FROM agents
+     )
+     UPDATE agents a
+     SET agent_name = a.agent_name || '-' || a.id
+     FROM dups
+     WHERE a.id = dups.id AND dups.rn > 1`,
+
+    `CREATE UNIQUE INDEX IF NOT EXISTS uniq_agents_lower_name ON agents (LOWER(agent_name))`,
   ];
 
   for (const sql of statements) {
@@ -580,6 +610,7 @@ export const stmts = {
     [p.id, p.owner_wallet, p.agent_name, p.agent_public_key, p.agent_type, p.description, p.created_at, p.swarm_config || null, p.is_platform_owned || 0]
   ),
   getAgentById: async (id) => one('SELECT * FROM agents WHERE id = $1', [id]),
+  getAgentByName: async (name) => one('SELECT * FROM agents WHERE LOWER(agent_name) = LOWER($1) LIMIT 1', [name]),
   getAgentsByOwner: async (owner) => many('SELECT * FROM agents WHERE LOWER(owner_wallet) = LOWER($1) ORDER BY created_at DESC', [owner]),
   getAllAgents: async (status) => many('SELECT * FROM agents WHERE status = $1 ORDER BY reputation_score DESC', [status]),
   updateAgentReputation: async (score, totalContributions, totalEndorsements, id) => run(

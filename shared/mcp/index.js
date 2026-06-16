@@ -270,12 +270,13 @@ export const TOOLS = [
   },
   {
     name: 'bard_send_usdc',
-    description: 'Send testnet USDC from your Turnkey wallet on Arc Testnet. Recipient is either a raw address (`to`) or a BARD profile username (`toUsername`) — exactly one of the two is required. Arc uses USDC as the native gas token (ERC-20 system contract at 0x3600...0000). Max 100 USDC per tx. Requires a funded Turnkey wallet.',
+    description: 'Send testnet USDC from your Turnkey wallet on Arc Testnet (USDC is the native gas token, system contract 0x3600...0000). Provide exactly one of: `to` (raw 0x address), `toUsername` (BARD profile username, resolves via the profiles table), or `toAgentName` (case-insensitive BARD agent name, resolves to the agent\'s Turnkey wallet or owner wallet). Max 100 USDC per tx.',
     inputSchema: {
       type: 'object',
       properties: {
-        to: { type: 'string', description: 'Recipient wallet address (0x...). Use this for agent recipients or unregistered wallets.' },
-        toUsername: { type: 'string', description: 'BARD human profile username (without @). The backend resolves it to the profile\'s registered wallet.' },
+        to: { type: 'string', description: 'Recipient wallet address (0x...). Mutually exclusive with toUsername / toAgentName.' },
+        toUsername: { type: 'string', description: 'BARD human profile username (without @). Mutually exclusive with to / toAgentName.' },
+        toAgentName: { type: 'string', description: 'Recipient agent name on BARD (case-insensitive). Mutually exclusive with to / toUsername.' },
         amount: { type: 'string', description: 'Amount of USDC to send (e.g. "1.00", "10.50"). Max 100.' },
       },
       required: ['amount'],
@@ -878,18 +879,30 @@ async function handleTool(name, args, token) {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
         if (!args.amount) return { error: 'Missing required: amount (USDC string)' };
-        if (!args.to && !args.toUsername) return { error: 'Provide either `to` (0x address) or `toUsername` (BARD username)' };
-        if (args.to && args.toUsername) return { error: 'Provide only one of: `to` or `toUsername`' };
-        const body = args.toUsername
-          ? { toUsername: args.toUsername, amount: args.amount }
-          : { to: args.to, amount: args.amount };
+        const recipientFields = [args.to, args.toUsername, args.toAgentName].filter(Boolean);
+        if (recipientFields.length === 0) return { error: 'Provide one of `to` (0x address), `toUsername` (BARD username), or `toAgentName` (BARD agent name)' };
+        if (recipientFields.length > 1) return { error: 'Provide only one of: `to`, `toUsername`, or `toAgentName`' };
+        const body = { amount: args.amount };
+        if (args.to) body.to = args.to;
+        if (args.toUsername) body.toUsername = args.toUsername;
+        if (args.toAgentName) body.toAgentName = args.toAgentName;
         const res = await apiFetch(`/api/agents/${auth.agentId}/send-usdc`, {
           method: 'POST',
           body: JSON.stringify(body),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
-        return { success: true, from: data.from, to: data.to, toUsername: data.toUsername, amount: data.amount, txHash: data.txHash, explorer: data.explorer };
+        return {
+          success: true,
+          from: data.from,
+          to: data.to,
+          toUsername: data.toUsername,
+          toAgentName: data.toAgentName,
+          toAgentId: data.toAgentId,
+          amount: data.amount,
+          txHash: data.txHash,
+          explorer: data.explorer,
+        };
       }
 
       case 'bard_get_notifications': {
