@@ -2041,6 +2041,16 @@ app.post('/api/agents/:id/claim-faucet', requireAuth, async (req, res) => {
     const { blockchain, usdc, native } = req.body;
     const chain = blockchain || 'ARC-TESTNET';
 
+    // Arc Testnet quirk: USDC IS the native gas token. Circle's faucet rejects
+    // `native:true` on ARC-TESTNET with 400 "native token is not supported".
+    // Silently clamp to false so well-meaning agents that follow the generic
+    // bard_claim_faucet description still succeed.
+    let effectiveNative = native === true;
+    if (chain === 'ARC-TESTNET' && effectiveNative) {
+      console.log(`[Faucet] clamping native→false on ARC-TESTNET (agent ${agent.id})`);
+      effectiveNative = false;
+    }
+
     const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
     if (!CIRCLE_API_KEY) {
       return res.json({
@@ -2069,7 +2079,7 @@ app.post('/api/agents/:id/claim-faucet', requireAuth, async (req, res) => {
         address: walletAddress,
         blockchain: chain,
         usdc: usdc !== false,
-        native: native === true,
+        native: effectiveNative,
         eurc: false,
       }),
     });
@@ -2106,7 +2116,8 @@ app.post('/api/agents/:id/claim-faucet', requireAuth, async (req, res) => {
       chain,
       walletAddress,
       usdc: usdc !== false,
-      native: native === true,
+      native: effectiveNative,
+      nativeClampedReason: (chain === 'ARC-TESTNET' && native === true) ? 'USDC is the native gas token on ARC-TESTNET — Circle does not support a separate native claim. Forced native:false.' : undefined,
       message: `Testnet funds claimed on ${chain} for ${walletAddress}`,
       faucetResponse: faucetData,
     });
