@@ -1612,6 +1612,14 @@ app.post('/api/agents/register-from-token', async (req, res) => {
     });
   }
 
+  // Name collision against a *different* agent already on this backend
+  const nameCollision = await stmts.getAgentByName(agentName);
+  if (nameCollision) {
+    return res.status(409).json({
+      error: `Cannot import agent "${agentName}" — another agent already owns that name on this backend.`,
+    });
+  }
+
   // Allow optional refinement of fields via body (agentType, description),
   // but the identity (id/name/wallet) comes from the JWT only.
   const agentType = (req.body?.agentType) || 'general';
@@ -1636,6 +1644,11 @@ app.post('/api/agents/register-from-token', async (req, res) => {
       agent,
     });
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({
+        error: `Cannot import agent "${agentName}" — another agent already owns that name on this backend.`,
+      });
+    }
     return res.status(500).json({ error: err.message });
   }
 });
@@ -1645,6 +1658,12 @@ app.post('/api/agents/register', async (req, res) => {
   if (!ownerWallet || !agentName || !agentPublicKey) {
     return res.status(400).json({ error: 'ownerWallet, agentName, and agentPublicKey required' });
   }
+
+  const nameCollision = await stmts.getAgentByName(agentName);
+  if (nameCollision) {
+    return res.status(409).json({ error: `Agent name "${agentName}" is taken — pick another.` });
+  }
+
   const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     const insertData = {
@@ -1713,6 +1732,9 @@ app.post('/api/agents/register', async (req, res) => {
       expiresAt,
     });
   } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: `Agent name "${agentName}" is taken — pick another.` });
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -2111,34 +2133,43 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Agent has no Turnkey wallet. Use bard_create_wallet first.' });
     }
 
-    const { to, toUsername, amount } = req.body;
+    const { to: rawTo, toUsername, toAgentName, amount } = req.body;
     if (!amount) {
       return res.status(400).json({ error: 'Missing required field: amount (USDC string e.g. "1.00")' });
     }
-    if (!to && !toUsername) {
-      return res.status(400).json({ error: 'Missing recipient: provide either `to` (0x address) or `toUsername` (BARD profile username)' });
+    const recipientFields = [rawTo, toUsername, toAgentName].filter(Boolean);
+    if (recipientFields.length === 0) {
+      return res.status(400).json({ error: 'Missing recipient: provide one of `to` (0x address), `toUsername` (BARD profile username), or `toAgentName` (BARD agent name)' });
     }
-    if (to && toUsername) {
-      return res.status(400).json({ error: 'Provide only one of: `to` or `toUsername`' });
+    if (recipientFields.length > 1) {
+      return res.status(400).json({ error: 'Provide only one of: `to`, `toUsername`, or `toAgentName`' });
     }
 
-    // Resolve recipient — either a raw address or a BARD profile username.
-    // Username lookups query the `profiles` table (UNIQUE on username) and
-    // return the registered wallet. Agent names are not unique on prod, so
-    // agent recipients still pass a raw `to` address (see memory
-    // bard-name-uniqueness).
+    // Resolve the recipient. Profiles.username is UNIQUE; agents.agent_name is
+    // UNIQUE(LOWER(...)) as of the 2026-06-16 migration. Agents resolve to
+    // their Turnkey wallet, falling back to owner_wallet.
     let resolvedTo;
+    let resolvedAgent = null;
     if (toUsername) {
       const profile = await stmts.getProfileByUsername(toUsername);
       if (!profile || !profile.wallet) {
         return res.status(404).json({ error: `No BARD profile registered for username "${toUsername}"`, hint: 'profile_not_found' });
       }
       resolvedTo = profile.wallet.toLowerCase();
+    } else if (toAgentName) {
+      resolvedAgent = await stmts.getAgentByName(toAgentName);
+      if (!resolvedAgent) {
+        return res.status(404).json({ error: `No agent found with name "${toAgentName}"`, hint: 'agent_not_found' });
+      }
+      resolvedTo = resolvedAgent.turnkey_address || resolvedAgent.owner_wallet;
+      if (!resolvedTo) {
+        return res.status(400).json({ error: `Agent "${toAgentName}" has no payout wallet on file` });
+      }
     } else {
-      if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
+      if (!/^0x[0-9a-fA-F]{40}$/.test(rawTo)) {
         return res.status(400).json({ error: 'Invalid recipient address' });
       }
-      resolvedTo = to;
+      resolvedTo = rawTo;
     }
 
     // Parse amount (USDC has 6 decimals via ERC-20 interface)
@@ -2211,12 +2242,25 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       value: 0n,
     });
 
-    console.log(`[Send USDC] ${agent.agent_name}: ${parsedAmount} USDC → ${resolvedTo}${toUsername ? ` (@${toUsername})` : ''} | tx: ${txHash}`);
+    const displayRecipient = toUsername
+      ? `@${toUsername}`
+      : resolvedAgent
+        ? `${resolvedAgent.agent_name} (${resolvedTo.slice(0,6)}...${resolvedTo.slice(-4)})`
+        : `${resolvedTo.slice(0,6)}...${resolvedTo.slice(-4)}`;
+    console.log(`[Send USDC] ${agent.agent_name}: ${parsedAmount} USDC → ${displayRecipient} | tx: ${txHash}`);
 
     // Update agent's last active
     await pool.query('UPDATE agents SET last_active_at = $1 WHERE id = $2', [Math.floor(Date.now() / 1000), agent.id]);
-    emitFeedEvent('agent:send-usdc', { agentId: agent.id, agentName: agent.agent_name, to: resolvedTo, toUsername: toUsername || null, amount: parsedAmount, txHash });
-    const displayRecipient = toUsername ? `@${toUsername}` : `${resolvedTo.slice(0,6)}...${resolvedTo.slice(-4)}`;
+    emitFeedEvent('agent:send-usdc', {
+      agentId: agent.id,
+      agentName: agent.agent_name,
+      to: resolvedTo,
+      toUsername: toUsername || null,
+      toAgentName: resolvedAgent?.agent_name || null,
+      toAgentId: resolvedAgent?.id || null,
+      amount: parsedAmount,
+      txHash,
+    });
     await createNotification({ agentId: agent.id, type: 'send', title: 'USDC Sent', message: `${agent.agent_name} sent ${parsedAmount} USDC to ${displayRecipient}.`, from: walletAddress, amount: String(parsedAmount) });
     await createNotification({ wallet: resolvedTo, type: 'send', title: 'USDC Received', message: `Received ${parsedAmount} USDC from agent ${agent.agent_name}.`, from: walletAddress, amount: String(parsedAmount) });
 
@@ -2225,6 +2269,8 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       from: walletAddress,
       to: resolvedTo,
       toUsername: toUsername || null,
+      toAgentName: resolvedAgent?.agent_name || null,
+      toAgentId: resolvedAgent?.id || null,
       amount: parsedAmount,
       token: ARC_USDC,
       chain: 'Arc Testnet',
