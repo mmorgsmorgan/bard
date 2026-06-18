@@ -283,6 +283,68 @@ export const TOOLS = [
     },
   },
   {
+    name: 'bard_quote_swap',
+    description: 'Get a swap quote on Achswap DEX (Arc Testnet). Returns expected output amount and the on-chain route across V2/V3/V4 pools. No transaction is sent. tokenIn/tokenOut accept a 0x address or symbol (USDC, WUSDC, ACHS). amountIn is a decimal-aware integer string in the input token\'s smallest units (e.g. "1000000000000000000" = 1 token for an 18-decimal token).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tokenIn: { type: 'string', description: 'Input token address or symbol (USDC, WUSDC, ACHS).' },
+        tokenOut: { type: 'string', description: 'Output token address or symbol.' },
+        amountIn: { type: 'string', description: 'Input amount in smallest units, as a string.' },
+      },
+      required: ['tokenIn', 'tokenOut', 'amountIn'],
+    },
+  },
+  {
+    name: 'bard_swap',
+    description: 'Swap tokens on Achswap DEX (Arc Testnet), signed by your Turnkey wallet. Auto-handles ERC-20 approval if needed. Per-tx cap: 50 USDC equivalent. Slippage: default 100bps (1%), max 500bps (5%). Rate-limited to 10/hr and 500 USDC equivalent / 24h per agent. Returns the swap tx hash and (if approval was needed) the approve tx hash.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tokenIn: { type: 'string', description: 'Input token address or symbol (USDC, WUSDC, ACHS).' },
+        tokenOut: { type: 'string', description: 'Output token address or symbol.' },
+        amountIn: { type: 'string', description: 'Input amount in smallest units, as a string.' },
+        slippageBps: { type: 'number', description: 'Slippage tolerance in basis points (default 100 = 1%, max 500 = 5%).' },
+      },
+      required: ['tokenIn', 'tokenOut', 'amountIn'],
+    },
+  },
+  {
+    name: 'bard_token_holders',
+    description: 'List top holders of an ERC-20 token on Arc Testnet, ranked by balance with percentage of supply. Proxies Achswap\'s get_token_holders.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tokenAddress: { type: 'string', description: 'Token address or symbol.' },
+        limit: { type: 'number', description: 'Max holders to return (default 25).' },
+      },
+      required: ['tokenAddress'],
+    },
+  },
+  {
+    name: 'bard_tx_history',
+    description: 'Recent on-chain transactions for a wallet on Arc Testnet, with decoded method calls and token transfers. Defaults to your own agent wallet if address is omitted.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: 'Wallet address (0x...). Defaults to your agent\'s Turnkey wallet.' },
+        limit: { type: 'number', description: 'Max transactions to return (default 10).' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'bard_token_info',
+    description: 'Get symbol and decimals for any ERC-20 token on Arc Testnet. Cached server-side for 1 hour.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tokenAddress: { type: 'string', description: 'Token address or symbol.' },
+      },
+      required: ['tokenAddress'],
+    },
+  },
+  {
     name: 'bard_get_notifications',
     description: 'Read your notifications and your linked human\'s notifications. Shows USDC transfers, endorsements, faucet claims, identity mints, agent linking, bounty events, and more. Unread count included.',
     inputSchema: {
@@ -903,6 +965,105 @@ async function handleTool(name, args, token) {
           txHash: data.txHash,
           explorer: data.explorer,
         };
+      }
+
+      case 'bard_quote_swap': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        if (!args.tokenIn || !args.tokenOut || !args.amountIn) {
+          return { error: 'Required: tokenIn, tokenOut, amountIn' };
+        }
+        const res = await apiFetch(`/api/agents/${auth.agentId}/dex/quote`, {
+          method: 'POST',
+          body: JSON.stringify({
+            tokenIn: args.tokenIn,
+            tokenOut: args.tokenOut,
+            amountIn: String(args.amountIn),
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return {
+          success: true,
+          tokenIn: data.tokenIn,
+          tokenOut: data.tokenOut,
+          amountIn: data.amountIn,
+          expectedOut: data.expectedOut,
+          expectedOutFormatted: data.expectedOutFormatted,
+          route: data.route,
+        };
+      }
+
+      case 'bard_swap': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        if (!args.tokenIn || !args.tokenOut || !args.amountIn) {
+          return { error: 'Required: tokenIn, tokenOut, amountIn' };
+        }
+        const body = {
+          tokenIn: args.tokenIn,
+          tokenOut: args.tokenOut,
+          amountIn: String(args.amountIn),
+        };
+        if (Number.isFinite(args.slippageBps)) body.slippageBps = args.slippageBps;
+        const res = await apiFetch(`/api/agents/${auth.agentId}/dex/swap`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return {
+          success: true,
+          from: data.from,
+          tokenIn: data.tokenIn,
+          tokenOut: data.tokenOut,
+          amountIn: data.amountIn,
+          minOut: data.minOut,
+          actualOut: data.actualOut,
+          slippageBps: data.slippageBps,
+          route: data.route,
+          approveTxHash: data.approveTxHash,
+          swapTxHash: data.swapTxHash,
+          explorer: data.explorer,
+        };
+      }
+
+      case 'bard_token_holders': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        if (!args.tokenAddress) return { error: 'tokenAddress required' };
+        const res = await apiFetch(`/api/agents/${auth.agentId}/dex/token-holders`, {
+          method: 'POST',
+          body: JSON.stringify({ tokenAddress: args.tokenAddress, limit: args.limit }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return data;
+      }
+
+      case 'bard_tx_history': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/agents/${auth.agentId}/dex/tx-history`, {
+          method: 'POST',
+          body: JSON.stringify({ address: args.address, limit: args.limit }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return data;
+      }
+
+      case 'bard_token_info': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        if (!args.tokenAddress) return { error: 'tokenAddress required' };
+        const res = await apiFetch(`/api/agents/${auth.agentId}/dex/token-info`, {
+          method: 'POST',
+          body: JSON.stringify({ tokenAddress: args.tokenAddress }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error };
+        return data;
       }
 
       case 'bard_get_notifications': {
