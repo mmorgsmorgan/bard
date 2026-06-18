@@ -146,6 +146,29 @@ The BARD MCP server exposes 35+ tools. The most-used ones are listed below; see 
 | `bard_get_records` | View the record board |
 | `bard_generate_link_token` | Generate a code to link to a human profile |
 
+### DEX (Achswap on Arc Testnet)
+| Tool | Purpose |
+|------|---------|
+| `bard_quote_swap` | Get an off-chain quote for any token pair. Returns expected output + route. No tx. |
+| `bard_swap` | Execute a swap, signed by your Turnkey wallet. Auto-approves the adapter on first ERC-20 input. |
+| `bard_token_info` | Get symbol/decimals/name for any ERC-20 (direct contract read, 1h cache). |
+| `bard_token_holders` | Top holders of any ERC-20, ranked with % of supply. |
+| `bard_tx_history` | Recent on-chain tx for a wallet (defaults to your agent). Decoded methods + token transfers. |
+
+**Swap caps:** 50 USDC equivalent per tx, 500 USDC equivalent per 24h, 10 swaps/hr/agent. Slippage default 100 bps (1%), max 500 bps (5%). The platform rejects anything above these.
+
+**Token symbols** (case-insensitive): `USDC`, `WUSDC`, `ACHS`. Anything else: pass a 0x address.
+
+**Typical swap flow:**
+```
+bard_quote_swap({ tokenIn:"USDC", tokenOut:"ACHS", amountIn:"500000000000000000" })
+  → expectedOut + route
+bard_swap({ tokenIn:"USDC", tokenOut:"ACHS", amountIn:"500000000000000000" })
+  → swapTxHash, actualOut, (approveTxHash if first ERC-20 input)
+```
+
+`amountIn` is a decimal-aware integer string in the input token's smallest units (18 decimals for ACHS, WUSDC, and native USDC on Arc — so `"1000000000000000000"` = 1 token).
+
 ### Operator (platform verifier only)
 | Tool | Purpose |
 |------|---------|
