@@ -14,6 +14,15 @@ import { formatUnits, verifyMessage, createPublicClient, http, parseUnits } from
 import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans, deleteStrandedWallets } from './turnkey-wallet.js';
 import { pool, query, initSchema, stmts } from './db.js';
 import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
+import {
+  ACHSWAP_ADAPTER,
+  NATIVE_TOKEN,
+  MAX_UINT256,
+  ADAPTER_ABI,
+  ERC20_ABI,
+  resolveToken,
+  achswapCall,
+} from './achswap.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -159,6 +168,8 @@ const RATE_LIMITS = {
   'auth_verify': { max: 10, window: 60 },     // 10 verify attempts per minute per IP
   'bounty_propose': { max: 5, window: 3600 },  // 5 proposals per hour per agent
   'bounty_message': { max: 60, window: 3600 }, // 60 messages per hour per wallet
+  'dex_swap': { max: 10, window: 3600 },       // 10 swaps per hour per agent
+  'dex_swap_daily_usdc': { max: 500, window: 86400 }, // 500 USDC equivalent per 24h per agent (counter incremented by USDC units, see checkRateLimitN)
 };
 
 async function checkRateLimit(key, action) {
@@ -177,6 +188,30 @@ async function checkRateLimit(key, action) {
   }
   if (row.count >= limits.max) return false;
   await pool.query('UPDATE rate_limits SET count = count + 1 WHERE key = $1', [fullKey]);
+  return true;
+}
+
+// Same as checkRateLimit but increments by N (e.g. USDC amount) per call instead
+// of 1. Rejects if (current count + N) would exceed the configured max. Used by
+// the dex_swap_daily_usdc cap where each call burns "amountIn USDC" of budget.
+async function checkRateLimitN(key, action, n) {
+  const limits = RATE_LIMITS[action];
+  if (!limits) return true;
+  if (n <= 0) return true;
+  const fullKey = `${key}:${action}`;
+  const now = Math.floor(Date.now() / 1000);
+  const row = (await pool.query('SELECT count, window_start FROM rate_limits WHERE key = $1', [fullKey])).rows[0];
+  if (!row || (now - row.window_start) > limits.window) {
+    if (n > limits.max) return false;
+    await pool.query(
+      `INSERT INTO rate_limits (key, count, window_start) VALUES ($1, $2, $3)
+       ON CONFLICT (key) DO UPDATE SET count = EXCLUDED.count, window_start = EXCLUDED.window_start`,
+      [fullKey, n, now]
+    );
+    return true;
+  }
+  if (row.count + n > limits.max) return false;
+  await pool.query('UPDATE rate_limits SET count = count + $1 WHERE key = $2', [n, fullKey]);
   return true;
 }
 
@@ -2290,6 +2325,320 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('Send USDC error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════
+// ── Achswap DEX (Arc Testnet) ──
+// Agents trade via the AchSwapAdapter contract directly, signed by their
+// Turnkey wallet. Read tools (quote, token holders, tx history, token info)
+// proxy Achswap's MCP — no key required for those. See backend/achswap.js for
+// the function signatures and constants.
+// ══════════════════════════════════════════════════════
+
+// Module-level caches. quoteCache lets /dex/swap re-use a fresh quote within
+// 60s instead of forcing the agent to round-trip. tokenInfoCache spares us a
+// network hop for repeated symbol/decimals lookups.
+const quoteCache = new Map();        // key = `${agentId}|${tokenIn}|${tokenOut}|${amountIn}` → { quote, ts }
+const tokenInfoCache = new Map();    // key = address → { info, ts }
+const QUOTE_TTL_MS = 60_000;
+const TOKEN_INFO_TTL_MS = 60 * 60 * 1000;
+
+// Look up the USDC-equivalent value of `amountIn` of `tokenIn` so we can enforce
+// per-tx and per-day caps in stable units. tokenIn === NATIVE_TOKEN is treated
+// as 1:1 USDC (it IS USDC on Arc).
+async function priceInUsdc(tokenIn, amountIn) {
+  if (tokenIn === NATIVE_TOKEN || tokenIn.toLowerCase() === NATIVE_TOKEN) {
+    // amountIn is in 18-decimal native USDC units; return USDC integer.
+    return Number(BigInt(amountIn) / 10n ** 18n);
+  }
+  try {
+    const q = await achswapCall('quote_adapter', {
+      token_in: tokenIn,
+      token_out: NATIVE_TOKEN,
+      amount_in: String(amountIn),
+    });
+    if (!q.expected_out) return null;
+    return Number(BigInt(q.expected_out) / 10n ** 18n);
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/agents/:id/dex/quote — read-only proxy.
+app.post('/api/agents/:id/dex/quote', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) {
+      return res.status(403).json({ error: 'Can only quote from your own agent context' });
+    }
+    const { tokenIn, tokenOut, amountIn } = req.body || {};
+    if (!tokenIn || !tokenOut || !amountIn) {
+      return res.status(400).json({ error: 'Required: tokenIn, tokenOut, amountIn (decimal-aware integer string)' });
+    }
+    const inAddr = resolveToken(tokenIn);
+    const outAddr = resolveToken(tokenOut);
+    if (inAddr === outAddr) return res.status(400).json({ error: 'tokenIn and tokenOut must differ' });
+
+    const quote = await achswapCall('quote_adapter', {
+      token_in: inAddr,
+      token_out: outAddr,
+      amount_in: String(amountIn),
+    });
+    if (!quote.route_data || !quote.expected_out) {
+      return res.status(502).json({ error: 'Achswap returned an empty route — likely no liquidity for this pair' });
+    }
+    // Cache for use by /dex/swap.
+    const cacheKey = `${req.auth.agentId}|${inAddr}|${outAddr}|${amountIn}`;
+    quoteCache.set(cacheKey, { quote, ts: Date.now() });
+
+    res.json({
+      success: true,
+      tokenIn: inAddr,
+      tokenOut: outAddr,
+      amountIn: String(amountIn),
+      expectedOut: quote.expected_out,
+      expectedOutFormatted: quote.expected_out_formatted,
+      route: quote.route,
+      routeData: quote.route_data,
+    });
+  } catch (err) {
+    console.error('Dex quote error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/agents/:id/dex/swap — signs and broadcasts.
+app.post('/api/agents/:id/dex/swap', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) {
+      return res.status(403).json({ error: 'Can only swap from your own agent wallet' });
+    }
+    const agent = await stmts.getAgentById(req.params.id);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+    const walletAddress = agent.turnkey_address;
+    if (!walletAddress) {
+      return res.status(400).json({ error: 'Agent has no Turnkey wallet. Use bard_create_wallet first.' });
+    }
+
+    const { tokenIn, tokenOut, amountIn, slippageBps } = req.body || {};
+    if (!tokenIn || !tokenOut || !amountIn) {
+      return res.status(400).json({ error: 'Required: tokenIn, tokenOut, amountIn' });
+    }
+    const slippage = Number.isFinite(slippageBps) ? Number(slippageBps) : 100;
+    if (slippage < 0 || slippage > 500) {
+      return res.status(400).json({ error: 'slippageBps must be 0–500 (max 5%)' });
+    }
+    const inAddr = resolveToken(tokenIn);
+    const outAddr = resolveToken(tokenOut);
+    if (inAddr === outAddr) return res.status(400).json({ error: 'tokenIn and tokenOut must differ' });
+
+    // Per-tx cap: 50 USDC equivalent.
+    const usdcValue = await priceInUsdc(inAddr, amountIn);
+    if (usdcValue === null) {
+      return res.status(400).json({ error: 'Could not price tokenIn in USDC — pair has no liquidity' });
+    }
+    if (usdcValue > 50) {
+      return res.status(400).json({ error: `Per-tx cap: 50 USDC equivalent (got ~${usdcValue} USDC)` });
+    }
+
+    // Rate limit: 10/hr per agent.
+    if (!(await checkRateLimit(req.params.id, 'dex_swap'))) {
+      return res.status(429).json({ error: 'Swap rate limit: 10 per hour per agent' });
+    }
+    // Daily budget: 500 USDC equivalent rolling 24h.
+    if (!(await checkRateLimitN(req.params.id, 'dex_swap_daily_usdc', Math.max(1, usdcValue)))) {
+      return res.status(429).json({ error: 'Daily swap budget exhausted: 500 USDC equivalent per 24h per agent' });
+    }
+
+    // Fetch or reuse cached quote.
+    const cacheKey = `${req.auth.agentId}|${inAddr}|${outAddr}|${amountIn}`;
+    const cached = quoteCache.get(cacheKey);
+    let quote;
+    if (cached && Date.now() - cached.ts < QUOTE_TTL_MS) {
+      quote = cached.quote;
+    } else {
+      quote = await achswapCall('quote_adapter', {
+        token_in: inAddr,
+        token_out: outAddr,
+        amount_in: String(amountIn),
+      });
+      quoteCache.set(cacheKey, { quote, ts: Date.now() });
+    }
+    if (!quote.route_data || !quote.expected_out) {
+      return res.status(502).json({ error: 'Achswap returned an empty route — no liquidity' });
+    }
+    const expectedOut = BigInt(quote.expected_out);
+    const minOut = (expectedOut * BigInt(10000 - slippage)) / 10000n;
+    const routeData = quote.route_data;
+
+    // Turnkey signer setup (same pattern as /send-usdc).
+    const { Turnkey } = await import('@turnkey/sdk-server');
+    const { createAccount } = await import('@turnkey/viem');
+    const { createWalletClient, http, encodeFunctionData, decodeEventLog } = await import('viem');
+
+    const arcTestnet = {
+      id: 5042002,
+      name: 'Arc Testnet',
+      nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
+      rpcUrls: { default: { http: ['https://rpc.testnet.arc.network'] } },
+      blockExplorers: { default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' } },
+    };
+
+    const tk = new Turnkey({
+      defaultOrganizationId: process.env.TURNKEY_ORGANIZATION_ID,
+      apiBaseUrl: 'https://api.turnkey.com',
+      apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
+      apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
+    });
+    const account = await createAccount({
+      client: tk.apiClient(),
+      organizationId: process.env.TURNKEY_ORGANIZATION_ID,
+      signWith: walletAddress,
+    });
+    const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http() });
+
+    // ERC-20 input → ensure adapter allowance.
+    let approveTxHash = null;
+    if (inAddr !== NATIVE_TOKEN) {
+      const allowance = await arcTestnetClient.readContract({
+        address: inAddr,
+        abi: ERC20_ABI,
+        functionName: 'allowance',
+        args: [walletAddress, ACHSWAP_ADAPTER],
+      });
+      if (BigInt(allowance) < BigInt(amountIn)) {
+        const approveData = encodeFunctionData({
+          abi: ERC20_ABI,
+          functionName: 'approve',
+          args: [ACHSWAP_ADAPTER, MAX_UINT256],
+        });
+        approveTxHash = await walletClient.sendTransaction({
+          to: inAddr,
+          data: approveData,
+          value: 0n,
+        });
+        // Wait for inclusion before swap (Arc blocks are quick; ~5s).
+        await arcTestnetClient.waitForTransactionReceipt({ hash: approveTxHash });
+        console.log(`[Swap] ${agent.agent_name}: approved adapter to spend ${inAddr} | tx ${approveTxHash}`);
+      }
+    }
+
+    // Build + send the swap.
+    const swapData = encodeFunctionData({
+      abi: ADAPTER_ABI,
+      functionName: 'swap',
+      args: [inAddr, outAddr, BigInt(amountIn), minOut, walletAddress, routeData],
+    });
+    const swapTxHash = await walletClient.sendTransaction({
+      to: ACHSWAP_ADAPTER,
+      data: swapData,
+      value: inAddr === NATIVE_TOKEN ? BigInt(amountIn) : 0n,
+    });
+    const receipt = await arcTestnetClient.waitForTransactionReceipt({ hash: swapTxHash });
+
+    // Parse actualOut from a Transfer event whose `to` is the agent's wallet.
+    let actualOut = null;
+    for (const log of receipt.logs || []) {
+      // Native-out swaps emit no ERC-20 Transfer; skip.
+      if (outAddr === NATIVE_TOKEN) break;
+      if (log.address.toLowerCase() !== outAddr.toLowerCase()) continue;
+      try {
+        const decoded = decodeEventLog({ abi: ERC20_ABI, data: log.data, topics: log.topics });
+        if (decoded.eventName === 'Transfer' &&
+            decoded.args.to.toLowerCase() === walletAddress.toLowerCase()) {
+          actualOut = String(decoded.args.value);
+        }
+      } catch { /* not a Transfer log */ }
+    }
+
+    console.log(`[Swap] ${agent.agent_name}: ${amountIn} ${inAddr.slice(0,6)} → ${actualOut || '?'} ${outAddr.slice(0,6)} | tx ${swapTxHash}`);
+
+    await pool.query('UPDATE agents SET last_active_at = $1 WHERE id = $2', [Math.floor(Date.now() / 1000), agent.id]);
+    emitFeedEvent('agent:dex-swap', {
+      agentId: agent.id,
+      agentName: agent.agent_name,
+      tokenIn: inAddr,
+      tokenOut: outAddr,
+      amountIn: String(amountIn),
+      actualOut,
+      route: quote.route,
+      txHash: swapTxHash,
+    });
+    await createNotification({
+      agentId: agent.id,
+      type: 'swap',
+      title: 'DEX Swap',
+      message: `${agent.agent_name} swapped ${amountIn} ${tokenIn} → ${actualOut || '?'} ${tokenOut}.`,
+      from: walletAddress,
+      amount: String(amountIn),
+    });
+
+    res.json({
+      success: true,
+      from: walletAddress,
+      tokenIn: inAddr,
+      tokenOut: outAddr,
+      amountIn: String(amountIn),
+      minOut: String(minOut),
+      actualOut,
+      slippageBps: slippage,
+      route: quote.route,
+      approveTxHash,
+      swapTxHash,
+      explorer: `https://testnet.arcscan.app/tx/${swapTxHash}`,
+    });
+  } catch (err) {
+    console.error('Dex swap error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/agents/:id/dex/token-holders — proxy.
+app.post('/api/agents/:id/dex/token-holders', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) return res.status(403).json({ error: 'Wrong agent context' });
+    const { tokenAddress, limit } = req.body || {};
+    if (!tokenAddress) return res.status(400).json({ error: 'tokenAddress required' });
+    const addr = resolveToken(tokenAddress);
+    const data = await achswapCall('get_token_holders', { token_address: addr, limit: limit || 25 });
+    res.json({ success: true, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/agents/:id/dex/tx-history — proxy.
+app.post('/api/agents/:id/dex/tx-history', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) return res.status(403).json({ error: 'Wrong agent context' });
+    const agent = await stmts.getAgentById(req.params.id);
+    const { address, limit } = req.body || {};
+    const target = address || agent?.turnkey_address;
+    if (!target) return res.status(400).json({ error: 'address required (or agent must have a Turnkey wallet)' });
+    const data = await achswapCall('get_transaction_history', { address: target, limit: limit || 10 });
+    res.json({ success: true, address: target, ...data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/agents/:id/dex/token-info — proxy with 1h cache.
+app.post('/api/agents/:id/dex/token-info', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) return res.status(403).json({ error: 'Wrong agent context' });
+    const { tokenAddress } = req.body || {};
+    if (!tokenAddress) return res.status(400).json({ error: 'tokenAddress required' });
+    const addr = resolveToken(tokenAddress);
+    const cached = tokenInfoCache.get(addr);
+    if (cached && Date.now() - cached.ts < TOKEN_INFO_TTL_MS) {
+      return res.json({ success: true, cached: true, ...cached.info });
+    }
+    const info = await achswapCall('get_token_info', { token_address: addr });
+    tokenInfoCache.set(addr, { info, ts: Date.now() });
+    res.json({ success: true, cached: false, ...info });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
