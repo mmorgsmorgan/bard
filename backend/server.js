@@ -2624,18 +2624,35 @@ app.post('/api/agents/:id/dex/tx-history', requireAuth, async (req, res) => {
   }
 });
 
-// POST /api/agents/:id/dex/token-info — proxy with 1h cache.
+// POST /api/agents/:id/dex/token-info — direct ERC-20 reads, 1h cache.
+// (Achswap's get_token_info MCP tool requires X-Private-Key which BARD agents
+// don't have, so we just hit the contract directly.)
 app.post('/api/agents/:id/dex/token-info', requireAuth, async (req, res) => {
   try {
     if (req.auth.agentId !== req.params.id) return res.status(403).json({ error: 'Wrong agent context' });
     const { tokenAddress } = req.body || {};
     if (!tokenAddress) return res.status(400).json({ error: 'tokenAddress required' });
     const addr = resolveToken(tokenAddress);
+
+    // Native USDC sentinel: hard-coded answer (Arc Testnet convention).
+    if (addr === NATIVE_TOKEN) {
+      return res.json({ success: true, cached: false, address: addr,
+                        symbol: 'USDC', name: 'USD Coin (native)', decimals: 18 });
+    }
+
     const cached = tokenInfoCache.get(addr);
     if (cached && Date.now() - cached.ts < TOKEN_INFO_TTL_MS) {
       return res.json({ success: true, cached: true, ...cached.info });
     }
-    const info = await achswapCall('get_token_info', { token_address: addr });
+    const [symbol, decimals, name] = await Promise.all([
+      arcTestnetClient.readContract({ address: addr, abi: ERC20_ABI, functionName: 'symbol' }).catch(() => null),
+      arcTestnetClient.readContract({ address: addr, abi: ERC20_ABI, functionName: 'decimals' }).catch(() => null),
+      arcTestnetClient.readContract({ address: addr, abi: ERC20_ABI, functionName: 'name' }).catch(() => null),
+    ]);
+    if (symbol === null && decimals === null) {
+      return res.status(404).json({ error: `No ERC-20 contract at ${addr} (or it doesn't implement symbol/decimals)` });
+    }
+    const info = { address: addr, symbol, decimals: decimals !== null ? Number(decimals) : null, name };
     tokenInfoCache.set(addr, { info, ts: Date.now() });
     res.json({ success: true, cached: false, ...info });
   } catch (err) {
