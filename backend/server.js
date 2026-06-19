@@ -23,6 +23,7 @@ import {
   resolveToken,
   achswapCall,
 } from './achswap.js';
+import { withMemo, MemoIds, ARC_MEMO_ADDRESS } from './arc-memo.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -277,7 +278,16 @@ async function checkEscrowExpiry({ onlyBountyId = null } = {}) {
       let refundTx;
       try {
         console.log(`[Escrow Expiry] Refunding ${amount} USDC to ${b.creator_wallet} for bounty ${b.id} (was ${b.escrow_status})...`);
-        refundTx = await transferUSDCFromPlatform(b.creator_wallet, amount);
+        refundTx = await transferUSDCFromPlatform(b.creator_wallet, amount, {
+          memoId: MemoIds.JobRefundExp,
+          memoData: {
+            bountyId: b.id,
+            creatorWallet: b.creator_wallet,
+            amountUsd: amount,
+            cause: 'expired',
+            previousStatus: b.escrow_status,
+          },
+        });
       } catch (err) {
         console.error(`  Escrow expiry refund failed for ${b.id}: ${err.message}. Will retry next tick.`);
         summary.failed.push({ id: b.id, error: err.message });
@@ -2282,9 +2292,26 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       args: [resolvedTo, amountWei],
     });
 
+    // Wrap with Arc Memo so the agent-initiated transfer carries reconciliation
+    // context (which agent sent, to which BARD profile if any, amount).
+    const wrapped = withMemo(
+      { to: ARC_USDC, data },
+      {
+        memoId: MemoIds.PayoutAgent,
+        memoData: {
+          agentId: agent.id,
+          agentName: agent.agent_name,
+          fromWallet: walletAddress,
+          toWallet: resolvedTo,
+          toUsername: toUsername || null,
+          amountUsd: parsedAmount,
+        },
+      },
+    );
+
     const txHash = await walletClient.sendTransaction({
-      to: ARC_USDC,
-      data,
+      to: wrapped.to,
+      data: wrapped.data,
       value: 0n,
     });
 
@@ -2293,7 +2320,7 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       : resolvedAgent
         ? `${resolvedAgent.agent_name} (${resolvedTo.slice(0,6)}...${resolvedTo.slice(-4)})`
         : `${resolvedTo.slice(0,6)}...${resolvedTo.slice(-4)}`;
-    console.log(`[Send USDC] ${agent.agent_name}: ${parsedAmount} USDC → ${displayRecipient} | tx: ${txHash}`);
+    console.log(`[Send USDC] ${agent.agent_name}: ${parsedAmount} USDC → ${displayRecipient} [memo:agent] | tx: ${txHash}`);
 
     // Update agent's last active
     await pool.query('UPDATE agents SET last_active_at = $1 WHERE id = $2', [Math.floor(Date.now() / 1000), agent.id]);
@@ -3647,7 +3674,7 @@ async function getPlatformWalletBalance() {
 }
 
 // Transfer USDC from platform escrow wallet to recipient
-async function transferUSDCFromPlatform(toAddress, amountUsdc) {
+async function transferUSDCFromPlatform(toAddress, amountUsdc, memo = null) {
   if (!isTurnkeyEnabled()) {
     throw new Error('Turnkey not configured. Cannot sign platform transactions.');
   }
@@ -3666,7 +3693,8 @@ async function transferUSDCFromPlatform(toAddress, amountUsdc) {
     throw new Error(`Insufficient platform wallet balance. Required: ${amountUsdc} USDC, Available: ${balance.toFixed(2)} USDC. Please fund the platform wallet.`);
   }
 
-  console.log(`[Platform Transfer] Sending ${amountUsdc} USDC to ${toAddress}... (balance: ${balance.toFixed(2)} USDC)`);
+  const memoTag = memo?.memoId ? ` [memo:${memo.memoId.slice(0, 10)}…]` : '';
+  console.log(`[Platform Transfer] Sending ${amountUsdc} USDC to ${toAddress}${memoTag}... (balance: ${balance.toFixed(2)} USDC)`);
 
   try {
     const { Turnkey } = await import('@turnkey/sdk-server');
@@ -3717,13 +3745,24 @@ async function transferUSDCFromPlatform(toAddress, amountUsdc) {
       args: [toAddress, amountWei],
     });
 
+    // Route through Arc Memo contract when caller passes a memo. The Memo
+    // contract preserves msg.sender via the CallFrom precompile, so USDC's
+    // transfer still credits the platform wallet, and an indexable
+    // (memoId, memoData) trail is emitted for reconciliation.
+    const tx = memo?.memoId
+      ? withMemo(
+          { to: USDC_CONTRACT_ADDRESS, data },
+          { memoId: memo.memoId, memoData: memo.memoData ?? null },
+        )
+      : { to: USDC_CONTRACT_ADDRESS, data };
+
     const txHash = await walletClient.sendTransaction({
-      to: USDC_CONTRACT_ADDRESS,
-      data,
+      to: tx.to,
+      data: tx.data,
       value: 0n,
     });
 
-    console.log(`✓ Platform transfer successful: ${amountUsdc} USDC → ${toAddress} | tx: ${txHash}`);
+    console.log(`✓ Platform transfer successful: ${amountUsdc} USDC → ${toAddress}${memoTag} | tx: ${txHash}`);
     return txHash;
   } catch (error) {
     console.error(`✗ Platform transfer failed:`, error);
@@ -4380,7 +4419,18 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
 
       // ACTUAL USDC TRANSFER - Release payment to agent
       console.log(`[Escrow Release] Transferring ${agentEarnings} USDC to ${agent.agent_name} (${recipientWallet})...`);
-      const releaseTx = await transferUSDCFromPlatform(recipientWallet, agentEarnings);
+      const releaseTx = await transferUSDCFromPlatform(recipientWallet, agentEarnings, {
+        memoId: MemoIds.PayoutAgent,
+        memoData: {
+          bountyId: req.params.id,
+          agentId: bounty.provider_agent_id,
+          agentName: agent.agent_name,
+          agentWallet: recipientWallet,
+          amountUsd: agentEarnings,
+          platformFeeUsd: platformFee,
+          verifier: verifierWallet,
+        },
+      });
 
       await client.query(
         `UPDATE bounties SET release_tx_hash = $1, escrow_status = 'released', status = 'completed', released_at = $2, updated_at = $3 WHERE id = $4`,
@@ -4407,7 +4457,17 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
 
       // ACTUAL USDC TRANSFER - Refund to creator
       console.log(`[Escrow Refund] Transferring ${bounty.escrow_budget_usdc} USDC back to creator (${bounty.creator_wallet})...`);
-      const refundTx = await transferUSDCFromPlatform(bounty.creator_wallet, bounty.escrow_budget_usdc);
+      const refundTx = await transferUSDCFromPlatform(bounty.creator_wallet, bounty.escrow_budget_usdc, {
+        memoId: MemoIds.PayoutRefund,
+        memoData: {
+          bountyId: req.params.id,
+          creatorWallet: bounty.creator_wallet,
+          amountUsd: parseFloat(bounty.escrow_budget_usdc),
+          cause: 'verifier_rejected',
+          verifier: verifierWallet,
+          reasoning: reasoning || '',
+        },
+      });
 
       await client.query(
         `UPDATE bounties SET status = 'cancelled', updated_at = $1 WHERE id = $2`,

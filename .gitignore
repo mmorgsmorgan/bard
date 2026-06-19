@@ -2,6 +2,12 @@ node_modules/
 .next/
 .env
 .env.local
+.env.*.bak
+backend/.env.*
+backend/turnkey-reset-backup-*.json
+backend/test-memo-live.mjs
+backend/test-turnkey-memo-live.mjs
+contracts/lcov.info
 *.db
 *.db-wal
 *.db-shm
