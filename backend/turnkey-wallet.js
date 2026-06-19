@@ -11,6 +11,7 @@
 import { Turnkey } from '@turnkey/sdk-server';
 import { createAccount } from '@turnkey/viem';
 import { createPublicClient, createWalletClient, http, encodeFunctionData } from 'viem';
+import { withMemo, MemoIds } from './arc-memo.js';
 
 // ── Arc Testnet Chain Definition ──
 // Arc uses stablecoins (USDC) as gas, not ETH
@@ -217,14 +218,31 @@ export async function mintERC8004Identity(db, agentId, agentName, metadataURI) {
     args: [metadataURI],
   });
 
+  // Wrap with Arc Memo so the mint carries reconciliation context (agentId
+  // + agentName + metadataURI) indexable by topic. The Memo contract uses
+  // the CallFrom precompile to preserve the agent's wallet as msg.sender,
+  // so the registry still records the correct owner.
+  const wrapped = withMemo(
+    { to: IDENTITY_REGISTRY, data },
+    {
+      memoId: MemoIds.IdentityMint,
+      memoData: {
+        agentId,
+        agentName,
+        agentWallet: wallet.address,
+        metadataURI,
+      },
+    },
+  );
+
   // Send the transaction
   const txHash = await walletClient.sendTransaction({
-    to: IDENTITY_REGISTRY,
-    data,
+    to: wrapped.to,
+    data: wrapped.data,
     value: 0n,
   });
 
-  console.log(`  ERC-8004 mint tx sent by agent ${agentName}: ${txHash}`);
+  console.log(`  ERC-8004 mint tx sent by agent ${agentName} [memo:identity]: ${txHash}`);
 
   return {
     txHash,
