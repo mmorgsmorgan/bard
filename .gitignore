@@ -34,3 +34,4 @@ contracts/.foundry-bin/
 frontend/src/app/page.monolog.tsx
 frontend/src/app/page.redesign.tsx
 Screenshot*.png
+railway-backend-vars.txt
