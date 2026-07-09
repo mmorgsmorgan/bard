@@ -79,7 +79,7 @@ export function Navbar() {
         </Link>
 
         {/* Center nav — desktop (only once the user has a profile) */}
-        <div className="hidden md:flex items-center justify-center absolute left-1/2 -translate-x-1/2 gap-7">
+        <div className="hidden md:flex items-center justify-center flex-1 min-w-0 gap-6 px-4">
           {showLinks && NAV_LINKS.map((l) => (
             <Link
               key={l.href}
@@ -95,7 +95,7 @@ export function Navbar() {
         </div>
 
         {/* Right cluster */}
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           <div
             className="hidden lg:flex items-center gap-2 px-3 py-1.5 border"
             style={{ borderColor: 'var(--rule)' }}

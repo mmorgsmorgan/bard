@@ -106,6 +106,27 @@ Full audit lives in the transcript. User approved a specific subset. **All edits
 `claude -p "<tightly-scoped task>" --model claude-opus-4-7 --permission-mode bypassPermissions < /dev/null`
 Keep tasks read-only / tightly scoped (headless = no human approval). I'm the router: phrase task → read stdout → continue. Add `--resume <session-id>` to continue same 4.7 thread.
 
+## Railway account switch + redeploy (2026-07-09) — IN PROGRESS, deploy blocked
+Switched Railway CLI from `morgsmorgan206@gmail.com` → **`blockcelestine7@gmail.com`** (logout/login). Code pushed to GitHub first (commit `6bc60d3`, `mmorgsmorgan/bard` main).
+- **New project `bard`** created (ID `5d838364-9456-48e5-8185-b17a83f18938`, workspace "qtip-nilll's Projects", env production).
+- **Postgres** added → ● Online.
+- **backend service** created; ALL 14 backend env vars set from local `backend/.env` (incl. TURNKEY_API_PRIVATE_KEY/CIRCLE_API_KEY/JWT_SECRET). Corrections applied: `DATABASE_URL=${{Postgres.DATABASE_URL}}` (live ref), dropped `PORT`+`DB_PATH`, `JWT_SECRET` kept identical (existing agent tokens stay valid). `SWARMS_API_KEY` skipped (empty in .env; swarm is dormant). Added `backend/.railwayignore` (excludes node_modules/data/uploads/.env/*.db).
+- **Public domain:** https://backend-production-7bd93.up.railway.app
+- **RESOLVED — backend is LIVE.** Switched from CLI-upload to **GitHub source** deploy (service renamed `bard`, root dir `/backend`, branch main, auto-deploy). Two bugs fixed along the way:
+  1. `DATABASE_URL` got an annotation comment pasted into its value (`← type exactly like this…`) → re-set clean via CLI to `${{Postgres.DATABASE_URL}}`.
+  2. **Schema-init ordering bug (committed fix `9ea4ef2`):** `ALTER TABLE agent_verifications ADD COLUMN signer_address` ran BEFORE `CREATE TABLE agent_verifications` → fatal on a fresh DB ("relation does not exist"). Moved the ALTER to immediately after the CREATE in `backend/db.js`. (contributions' ALTER was already ordered right.)
+- **LIVE backend:** https://bard-production-e88b.up.railway.app — `/api/health` returns ok, db=postgres, turnkey=true, schema verified (100 statements). Service `bard` ● Online, Postgres ● Online. (The earlier `backend-production-7bd93` domain was on the deleted CLI-upload service — ignore it; the live one is `bard-production-e88b`.)
+- **MCP service — LIVE** (2026-07-09): https://mcp-production-8d2e.up.railway.app. `/health` ok; `POST /mcp` `tools/list` returns the full 43-tool catalog (workspace dep resolved). Key gotcha handled: `mcp-server` imports `@bard/mcp-core` (= `shared/mcp/`, NOT on npm), so a `/mcp-server` root-dir deploy fails `npm install`. Instead the `mcp` service builds from **repo root** (root dir `/`, default) via a committed **`/railway.json`** (`startCommand: node mcp-server/server.js`, healthcheck `/health`) — nixpacks' root `npm install` links the workspace. Vars: `BARD_API=https://bard-production-e88b.up.railway.app`, `CORS_ORIGIN=*`. Backend unaffected (it reads its own `/backend/railway.json`).
+- **STILL TO DO:** (1) **Vercel** frontend `NEXT_PUBLIC_API_URL` → `https://bard-production-e88b.up.railway.app` (+ `NEXT_PUBLIC_MCP_URL` → `https://mcp-production-8d2e.up.railway.app` if used); (2) backend **`CORS_ORIGIN`** still `http://localhost:3000` → change to the Vercel frontend URL; (3) platform wallet low (32.50 USDC) — top up; (4) delete local `railway-backend-vars.txt` (contains the Turnkey key).
+
+## PFP upload fix + prod-config reconciliation (2026-07-09)
+The initial backend env was copied from local *dev* `.env`, which had NO R2 creds and different wallets than old prod → PFP uploads fell back to (ephemeral) Railway disk and failed. Reconciled the `bard` service to the **old production** values the user supplied: added R2 (`R2_ACCOUNT_ID/ACCESS_KEY_ID/SECRET_ACCESS_KEY/BUCKET_NAME=bard-uploads/PUBLIC_URL=https://pub-7f6f…r2.dev`), real `SELLER_ADDRESS=0x127EB8…`, `PLATFORM_OWNER_WALLET=0x93d8E0…`, prod `JWT_SECRET`, prod Turnkey API keys (same org e5bb19f8), `CIRCLE_API_KEY`, `AGENTIC_COMMERCE_ADDRESS`, `BARD_JOB_HOOK_ADDRESS`, `NODE_ENV=production`, `DATA_DIR=/data`, `UPLOADS_DIR=/data/uploads` (user mounted a `/data` volume on the backend), `CORS_ORIGIN=https://bard-six.vercel.app`, `MCP_URL`=NEW mcp. Kept `DATABASE_URL=${{Postgres.DATABASE_URL}}` (new PG, NOT old). Verified: health `storage:r2, r2Bucket:bard-uploads`; `POST /api/upload/pfp` returns an R2 URL that serves HTTP 200. **Uploads use R2, so Railway disk space is a non-issue.** NOTE: `NEXT_PUBLIC_API_URL` on Vercel MUST point at the new backend or browser uploads still hit the old one.
+
+## Live deployment URLs (new Railway account blockcelestine7@gmail.com, project `bard`)
+- backend: **https://bard-production-e88b.up.railway.app**
+- mcp: **https://mcp-production-8d2e.up.railway.app**
+- Postgres: internal (`${{Postgres.DATABASE_URL}}`)
+
 ## How to run
 ```bash
 # frontend (env.local now points at prod backend)
