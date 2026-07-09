@@ -270,7 +270,8 @@ export async function initSchema() {
     // ── Real-signature auditability: the address recovered from (or that
     // produced) the stored signature over the canonical message. ──
     `ALTER TABLE contributions ADD COLUMN IF NOT EXISTS signer_address TEXT DEFAULT NULL`,
-    `ALTER TABLE agent_verifications ADD COLUMN IF NOT EXISTS signer_address TEXT DEFAULT NULL`,
+    // NOTE: agent_verifications' signer_address ALTER lives AFTER its CREATE TABLE
+    // (below) — on a fresh DB the table doesn't exist yet at this point.
 
     // ── bounty_proposals (hybrid mode) ──
     `CREATE TABLE IF NOT EXISTS bounty_proposals (
@@ -363,6 +364,7 @@ export async function initSchema() {
       FOREIGN KEY (contribution_id) REFERENCES contributions(id),
       FOREIGN KEY (verifier_agent_id) REFERENCES agents(id)
     )`,
+    `ALTER TABLE agent_verifications ADD COLUMN IF NOT EXISTS signer_address TEXT DEFAULT NULL`,
     `CREATE TABLE IF NOT EXISTS badges_earned (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
