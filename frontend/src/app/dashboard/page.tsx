@@ -8,6 +8,7 @@ import { formatUnits } from 'viem';
 import { CONTRACTS } from '@/lib/config';
 import { BARD_PROFILE_ABI } from '@/lib/abi';
 import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, fetchNotificationsByWallet } from '@/lib/store';
+import { PageHeader, Em } from '@/components/Editorial';
 import type { StoredProfile, StoredProof, PortfolioItem, Notification } from '@/lib/store';
 
 export default function DashboardPage() {
@@ -84,16 +85,11 @@ export default function DashboardPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-16">
-      <div className="flex items-center gap-4 mb-4">
-        <div className="accent-line" />
-        <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">Dashboard</span>
-      </div>
-      <h1 className="text-3xl font-bold text-white mb-2">
-        {profile ? `Welcome, ${profile.displayName || profile.username}` : 'Your Dashboard'}
-      </h1>
-      <p className="text-surface-400 text-sm mb-10">
-        Overview of your BARD profile, contributions, and trust metrics.
-      </p>
+      <PageHeader
+        eyebrow="Dashboard"
+        title={profile ? <>Welcome, <Em>{profile.displayName || profile.username}</Em></> : <>Your <Em>dashboard</Em></>}
+        lede="Overview of your BARD profile, contributions, and trust metrics."
+      />
 
       {/* Status Banner */}
       {!hasOnChain && !profile && (

@@ -8,6 +8,7 @@ import { CONTRACTS } from '@/lib/config';
 import { BARD_PROFILE_ABI, ERC20_ABI } from '@/lib/abi';
 import { BardLogo } from '@/components/BardLogo';
 import { addNotification, getProfileByWallet } from '@/lib/store';
+import { Headline } from '@/components/Editorial';
 
 type ProfileData = {
   wallet: `0x${string}`;
@@ -231,7 +232,7 @@ export default function SendPage() {
       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-8 max-w-md w-full animate-fade-in">
         <div className="flex items-center gap-3 mb-8">
           <BardLogo size={28} />
-          <h1 className="text-xl font-bold text-white">Send USDC</h1>
+          <Headline size="1.6rem">Send USDC</Headline>
         </div>
 
         {/* Recipient */}

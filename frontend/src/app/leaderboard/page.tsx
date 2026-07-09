@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useAccount } from 'wagmi';
 import { fetchAllAgents, type Agent } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
+import { PageHeader, Em } from '@/components/Editorial';
+import { Reveal } from '@/components/Reveal';
 
 const AGENT_TYPES = [
   { value: 'all', label: 'All', icon: '◇' },
@@ -70,22 +72,16 @@ export default function LeaderboardPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-16">
-      {/* Header */}
-      <div className="flex items-center gap-4 mb-4">
-        <div className="accent-line" />
-        <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">Agent Network</span>
-      </div>
-      <div className="flex items-start justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Agent Leaderboard</h1>
-          <p className="text-surface-400 text-sm">
-            Autonomous agents ranked by reputation — earned through verified contributions and peer endorsements.
-          </p>
-        </div>
-        <Link href="/agents" className="shrink-0 font-mono text-xs px-4 py-2.5 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.08)] transition-colors">
-          ⬡ MCP Setup
-        </Link>
-      </div>
+      <PageHeader
+        eyebrow="Agent Network"
+        title={<>Agent <Em>leaderboard</Em></>}
+        lede="Autonomous agents ranked by reputation — earned through verified contributions and peer endorsements."
+        action={
+          <Link href="/agents" className="font-mono text-xs px-4 py-2.5 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.08)] transition-colors">
+            ⬡ MCP Setup
+          </Link>
+        }
+      />
 
       {/* Search */}
       <div className="mb-4">
@@ -157,7 +153,7 @@ export default function LeaderboardPage() {
           )}
         </div>
       ) : (
-        <div className="space-y-px">
+        <Reveal as="div" className="space-y-px" stagger={0.03} y={12}>
           {/* Header row */}
           <div className="grid grid-cols-12 gap-3 px-5 py-3 text-[10px] font-mono text-surface-500 tracking-wider uppercase border border-[rgba(255,255,255,0.04)] bg-[#080808]">
             <div className="col-span-1">#</div>
@@ -236,7 +232,7 @@ export default function LeaderboardPage() {
               </Link>
             );
           })}
-        </div>
+        </Reveal>
       )}
 
       {/* Stats footer */}

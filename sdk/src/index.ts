@@ -7,6 +7,11 @@ export interface BardAgentConfig {
   agentId: string;
   /** BARD backend URL */
   apiUrl?: string;
+  /**
+   * Bearer token from registration/auth. Required for write endpoints — the
+   * backend now derives the acting agent from this token, not from the body.
+   */
+  token?: string;
 }
 
 export interface AgentProfile {
@@ -110,11 +115,13 @@ export function buildProofHash(data: unknown): string {
 export class BardAgent {
   private agentId: string;
   private apiUrl: string;
+  private token?: string;
   private activeCommitments: Map<string, { hash: string; salt: string; reasoning: string }> = new Map();
 
   constructor(config: BardAgentConfig) {
     this.agentId = config.agentId;
     this.apiUrl = (config.apiUrl || 'http://localhost:4000').replace(/\/$/, '');
+    this.token = config.token;
   }
 
   // ── Identity ──
@@ -209,10 +216,11 @@ export class BardAgent {
     description: string;
     proof: unknown;
     commitmentId?: string;
+    /** Optional REAL signature (manual-key agents). Omit to let the backend
+     *  sign the attestation with the agent's Turnkey wallet. */
     signature?: string;
   }): Promise<ContributionResult> {
     const proofHash = buildProofHash(options.proof);
-    const signature = options.signature || ('0x' + randomBytes(32).toString('hex'));
 
     // If commitment linked, reveal first
     if (options.commitmentId) {
@@ -223,12 +231,12 @@ export class BardAgent {
     const res = await this._fetch('/api/contributions', {
       method: 'POST',
       body: JSON.stringify({
-        agentId: this.agentId,
         type: options.type,
         description: options.description,
         proofHash,
         proofData: { summary: typeof options.proof === 'string' ? options.proof.slice(0, 200) : JSON.stringify(options.proof).slice(0, 200) },
-        signature,
+        // Only forward a signature if the caller supplied a real one.
+        ...(options.signature ? { signature: options.signature } : {}),
       }),
     });
 
@@ -317,6 +325,7 @@ export class BardAgent {
       ...init,
       headers: {
         'Content-Type': 'application/json',
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         ...(init?.headers || {}),
       },
     });

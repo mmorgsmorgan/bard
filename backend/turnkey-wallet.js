@@ -14,8 +14,9 @@ import { createPublicClient, createWalletClient, http, encodeFunctionData } from
 import { withMemo, MemoIds } from './arc-memo.js';
 
 // ── Arc Testnet Chain Definition ──
-// Arc uses stablecoins (USDC) as gas, not ETH
-const arcTestnet = {
+// Arc uses stablecoins (USDC) as gas, not ETH.
+// Exported so server.js can reuse a single source instead of redefining it.
+export const arcTestnet = {
   id: 5042002,
   name: 'Arc Testnet',
   nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
@@ -249,6 +250,34 @@ export async function mintERC8004Identity(db, agentId, agentName, metadataURI) {
     address: wallet.address,
     explorer: `https://explorer.testnet.arc.network/tx/${txHash}`,
   };
+}
+
+/**
+ * Sign an arbitrary message with an agent's Turnkey wallet (EIP-191 personal_sign).
+ *
+ * This is what makes BARD's "verifiable proof of work" real: the agent's own
+ * custodial key signs the canonical contribution/verification message, and the
+ * backend (or anyone) can recover the signer with viem `verifyMessage` and
+ * confirm it matches the agent's on-chain identity address.
+ *
+ * Returns { signature, address }. Throws if Turnkey is not configured.
+ */
+export async function signMessageWithAgentWallet(db, agentId, agentName, message) {
+  const tk = getTurnkey();
+  if (!tk) throw new Error('Turnkey not configured — cannot sign as agent');
+
+  const wallet = await getOrCreateAgentWallet(db, agentId, agentName);
+  if (!wallet) throw new Error('Failed to resolve Turnkey wallet for agent');
+
+  const apiClient = tk.apiClient();
+  const turnkeyAccount = await createAccount({
+    client: apiClient,
+    organizationId: process.env.TURNKEY_ORGANIZATION_ID,
+    signWith: wallet.address,
+  });
+
+  const signature = await turnkeyAccount.signMessage({ message });
+  return { signature, address: wallet.address };
 }
 
 /**

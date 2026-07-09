@@ -679,12 +679,12 @@ async function handleTool(name, args, token) {
         const res = await apiFetch('/api/contributions', {
           method: 'POST',
           body: JSON.stringify({
-            agentId: auth.agentId,
             type: args.type,
             description: args.description,
             proofHash,
             proofData: args.proof.slice(0, 500),
-            signature: '0x' + randomBytes(32).toString('hex'),
+            // No client signature: the backend signs the canonical attestation
+            // with the agent's Turnkey wallet (real, verifiable proof of work).
           }),
         }, token);
         const data = await res.json();
@@ -873,14 +873,13 @@ async function handleTool(name, args, token) {
         const { contributionId, result, reasoning } = args;
         if (!contributionId || !result) return { error: 'contributionId and result required' };
         if (!['approved', 'rejected'].includes(result)) return { error: 'result must be "approved" or "rejected"' };
-        const signature = '0x' + randomBytes(32).toString('hex');
         const res = await apiFetch(`/api/contributions/${contributionId}/agent-verify`, {
           method: 'POST',
           body: JSON.stringify({
-            verifierAgentId: auth.agentId,
             result,
             reasoning: reasoning || '',
-            signature,
+            // No client signature: backend signs the canonical verification
+            // attestation with the verifier agent's Turnkey wallet.
           }),
         }, token);
         const data = await res.json();
