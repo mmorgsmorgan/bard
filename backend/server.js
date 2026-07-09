@@ -5,13 +5,13 @@ import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
-import { createHash, randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto';
+import { createHash, createHmac, timingSafeEqual, randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto';
 import { EventEmitter } from 'events';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
 import { formatUnits, verifyMessage, createPublicClient, http, parseUnits } from 'viem';
-import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans, deleteStrandedWallets } from './turnkey-wallet.js';
+import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans, deleteStrandedWallets, signMessageWithAgentWallet } from './turnkey-wallet.js';
 import { pool, query, initSchema, stmts } from './db.js';
 import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
 import {
@@ -24,6 +24,7 @@ import {
   achswapCall,
 } from './achswap.js';
 import { withMemo, MemoIds, ARC_MEMO_ADDRESS } from './arc-memo.js';
+import { createSiweRouter } from './siwe-auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,10 +44,30 @@ const SELLER_ADDRESS = process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E1
 const PLATFORM_OWNER_WALLET = (process.env.PLATFORM_OWNER_WALLET || SELLER_ADDRESS).toLowerCase();
 
 // ── Swarms API configuration ──
+// DORMANT: the swarm feature is on hold. It stays code-complete but every
+// entry point is gated behind SWARMS_ENABLED (default false) and returns 503.
+// This neutralizes the known executeSwarm scope bug, the webhook, and the
+// unauthenticated status endpoint until the feature is revisited. Flip
+// SWARMS_ENABLED=true to re-enable.
+const SWARMS_ENABLED = process.env.SWARMS_ENABLED === 'true';
+const SWARMS_DISABLED_MSG = 'Swarm feature is temporarily disabled';
 const SWARMS_API_KEY = process.env.SWARMS_API_KEY || '';
 const SWARMS_PLATFORM_MARKUP_PCT = parseFloat(process.env.SWARMS_PLATFORM_MARKUP_PCT || '20');
 const SWARMS_API_BASE = 'https://api.swarms.world';
 const SWARMS_WEBHOOK_SECRET = process.env.SWARMS_WEBHOOK_SECRET || '';
+
+// Express middleware: reject any swarm route while the feature is dormant.
+function requireSwarmsEnabled(req, res, next) {
+  if (!SWARMS_ENABLED) {
+    return res.status(503).json({ error: SWARMS_DISABLED_MSG, hint: 'swarms_disabled' });
+  }
+  next();
+}
+
+// ── Registration stake hook (Sybil resistance, deferred) ──
+// When > 0, agent registration for a real wallet would additionally require a
+// refundable USDC stake. Wired as a constant now; enforcement is future work.
+const REGISTRATION_STAKE = parseFloat(process.env.REGISTRATION_STAKE || '0');
 
 // ── Arc Testnet RPC for transaction verification ──
 const ARC_TESTNET_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
@@ -607,6 +628,16 @@ if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
   console.error('FATAL: JWT_SECRET must be set in production for security');
   process.exit(1);
 }
+// Loud warning when running on the derived dev secret — it is computed from the
+// PUBLIC SELLER_ADDRESS, so any token signed with it is forgeable. Local dev only.
+if (!process.env.JWT_SECRET) {
+  console.warn('⚠️  JWT_SECRET is not set — using an INSECURE secret derived from the public SELLER_ADDRESS. Tokens are forgeable. Set JWT_SECRET for anything beyond local dev.');
+}
+
+// ── SIWE wallet sessions (Sign-In With Ethereum, EIP-4361) ──
+// Additive: mounts /auth/nonce, /auth/verify, /auth/me. Reuses JWT_SECRET so
+// wallet sessions share the same bearer scheme as agent tokens.
+app.use(createSiweRouter({ jwtSecret: JWT_SECRET }));
 
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
@@ -627,6 +658,55 @@ async function requireAuth(req, res, next) {
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+}
+
+// ══════════════════════════════════════════════════════
+// ── Real agent attestations (verifiable proof of work) ──
+// Agents attest to contributions and verifications by signing a canonical,
+// deterministic message with their own key. Previously the "signature" was
+// random bytes; now it is a real EIP-191 signature that anyone can recover.
+// ══════════════════════════════════════════════════════
+
+// Deterministic messages — MUST be reproducible byte-for-byte to verify.
+function canonicalContributionMessage({ agentId, type, proofHash }) {
+  return `BARD contribution attestation\nagent:${agentId}\ntype:${type}\nproof:${proofHash}`;
+}
+function canonicalVerificationMessage({ verifierAgentId, contributionId, result }) {
+  return `BARD verification attestation\nverifier:${verifierAgentId}\ncontribution:${contributionId}\nresult:${result}`;
+}
+
+/**
+ * Produce a REAL signature for an agent's attestation, or verify a client-supplied one.
+ *
+ * - If `providedSignature` is given (manual-key agents that signed client-side),
+ *   recover/verify it against the agent's known address; reject if it doesn't match.
+ * - Otherwise, if Turnkey is enabled, sign the message with the agent's Turnkey wallet.
+ * - Otherwise throw — we no longer accept unverifiable/placeholder signatures.
+ *
+ * Returns { signature, signer } where `signer` is the attesting address.
+ */
+async function attestAgentMessage({ agent, message, providedSignature }) {
+  const knownAddress = agent.turnkey_address || agent.owner_wallet;
+
+  if (providedSignature) {
+    if (!knownAddress || !/^0x[0-9a-fA-F]{40}$/.test(knownAddress)) {
+      throw new Error('Agent has no known signing address to verify against');
+    }
+    let valid = false;
+    try {
+      valid = await verifyMessage({ address: knownAddress, message, signature: providedSignature });
+    } catch {
+      valid = false;
+    }
+    if (!valid) throw new Error('Invalid signature — does not match agent address');
+    return { signature: providedSignature, signer: knownAddress.toLowerCase() };
+  }
+
+  if (!isTurnkeyEnabled()) {
+    throw new Error('Signature required: Turnkey is not configured and no client signature was provided');
+  }
+  const { signature, address } = await signMessageWithAgentWallet(pool, agent.id, agent.agent_name, message);
+  return { signature, signer: address.toLowerCase() };
 }
 
 // ══════════════════════════════════════════════════════
@@ -1480,19 +1560,31 @@ app.delete('/api/files/:type/:filename', async (req, res) => {
 // ── Swarm Execution Helpers ──
 // ══════════════════════════════════════════════════════
 
+// BYOK secret-at-rest encryption. Uses a dedicated ENCRYPTION_KEY (falls back to
+// JWT_SECRET with a warning), a PER-RECORD random salt (static salt defeats
+// scrypt), and no insecure 'default-secret' fallback.
+function encryptionSecret() {
+  const secret = process.env.ENCRYPTION_KEY || process.env.JWT_SECRET;
+  if (!secret) throw new Error('No ENCRYPTION_KEY or JWT_SECRET configured for at-rest encryption');
+  return secret;
+}
+
 function encryptApiKey(plaintext) {
-  const key = scryptSync(process.env.JWT_SECRET || 'default-secret', 'salt', 32);
+  const salt = randomBytes(16);
+  const key = scryptSync(encryptionSecret(), salt, 32);
   const iv = randomBytes(16);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   let encrypted = cipher.update(plaintext, 'utf8', 'base64');
   encrypted += cipher.final('base64');
   const authTag = cipher.getAuthTag().toString('base64');
-  return JSON.stringify({ encrypted, iv: iv.toString('base64'), authTag });
+  return JSON.stringify({ encrypted, iv: iv.toString('base64'), authTag, salt: salt.toString('base64') });
 }
 
 function decryptApiKey(ciphertext) {
-  const { encrypted, iv, authTag } = JSON.parse(ciphertext);
-  const key = scryptSync(process.env.JWT_SECRET || 'default-secret', 'salt', 32);
+  const { encrypted, iv, authTag, salt } = JSON.parse(ciphertext);
+  // Back-compat: legacy records were encrypted with the static 'salt' string.
+  const saltBuf = salt ? Buffer.from(salt, 'base64') : Buffer.from('salt');
+  const key = scryptSync(encryptionSecret(), saltBuf, 32);
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
   decipher.setAuthTag(Buffer.from(authTag, 'base64'));
   let decrypted = decipher.update(encrypted, 'base64', 'utf8');
@@ -1699,9 +1791,38 @@ app.post('/api/agents/register-from-token', async (req, res) => {
 });
 
 app.post('/api/agents/register', async (req, res) => {
-  const { ownerWallet, agentName, agentPublicKey, agentType, description, swarmConfig } = req.body;
+  const { ownerWallet, agentName, agentPublicKey, agentType, description, swarmConfig, challengeId, signature } = req.body;
   if (!ownerWallet || !agentName || !agentPublicKey) {
     return res.status(400).json({ error: 'ownerWallet, agentName, and agentPublicKey required' });
+  }
+
+  // ── Sybil / impersonation gate ──
+  // A real (non-zero) ownerWallet must be proven under the caller's control before
+  // we mint a 7-day token bound to it — otherwise anyone could register an agent
+  // "owned" by someone else's wallet. The Turnkey onboarding path registers with
+  // the zero address (no wallet yet) and is exempt: its identity becomes the
+  // platform-provisioned Turnkey wallet, which an attacker cannot forge.
+  const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+  const claimsRealWallet = ownerWallet.toLowerCase() !== ZERO_ADDR;
+  if (claimsRealWallet) {
+    if (!challengeId || !signature) {
+      return res.status(401).json({
+        error: 'Registering with a real ownerWallet requires proof of control. POST /api/auth/challenge, sign the message, then include { challengeId, signature }.',
+        hint: 'ownership_proof_required',
+      });
+    }
+    const challenge = await stmts.getChallenge(challengeId);
+    if (!challenge) return res.status(404).json({ error: 'Challenge not found' });
+    if (challenge.used) return res.status(409).json({ error: 'Challenge already used' });
+    if (new Date(challenge.expires_at) < new Date()) return res.status(410).json({ error: 'Challenge expired. Request a new one.' });
+    let ok = false;
+    try {
+      ok = await verifyMessage({ address: ownerWallet, message: challenge.message, signature });
+    } catch { ok = false; }
+    if (!ok) return res.status(401).json({ error: 'Signature does not prove control of ownerWallet' });
+    await stmts.markChallengeUsed(challengeId);
+    // REGISTRATION_STAKE hook: when > 0, additionally require an on-chain stake
+    // before issuing a token (deferred — see plan). Currently informational only.
   }
 
   const nameCollision = await stmts.getAgentByName(agentName);
@@ -2025,8 +2146,11 @@ app.post('/api/agents/:id/unlink', requireAuth, async (req, res) => {
 });
 
 // ── Agent Turnkey Wallet Provisioning ──
-app.post('/api/agents/:id/wallet', async (req, res) => {
+app.post('/api/agents/:id/wallet', requireAuth, async (req, res) => {
   try {
+    if (req.auth.agentId !== req.params.id) {
+      return res.status(403).json({ error: 'Can only provision your own agent wallet' });
+    }
     const agent = await stmts.getAgentById(req.params.id);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
@@ -2691,8 +2815,11 @@ app.post('/api/agents/:id/dex/token-info', requireAuth, async (req, res) => {
 // Agent calls this to mint ERC-8004 identity via Turnkey wallet.
 // If Turnkey is configured, it signs and sends the tx on-chain.
 // Otherwise, it records the intent for external signing.
-app.post('/api/agents/:id/mint-identity', async (req, res) => {
+app.post('/api/agents/:id/mint-identity', requireAuth, async (req, res) => {
   try {
+    if (req.auth.agentId !== req.params.id) {
+      return res.status(403).json({ error: 'Can only mint identity for your own agent' });
+    }
     const agent = await stmts.getAgentById(req.params.id);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
@@ -2752,10 +2879,12 @@ app.post('/api/agents/:id/mint-identity', async (req, res) => {
 });
 
 // ── Cross-Agent Verification (Phase 2) ──
-app.post('/api/contributions/:id/agent-verify', async (req, res) => {
-  const { verifierAgentId, result, reasoning, signature } = req.body;
-  if (!verifierAgentId || !result || !signature) {
-    return res.status(400).json({ error: 'verifierAgentId, result, and signature required' });
+app.post('/api/contributions/:id/agent-verify', requireAuth, async (req, res) => {
+  // Verifier is the authenticated agent — never trust a body-supplied id.
+  const verifierAgentId = req.auth.agentId;
+  const { result, reasoning, signature: clientSignature } = req.body;
+  if (!result) {
+    return res.status(400).json({ error: 'result required' });
   }
   const validResults = ['approved', 'rejected', 'needs_revision'];
   if (!validResults.includes(result)) return res.status(400).json({ error: `result must be: ${validResults.join(', ')}` });
@@ -2783,13 +2912,24 @@ app.post('/api/contributions/:id/agent-verify', async (req, res) => {
   )).rows[0];
   if (existing) return res.status(409).json({ error: 'Already verified this contribution' });
 
+  // Real attestation over (verifier, contribution, result).
+  let signature, signerAddress;
+  try {
+    const message = canonicalVerificationMessage({ verifierAgentId, contributionId: req.params.id, result });
+    const att = await attestAgentMessage({ agent: verifier, message, providedSignature: clientSignature });
+    signature = att.signature;
+    signerAddress = att.signer;
+  } catch (sigErr) {
+    return res.status(400).json({ error: `Attestation failed: ${sigErr.message}`, hint: 'signature_required' });
+  }
+
   const vId = `averify-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const reasoningHash = reasoning ? '0x' + createHash('sha256').update(reasoning).digest('hex') : '';
 
   await pool.query(
-    `INSERT INTO agent_verifications (id, contribution_id, verifier_agent_id, result, reasoning, reasoning_hash, signature)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [vId, req.params.id, verifierAgentId, result, reasoning || '', reasoningHash, signature]
+    `INSERT INTO agent_verifications (id, contribution_id, verifier_agent_id, result, reasoning, reasoning_hash, signature, signer_address)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [vId, req.params.id, verifierAgentId, result, reasoning || '', reasoningHash, signature, signerAddress]
   );
 
   // Update verifier's last_active_at
@@ -3035,10 +3175,12 @@ app.get('/api/agents/:id/analytics', async (req, res) => {
   });
 });
 
-app.post('/api/contributions', async (req, res) => {
-  const { agentId, type, description, proofHash, proofData, signature } = req.body;
-  if (!agentId || !type || !proofHash || !signature) {
-    return res.status(400).json({ error: 'agentId, type, proofHash, and signature required' });
+app.post('/api/contributions', requireAuth, async (req, res) => {
+  // Actor is the authenticated agent — never trust a body-supplied agentId.
+  const agentId = req.auth.agentId;
+  const { type, description, proofHash, proofData, signature: clientSignature } = req.body;
+  if (!type || !proofHash) {
+    return res.status(400).json({ error: 'type and proofHash required' });
   }
   const validTypes = ['research', 'code_review', 'data_analysis', 'content', 'verification', 'other'];
   if (!validTypes.includes(type)) {
@@ -3052,12 +3194,24 @@ app.post('/api/contributions', async (req, res) => {
     return res.status(429).json({ error: 'Rate limit exceeded. Max 10 contributions per hour.' });
   }
 
+  // Real attestation: the agent signs a canonical message over (agent, type, proofHash).
+  // Turnkey agents are signed server-side; manual-key agents may pass their own signature.
+  let signature, signer_address;
+  try {
+    const message = canonicalContributionMessage({ agentId, type, proofHash });
+    const att = await attestAgentMessage({ agent, message, providedSignature: clientSignature });
+    signature = att.signature;
+    signer_address = att.signer;
+  } catch (sigErr) {
+    return res.status(400).json({ error: `Attestation failed: ${sigErr.message}`, hint: 'signature_required' });
+  }
+
   const id = `contrib-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await stmts.insertContribution({
       id, agent_id: agentId, type, description: description || '',
       proof_hash: proofHash, proof_data: JSON.stringify(proofData || {}),
-      signature, created_at: new Date().toISOString(),
+      signature, signer_address, created_at: new Date().toISOString(),
     });
     // Update agent state
     await stmts.upsertAgentState({
@@ -3218,32 +3372,15 @@ app.post('/api/contributions/:id/verify', async (req, res) => {
       return res.json({ success: true, status: shouldVerify ? 'verified' : 'endorsed', endorsements: humanCount, agentApprovals: Number(agentApprovals.c), reputation });
     }
 
-    // Path 2: Agent-based verification (existing logic)
-    if (!verifierAgentId || !result) return res.status(400).json({ error: 'verifierAgentId and result required, or wallet for owner verification' });
-
-    const verifier = await stmts.getAgentById(verifierAgentId);
-    if (!verifier) return res.status(404).json({ error: 'Verifier agent not found' });
-    if (verifier.reputation_score < 20) return res.status(403).json({ error: 'Verifier needs reputation >= 20' });
-
-    if (result === 'approved') {
-      await stmts.updateContributionStatus('verified', req.params.id);
-    } else if (result === 'rejected') {
-      await stmts.updateContributionStatus('rejected', req.params.id);
-    }
-    // Also count as endorsement
-    const endorseId = `verify-${Date.now()}`;
-    try {
-      await stmts.insertEndorsement({
-        id: endorseId, contribution_id: req.params.id,
-        endorser_wallet: verifier.owner_wallet, endorser_type: 'agent',
-        comment: `Verified by ${verifier.agent_name} (${result})`,
-        signature: signature || '', created_at: new Date().toISOString(),
-      });
-      await stmts.incrementEndorsementCount(req.params.id);
-    } catch { /* ignore duplicate */ }
-
-    const reputation = await calculateReputation(contribution.agent_id);
-    res.json({ success: true, status: result, reputation });
+    // Path 2 (DEPRECATED): the old single-agent "instant verify" let one agent
+    // with rep>=20 flip a contribution to verified — a Sybil-farming hole. Agent
+    // verification now goes exclusively through POST /api/contributions/:id/agent-verify,
+    // which requires authentication, a real signature, and 2-of-N distinct-verifier
+    // consensus. Reject agent verification here and point callers there.
+    return res.status(410).json({
+      error: 'Agent verification moved. POST /api/contributions/:id/agent-verify (authenticated, requires 2-of-N consensus).',
+      hint: 'use_agent_verify',
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3892,17 +4029,13 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
 });
 
 // POST /api/bounties/:id/claim — Agent accepts a funded bounty
-app.post('/api/bounties/:id/claim', async (req, res) => {
-  const { agentId, callerWallet } = req.body;
-  if (!agentId) return res.status(400).json({ error: 'agentId required' });
+app.post('/api/bounties/:id/claim', requireAuth, async (req, res) => {
+  // Actor is the authenticated agent — no more optional/skippable callerWallet check.
+  const agentId = req.auth.agentId;
 
   const agent = await stmts.getAgentById(agentId);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
-  // Auth: caller must own the agent
-  if (callerWallet && agent.owner_wallet.toLowerCase() !== callerWallet.toLowerCase()) {
-    return res.status(403).json({ error: 'Only the agent owner can claim bounties' });
-  }
   if (!(await checkRateLimit(agentId, 'escrow_claim'))) return res.status(429).json({ error: 'Rate limit exceeded' });
 
   const bounty = await stmts.getBountyById(req.params.id);
@@ -3939,9 +4072,11 @@ app.post('/api/bounties/:id/claim', async (req, res) => {
   await createNotification({ wallet: bounty.creator_wallet, type: 'system', title: 'Agent Claimed Bounty', message: `${agent.agent_name} accepted your bounty "${bounty.title}".`, from: agent.owner_wallet });
   emitFeedEvent('escrow:claimed', { bountyId: req.params.id, agentId, agentName: agent.agent_name });
 
-  // If this is a swarm agent, execute the swarm immediately
+  // If this is a swarm agent, execute the swarm immediately.
+  // DORMANT: skip execution entirely while the swarm feature is on hold. The
+  // claim still succeeds; the bounty simply isn't auto-worked by the swarm.
   let swarmResult = null;
-  if (agent.agent_type === 'swarm' && agent.swarm_config) {
+  if (SWARMS_ENABLED && agent.agent_type === 'swarm' && agent.swarm_config) {
     try {
       swarmResult = await executeSwarm(agent, bounty.description, req.params.id);
 
@@ -3989,9 +4124,11 @@ app.post('/api/bounties/:id/claim', async (req, res) => {
 });
 
 // POST /api/bounties/:id/deliver — Agent submits deliverable
-app.post('/api/bounties/:id/deliver', async (req, res) => {
-  const { agentId, content, proofHash, callerWallet } = req.body;
-  if (!agentId || !content) return res.status(400).json({ error: 'agentId and content required' });
+app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
+  // Actor is the authenticated agent.
+  const agentId = req.auth.agentId;
+  const { content, proofHash } = req.body;
+  if (!content) return res.status(400).json({ error: 'content required' });
 
   // Size limit: max 1MB deliverable
   if (content.length > 1024 * 1024) return res.status(400).json({ error: 'Deliverable too large (max 1MB)' });
@@ -4002,11 +4139,7 @@ app.post('/api/bounties/:id/deliver', async (req, res) => {
   if (bounty.provider_agent_id !== agentId) return res.status(403).json({ error: 'Only the assigned agent can submit' });
   if (!['claimed', 'submitted'].includes(bounty.escrow_status)) return res.status(409).json({ error: `Cannot submit in state: ${bounty.escrow_status}` });
 
-  // Auth: verify agent ownership
   const agent = await stmts.getAgentById(agentId);
-  if (callerWallet && agent && agent.owner_wallet.toLowerCase() !== callerWallet.toLowerCase()) {
-    return res.status(403).json({ error: 'Only the agent owner can submit deliverables' });
-  }
 
   const hash = proofHash || ('0x' + createHash('sha256').update(content).digest('hex'));
   const now = new Date().toISOString();
@@ -5031,7 +5164,7 @@ app.get('/api/bounties/:id/messages', async (req, res) => {
 // ══════════════════════════════════════════════════════
 
 // POST /api/swarms/estimate — Estimate swarm execution cost
-app.post('/api/swarms/estimate', async (req, res) => {
+app.post('/api/swarms/estimate', requireSwarmsEnabled, async (req, res) => {
   try {
     const { agentId, task } = req.body;
     if (!agentId || !task) {
@@ -5108,7 +5241,7 @@ app.post('/api/swarms/estimate', async (req, res) => {
 });
 
 // POST /api/swarms/validate-key — Test a user's Swarms API key
-app.post('/api/swarms/validate-key', async (req, res) => {
+app.post('/api/swarms/validate-key', requireSwarmsEnabled, async (req, res) => {
   const { apiKey } = req.body;
   if (!apiKey) return res.status(400).json({ error: 'apiKey required' });
 
@@ -5133,7 +5266,7 @@ app.post('/api/swarms/validate-key', async (req, res) => {
 });
 
 // GET /api/swarms/executions/:id — Poll swarm execution status
-app.get('/api/swarms/executions/:id', async (req, res) => {
+app.get('/api/swarms/executions/:id', requireSwarmsEnabled, requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -5171,7 +5304,7 @@ app.get('/api/swarms/executions/:id', async (req, res) => {
 });
 
 // POST /api/swarms/executions/:id/cancel — Cancel a running swarm execution
-app.post('/api/swarms/executions/:id/cancel', requireAuth, async (req, res) => {
+app.post('/api/swarms/executions/:id/cancel', requireSwarmsEnabled, requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const callerWallet = req.auth.wallet; // From JWT authentication
@@ -5255,7 +5388,7 @@ app.post('/api/swarms/executions/:id/cancel', requireAuth, async (req, res) => {
 });
 
 // POST /api/swarms/webhook — Receive async execution results from Swarms API
-app.post('/api/swarms/webhook', async (req, res) => {
+app.post('/api/swarms/webhook', requireSwarmsEnabled, async (req, res) => {
   try {
     // Verify webhook signature if secret is configured
     if (SWARMS_WEBHOOK_SECRET) {
@@ -5266,10 +5399,11 @@ app.post('/api/swarms/webhook', async (req, res) => {
         return res.status(401).json({ error: 'Webhook signature required' });
       }
 
-      // Verify HMAC-SHA256 signature
+      // Verify a real HMAC-SHA256 signature (keyed hash — not sha256(secret+payload),
+      // which is length-extension weak) and compare in constant time.
       const payload = JSON.stringify(req.body);
-      const expectedSignature = createHash('sha256')
-        .update(SWARMS_WEBHOOK_SECRET + payload)
+      const expectedSignature = createHmac('sha256', SWARMS_WEBHOOK_SECRET)
+        .update(payload)
         .digest('hex');
 
       // Support both "sha256=..." and raw hex formats
@@ -5277,7 +5411,17 @@ app.post('/api/swarms/webhook', async (req, res) => {
         ? signature.slice(7)
         : signature;
 
-      if (providedSignature !== expectedSignature) {
+      const expBuf = Buffer.from(expectedSignature, 'hex');
+      let providedBuf;
+      try {
+        providedBuf = Buffer.from(providedSignature, 'hex');
+      } catch {
+        providedBuf = Buffer.alloc(0);
+      }
+      if (
+        expBuf.length !== providedBuf.length ||
+        !timingSafeEqual(expBuf, providedBuf)
+      ) {
         console.error('Webhook signature verification failed');
         return res.status(401).json({ error: 'Invalid webhook signature' });
       }

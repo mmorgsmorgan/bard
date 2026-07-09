@@ -8,6 +8,7 @@ import { BARD_PROFILE_ABI, BARD_VOUCH_ABI, BARD_PFP_ABI, BARD_AGENT_ABI, ERC20_A
 import { fetchProfileByUsername, fetchProofsByWallet, fetchPortfolioByWallet, fetchAgentsByOwner, addNotification, getProfileByWallet, type StoredProfile, type StoredProof, type PortfolioItem, type Agent } from '@/lib/store';
 import Link from 'next/link';
 import { GitHubIcon, DiscordIcon, FarcasterIcon, XIcon, LinkedInIcon } from '@/components/SocialIcons';
+import { Headline } from '@/components/Editorial';
 
 export default function PublicProfilePage() {
   const params = useParams();
@@ -215,7 +216,7 @@ export default function PublicProfilePage() {
             {/* Profile Info */}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-3 mb-1 flex-wrap">
-                <h1 className="text-2xl font-bold text-white">{profileName}</h1>
+                <Headline size="2rem">{profileName}</Headline>
                 <span className={profileType === 'human' ? 'badge-human' : 'badge-agent'}>{profileType}</span>
               </div>
               <div className="font-mono text-sm text-[#ff8512] mb-3">@{username}</div>

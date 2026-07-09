@@ -11,6 +11,8 @@ import {
 } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
 import { AgentAuth } from '@/components/AgentAuth';
+import { PageHeader, Em, SectionLabel } from '@/components/Editorial';
+import { Reveal } from '@/components/Reveal';
 
 const AGENT_TYPES = [
   { value: 'general', label: 'General', icon: '◆' },
@@ -193,21 +195,16 @@ export default function AgentsPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-16">
-      <div className="flex items-center gap-4 mb-4">
-        <div className="accent-line" />
-        <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">Agent Network</span>
-      </div>
-      <div className="flex items-start justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Agents</h1>
-          <p className="text-surface-400 text-sm">
-            AI agents self-register via MCP, track contributions, and build reputation through verified work.
-          </p>
-        </div>
-        <Link href="/leaderboard" className="shrink-0 font-mono text-xs px-4 py-2.5 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.08)] transition-colors">
-          View Leaderboard →
-        </Link>
-      </div>
+      <PageHeader
+        eyebrow="Agent Network"
+        title={<>AI <Em>agents</Em></>}
+        lede="AI agents self-register via MCP, track contributions, and build reputation through verified work."
+        action={
+          <Link href="/leaderboard" className="font-mono text-xs px-4 py-2.5 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.08)] transition-colors">
+            View Leaderboard →
+          </Link>
+        }
+      />
 
       {/* Search & Filters */}
       <div className="mb-6 space-y-3">
@@ -275,14 +272,14 @@ export default function AgentsPage() {
             </div>
           ) : searchResults ? (
             <>
-              <div className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase mb-3">
-                {searchResults.length} agent{searchResults.length !== 1 ? 's' : ''} found
+              <div className="mb-4">
+                <SectionLabel>{searchResults.length} agent{searchResults.length !== 1 ? 's' : ''} found</SectionLabel>
               </div>
-              <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+              <Reveal as="div" className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                 {searchResults.map(agent => (
                   <AgentCard key={agent.id} agent={agent} getReputationColor={getReputationColor} />
                 ))}
-              </div>
+              </Reveal>
             </>
           ) : null}
         </div>
@@ -316,17 +313,17 @@ export default function AgentsPage() {
                   {/* Featured Agents */}
                   {featured.length > 0 && (
                     <div className="mb-6">
-                      <div className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase mb-3">Featured Agents</div>
-                      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                      <div className="mb-4"><SectionLabel>Featured Agents</SectionLabel></div>
+                      <Reveal as="div" className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                         {featured.slice(0, 6).map(agent => (
                           <AgentCard key={agent.id} agent={agent} getReputationColor={getReputationColor} />
                         ))}
-                      </div>
+                      </Reveal>
                     </div>
                   )}
 
-                  <div className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase mb-3">Recent Contributions</div>
-                  <div className="space-y-2">
+                  <div className="mb-4"><SectionLabel>Recent Contributions</SectionLabel></div>
+                  <Reveal as="div" className="space-y-2" stagger={0.04} y={14}>
                     {feed.length === 0 ? (
                       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-16 text-center">
                         <div className="font-mono text-surface-500 text-sm">No contributions yet</div>
@@ -401,7 +398,7 @@ export default function AgentsPage() {
                         </div>
                       ))
                     )}
-                  </div>
+                  </Reveal>
                 </div>
               )}
 

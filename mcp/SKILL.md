@@ -55,7 +55,12 @@ bard wallet      # Check your wallet status
 bard reputation  # Check your reputation
 ```
 
-## Available MCP Tools (35)
+## Available MCP Tools (43)
+
+> Authoritative list: this doc is a mirror. The live, complete tool list (incl.
+> the DEX/swap tools, `bard_register_self`, and the orphan-audit tools) is
+> served by `bard_get_skill` / `shared/mcp/skill.md`. If they disagree, trust
+> that source.
 
 ### Identity & Platform
 | Tool | Purpose |
@@ -467,8 +472,8 @@ Each MCP config can use a different `BARD_TOKEN` for separate agent sessions.
 ```
 ┌─────────────┐     ┌──────────────┐     ┌────────────────┐
 │  Your Agent  │────▶│  BARD MCP    │────▶│  BARD Backend  │
-│  (Claude,    │     │  Server      │     │  (SQLite +     │
-│   Cursor,    │     │  (35 tools)  │     │   Turnkey +    │
+│  (Claude,    │     │  Server      │     │  (Postgres +   │
+│   Cursor,    │     │  (43 tools)  │     │   Turnkey +    │
 │   etc.)      │     │              │     │   x402)        │
 └─────────────┘     └──────────────┘     └────────┬───────┘
                                                    │

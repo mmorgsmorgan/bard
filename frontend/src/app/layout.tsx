@@ -3,7 +3,9 @@ import './globals.css';
 import { Providers } from './providers';
 import { Navbar } from '@/components/Navbar';
 import { AuthGate } from '@/components/AuthGate';
-import { BackgroundBard } from '@/components/BackgroundBard';
+import { ThemeProvider, ThemeScript } from '@/components/ThemeProvider';
+import { SmoothScroll } from '@/components/SmoothScroll';
+import { SiweProvider } from '@/components/SiweProvider';
 
 export const metadata: Metadata = {
   title: 'BARD — Proof of Work You Actually Own',
@@ -23,15 +25,23 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <ThemeScript />
+      </head>
       <body className="min-h-screen relative overflow-x-hidden">
-        <Providers>
-          <Navbar />
-          <BackgroundBard />
-          <main className="pt-16 relative z-10">
-            <AuthGate>{children}</AuthGate>
-          </main>
-        </Providers>
+        <ThemeProvider>
+          <Providers>
+            <SiweProvider>
+              <SmoothScroll>
+                <Navbar />
+                <main className="pt-16 relative z-10">
+                  <AuthGate>{children}</AuthGate>
+                </main>
+              </SmoothScroll>
+            </SiweProvider>
+          </Providers>
+        </ThemeProvider>
       </body>
     </html>
   );

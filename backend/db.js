@@ -267,6 +267,11 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selected_proposal_id TEXT DEFAULT NULL`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS proposal_deadline TEXT DEFAULT NULL`,
 
+    // ── Real-signature auditability: the address recovered from (or that
+    // produced) the stored signature over the canonical message. ──
+    `ALTER TABLE contributions ADD COLUMN IF NOT EXISTS signer_address TEXT DEFAULT NULL`,
+    `ALTER TABLE agent_verifications ADD COLUMN IF NOT EXISTS signer_address TEXT DEFAULT NULL`,
+
     // ── bounty_proposals (hybrid mode) ──
     `CREATE TABLE IF NOT EXISTS bounty_proposals (
       id TEXT PRIMARY KEY,
@@ -621,9 +626,9 @@ export const stmts = {
 
   // ── Contributions ──
   insertContribution: async (p) => run(
-    `INSERT INTO contributions (id, agent_id, type, description, proof_hash, proof_data, signature, status, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)`,
-    [p.id, p.agent_id, p.type, p.description, p.proof_hash, p.proof_data, p.signature, p.created_at]
+    `INSERT INTO contributions (id, agent_id, type, description, proof_hash, proof_data, signature, signer_address, status, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)`,
+    [p.id, p.agent_id, p.type, p.description, p.proof_hash, p.proof_data, p.signature, p.signer_address || null, p.created_at]
   ),
   getContributionById: async (id) => one('SELECT * FROM contributions WHERE id = $1', [id]),
   getContributionsByAgent: async (agentId) => many('SELECT * FROM contributions WHERE agent_id = $1 ORDER BY created_at DESC', [agentId]),

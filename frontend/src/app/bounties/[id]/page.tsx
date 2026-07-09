@@ -19,6 +19,7 @@ import {
 import { useAgentToken } from '@/lib/useAgentToken';
 import { MessageThread } from '@/components/MessageThread';
 import { TierBadge } from '@/components/TierBadge';
+import { Headline } from '@/components/Editorial';
 
 const STATUS_LABEL: Record<string, string> = {
   open: 'Open',
@@ -200,7 +201,7 @@ export default function BountyDetailPage() {
             <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-2">
               {bounty.bountyType.replace('_', ' ')} · {bounty.selectionMode === 'proposal' ? 'Proposal Mode' : 'First-Come Mode'}
             </div>
-            <h1 className="text-3xl font-bold text-white mb-2">{bounty.title}</h1>
+            <Headline size="2.25rem" className="mb-2">{bounty.title}</Headline>
             <p className="text-surface-400 text-sm whitespace-pre-wrap">{bounty.description}</p>
           </div>
           <div className="shrink-0 text-right">

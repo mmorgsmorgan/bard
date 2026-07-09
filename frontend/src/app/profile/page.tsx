@@ -37,6 +37,7 @@ export default function ProfilePage() {
   // PFP state
   const [pfpPreview, setPfpPreview] = useState<string | null>(null);
   const [pfpDataURI, setPfpDataURI] = useState<string | null>(null);
+  const [pfpUploading, setPfpUploading] = useState(false);
   const [pfpMinting, setPfpMinting] = useState(false);
   const [pfpMinted, setPfpMinted] = useState(false);
   const [identityRegistered, setIdentityRegistered] = useState(false);
@@ -151,19 +152,32 @@ export default function ProfilePage() {
     reader.readAsDataURL(file);
 
     // Upload to backend
+    setPfpUploading(true);
+    setErrorMsg('');
     try {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('wallet', address || '');
       const res = await fetch(`${API_URL}/api/upload/pfp`, { method: 'POST', body: formData });
-      const data = await res.json();
-      if (data.success) {
+      // Surface the real server error instead of a generic message.
+      let data: { success?: boolean; url?: string; error?: string } = {};
+      try {
+        data = await res.json();
+      } catch {
+        /* non-JSON response */
+      }
+      if (res.ok && data.success && data.url) {
         setPfpDataURI(data.url);
       } else {
-        setErrorMsg('Upload failed');
+        setErrorMsg(data.error || `Upload failed (${res.status})`);
+        setPfpPreview(null);
       }
-    } catch {
-      setErrorMsg('Could not upload image');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`Could not upload image — ${msg}. Check your connection and try again.`);
+      setPfpPreview(null);
+    } finally {
+      setPfpUploading(false);
     }
   };
 
@@ -176,13 +190,25 @@ export default function ProfilePage() {
   }, [pfpTxConfirmed, pfpMinting]);
 
   useEffect(() => {
-    if (address) {
-      fetchProfileByWallet(address).then(local => {
-        if (local) setExistingProfile(local);
-      });
-      fetchProofsByWallet(address).then(setProofs);
-      fetchPortfolioByWallet(address).then(setPortfolio);
-    }
+    // Reset all per-wallet state whenever the connected wallet changes, so a
+    // previously-loaded account never leaks into a different (or fresh) wallet.
+    // Without this, switching to a wallet with no profile would keep showing
+    // the last wallet's account and block the create-new flow.
+    setExistingProfile(null);
+    setSettingsLoaded(false);
+    setProofs([]);
+    setPortfolio([]);
+    setStep(1);
+
+    if (!address) return;
+
+    let cancelled = false;
+    fetchProfileByWallet(address).then(local => {
+      if (!cancelled) setExistingProfile(local || null);
+    });
+    fetchProofsByWallet(address).then(p => !cancelled && setProofs(p));
+    fetchPortfolioByWallet(address).then(p => !cancelled && setPortfolio(p));
+    return () => { cancelled = true; };
   }, [address]);
 
   // Sync settings edit state when existingProfile loads
@@ -1045,7 +1071,7 @@ export default function ProfilePage() {
 
   // ── Profile creation flow ──
   return (
-    <div className="max-w-2xl mx-auto px-6 py-16">
+    <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10 sm:py-16">
       {/* Progress */}
       <div className="flex items-center gap-4 mb-14">
         {[1, 2, 3].map((s) => (
@@ -1064,7 +1090,7 @@ export default function ProfilePage() {
       </div>
 
       {step === 1 && (
-        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-8 animate-fade-in">
+        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-6 sm:p-8 lg:p-10 animate-fade-in max-w-3xl mx-auto">
           <h2 className="text-2xl font-bold text-white mb-2">Choose Your Identity</h2>
           <p className="text-surface-400 text-sm mb-8">Create your identity on BARD. Agents mint ERC-8004 on your behalf.</p>
 
@@ -1107,12 +1133,12 @@ export default function ProfilePage() {
       )}
 
       {step === 2 && profileType === 'human' && (
-        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-8 animate-fade-in">
+        <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-6 sm:p-8 lg:p-10 animate-fade-in max-w-3xl mx-auto">
           <h2 className="text-2xl font-bold text-white mb-2">Profile Details</h2>
           <p className="text-surface-400 text-sm mb-8">Profile details stored on BARD. Link an agent to mint ERC-8004.</p>
           <div className="space-y-6">
             {/* PFP Upload */}
-            <div>
+            <div className="lg:col-span-2">
               <span className="label-mono block mb-2">Profile Picture <span className="text-surface-600">(soulbound NFT · locked 6 months)</span></span>
               <div className="flex items-center gap-5">
                 <label className="w-20 h-20 border border-dashed border-[rgba(255,255,255,0.12)] bg-[#050505] flex items-center justify-center cursor-pointer hover:border-[#ff8512] transition-colors overflow-hidden shrink-0">
@@ -1126,7 +1152,12 @@ export default function ProfilePage() {
                 <div className="text-xs text-surface-500">
                   <p>Upload up to 5MB</p>
                   <p>PNG, JPG, WebP, or GIF</p>
-                  {pfpPreview && <p className="text-emerald-500 mt-1">Ready to save</p>}
+                  {pfpUploading && <p className="mt-1" style={{ color: 'var(--accent)' }}>Uploading…</p>}
+                  {!pfpUploading && pfpDataURI && <p className="mt-1" style={{ color: 'var(--ok)' }}>Uploaded ✓ Ready to save</p>}
+                  {!pfpUploading && pfpPreview && !pfpDataURI && !errorMsg && <p className="mt-1" style={{ color: 'var(--muted)' }}>Preview shown — uploading…</p>}
+                  {errorMsg && errorMsg.toLowerCase().includes('image') && (
+                    <p className="mt-1 max-w-[220px]" style={{ color: 'var(--danger)' }}>{errorMsg}</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -1134,7 +1165,7 @@ export default function ProfilePage() {
               <span className="label-mono block mb-2">Display Name</span>
               <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Your name" className="input-field" />
             </div>
-            <div>
+            <div className="lg:col-span-2">
               <span className="label-mono block mb-2">Bio</span>
               <textarea value={bio} onChange={(e) => setBio(e.target.value)} placeholder="Tell us about yourself..." className="input-field" rows={3} />
             </div>

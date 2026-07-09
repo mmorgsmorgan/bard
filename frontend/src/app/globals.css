@@ -4,17 +4,54 @@
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-:root {
-  --bg-primary: #050505;
-  --bg-card: #0c0c0c;
-  --bg-elevated: #141414;
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  --border-active: rgba(255, 133, 18, 0.4);
-  --accent: #ff8512;
-  --accent-dim: rgba(255, 133, 18, 0.12);
-  --text-primary: #fafafa;
-  --text-secondary: #a3a3a3;
-  --text-muted: #525252;
+/* ============================================================
+   THEME TOKENS — editorial system (bymonolog register)
+   Semantic variables consumed everywhere. Two palettes:
+   [data-theme="light"] (day) and [data-theme="dark"] (night).
+   Amber (#ff8512) stays the single warm accent in both.
+   ============================================================ */
+
+:root,
+[data-theme='light'] {
+  --bg:        #f4f2ec;  /* warm off-white canvas */
+  --bg-alt:    #eae7dd;  /* slightly deeper section band */
+  --bg-card:   #faf8f3;  /* raised surface */
+  --ink:       #1a1813;  /* near-black text */
+  --ink-soft:  #38352d;
+  --muted:     #6f6b62;  /* secondary text / eyebrows */
+  --faint:     #9a958a;  /* tertiary */
+  --rule:      rgba(26, 24, 19, 0.12);   /* hairlines */
+  --rule-soft: rgba(26, 24, 19, 0.06);
+  --accent:      #ff8512;
+  --accent-ink:  #1a1813;                /* text on accent fill */
+  --accent-dim:  rgba(255, 133, 18, 0.12);
+  --agent:       #7c3aed;                 /* agent identity (violet) */
+  --agent-dim:   rgba(124, 58, 237, 0.10);
+  --ok:   #2f7d4f;
+  --warn: #b46a00;
+  --danger: #b23b2e;
+  --shadow: 0 1px 2px rgba(26,24,19,0.04), 0 8px 24px rgba(26,24,19,0.06);
+}
+
+[data-theme='dark'] {
+  --bg:        #131210;  /* warm near-black, not cyber */
+  --bg-alt:    #1b1915;
+  --bg-card:   #1e1c18;
+  --ink:       #f2efe7;  /* warm off-white ink */
+  --ink-soft:  #d9d5ca;
+  --muted:     #9c968a;
+  --faint:     #6d685e;
+  --rule:      rgba(242, 239, 231, 0.14);
+  --rule-soft: rgba(242, 239, 231, 0.07);
+  --accent:      #ff9433;
+  --accent-ink:  #131210;
+  --accent-dim:  rgba(255, 148, 51, 0.14);
+  --agent:       #a884f5;
+  --agent-dim:   rgba(168, 132, 245, 0.16);
+  --ok:   #6bd08f;
+  --warn: #e0a24a;
+  --danger: #e07a6e;
+  --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 10px 30px rgba(0,0,0,0.45);
 }
 
 * {
@@ -25,47 +62,143 @@
 
 html {
   scroll-behavior: smooth;
+  /* Global type scale-up — the UI leaned on very small text. 112.5% makes the
+     base 18px so all rem-based sizing (text + spacing) grows proportionally.
+     Dial this single number to taste. */
+  font-size: 112.5%;
 }
 
 body {
   font-family: 'Inter', system-ui, sans-serif;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
+  background: var(--bg);
+  color: var(--ink-soft);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
-/* ── Cards — sharp edges, no blur ── */
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ── Typography helpers ── */
+.font-display {
+  font-family: var(--font-fraunces, 'Fraunces'), Georgia, 'Times New Roman', serif;
+}
+
+.eyebrow,
+.label-mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ── Rules / hairlines ── */
+.rule {
+  height: 1px;
+  width: 100%;
+  background: var(--rule);
+  border: 0;
+}
+.accent-line {
+  width: 40px;
+  height: 2px;
+  background: var(--accent);
+}
+
+/* ── Cards — editorial, quiet ── */
+.card,
 .glass-card {
   background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--rule);
   border-radius: 2px;
+  transition: border-color 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
 }
-
-.glass-card-hover {
-  transition: all 0.2s ease;
-}
+.card-hover:hover,
 .glass-card-hover:hover {
-  border-color: var(--border-active);
-  background: var(--bg-elevated);
+  border-color: var(--accent);
+  box-shadow: var(--shadow);
 }
 
-/* ── Gradient text — amber/orange ── */
+/* ── Arrow link ── */
+.arrow-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5ch;
+  color: var(--ink);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: gap 0.2s ease, color 0.2s ease;
+}
+.arrow-link:hover {
+  color: var(--accent);
+  gap: 0.9ch;
+}
+
+/* ── Buttons — sharp, editorial (no glitch) ── */
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+  padding: 12px 28px;
+  border-radius: 1px;
+  border: 1px solid var(--accent);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-size: 0.8rem;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.btn-primary:hover {
+  filter: brightness(1.06);
+  box-shadow: var(--shadow);
+}
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  box-shadow: none;
+  filter: none;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+  padding: 12px 28px;
+  border-radius: 1px;
+  border: 1px solid var(--rule);
+  cursor: pointer;
+  transition: all 0.18s ease;
+  font-size: 0.8rem;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.btn-secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ── Gradient / accent text ── */
 .gradient-text {
-  background: linear-gradient(135deg, #ff8512 0%, #fbbf24 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--accent);
 }
 
-/* ── Vouch tier badges ── */
-.tier-micro    { background: #262626; color: #a3a3a3; }
-.tier-standard { background: #1a1400; color: #fbbf24; }
-.tier-endorsed { background: #1a0a00; color: #ff8512; }
-.tier-founder  { background: #1a0500; color: #ff6b00; }
+/* ── Vouch tier badges (theme-aware) ── */
+.tier-micro    { background: var(--bg-alt);    color: var(--muted); }
+.tier-standard { background: var(--accent-dim); color: var(--accent); }
+.tier-endorsed { background: var(--accent-dim); color: var(--accent); }
+.tier-founder  { background: var(--accent);     color: var(--accent-ink); }
 
-/* ── Profile type badges — sharp ── */
+/* ── Profile type badges ── */
 .badge-human {
   background: var(--accent-dim);
   color: var(--accent);
@@ -74,40 +207,40 @@ body {
   font-weight: 600;
   padding: 3px 10px;
   border-radius: 1px;
-  border: 1px solid rgba(255, 133, 18, 0.2);
+  border: 1px solid var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
 .badge-agent {
-  background: rgba(168, 85, 247, 0.1);
-  color: #a855f7;
+  background: var(--agent-dim);
+  color: var(--agent);
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.65rem;
   font-weight: 600;
   padding: 3px 10px;
   border-radius: 1px;
-  border: 1px solid rgba(168, 85, 247, 0.2);
+  border: 1px solid var(--agent);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
 
 /* ── Validation status pills ── */
 .status-validated {
-  background: rgba(34, 197, 94, 0.08);
-  color: #22c55e;
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
   border-radius: 1px;
 }
 .status-pending {
-  background: rgba(255, 133, 18, 0.08);
-  color: #ff8512;
-  border: 1px solid rgba(255, 133, 18, 0.2);
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 1px;
 }
 .status-unvalidated {
-  background: rgba(82, 82, 82, 0.15);
-  color: #737373;
-  border: 1px solid rgba(82, 82, 82, 0.2);
+  background: var(--rule-soft);
+  color: var(--faint);
+  border: 1px solid var(--rule);
   border-radius: 1px;
 }
 
@@ -122,114 +255,31 @@ body {
   font-weight: 700;
   font-size: 1.25rem;
   font-family: 'JetBrains Mono', monospace;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--rule);
   background: var(--bg-card);
+  color: var(--ink);
 }
 
-/* ── Buttons — sharp, minimal, glitch ── */
-.btn-primary {
-  background: var(--accent);
-  color: #050505;
-  font-weight: 600;
-  padding: 12px 28px;
-  border-radius: 1px;
-  border: none;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  font-size: 0.875rem;
-  font-family: 'JetBrains Mono', monospace;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  position: relative;
-  overflow: hidden;
-}
-.btn-primary:hover {
-  background: #ffa038;
-  box-shadow:
-    0 0 20px rgba(255, 133, 18, 0.25),
-    -2px 0 0 rgba(0, 255, 255, 0.3),
-    2px 0 0 rgba(255, 0, 255, 0.3);
-  animation: glitch-btn 0.3s ease;
-}
-.btn-primary:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-  box-shadow: none;
-  animation: none;
-}
-
-.btn-secondary {
-  background: transparent;
-  color: var(--text-secondary);
-  font-weight: 600;
-  padding: 12px 28px;
-  border-radius: 1px;
-  border: 1px solid var(--border-subtle);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  font-size: 0.875rem;
-  font-family: 'JetBrains Mono', monospace;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  position: relative;
-}
-.btn-secondary:hover {
-  border-color: var(--border-active);
-  color: var(--accent);
-  text-shadow:
-    -1px 0 rgba(0, 255, 255, 0.4),
-    1px 0 rgba(255, 0, 255, 0.4);
-  animation: glitch-btn 0.4s ease;
-}
-
-/* ── Glitch keyframes ── */
-@keyframes glitch-btn {
-  0% { transform: translate(0); }
-  10% { transform: translate(-2px, 1px); }
-  20% { transform: translate(2px, -1px); }
-  30% { transform: translate(-1px, -1px); }
-  40% { transform: translate(1px, 1px); }
-  50% { transform: translate(0); }
-  100% { transform: translate(0); }
-}
-
-@keyframes glitch-text {
-  0% { text-shadow: -1px 0 cyan, 1px 0 magenta; }
-  25% { text-shadow: 1px 0 cyan, -1px 0 magenta, 0 1px yellow; }
-  50% { text-shadow: -2px 0 cyan, 2px 0 magenta; }
-  75% { text-shadow: 1px -1px cyan, -1px 1px magenta, -1px 0 yellow; }
-  100% { text-shadow: -1px 0 cyan, 1px 0 magenta; }
-}
-
-/* Glitch text utility class */
-.glitch-hover:hover {
-  animation: glitch-btn 0.3s ease;
-  text-shadow:
-    -1px 0 rgba(0, 255, 255, 0.5),
-    1px 0 rgba(255, 0, 255, 0.5);
-}
-
-/* ── Inputs — sharp, dark ── */
+/* ── Inputs ── */
 .input-field {
-  background: var(--bg-primary);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  border: 1px solid var(--rule);
   border-radius: 1px;
   padding: 12px 16px;
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 0.875rem;
   width: 100%;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
   outline: none;
   font-family: 'Inter', system-ui, sans-serif;
 }
 .input-field:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(255, 133, 18, 0.15);
+  box-shadow: 0 0 0 1px var(--accent-dim);
 }
 .input-field::placeholder {
-  color: var(--text-muted);
+  color: var(--faint);
 }
-
 textarea.input-field {
   resize: vertical;
   min-height: 80px;
@@ -243,7 +293,7 @@ textarea.input-field {
   content: '';
   position: absolute;
   inset: 0;
-  opacity: 0.03;
+  opacity: 0.04;
   background-image:
     linear-gradient(45deg, var(--accent) 1px, transparent 1px),
     linear-gradient(-45deg, var(--accent) 1px, transparent 1px);
@@ -251,78 +301,99 @@ textarea.input-field {
   pointer-events: none;
 }
 
-/* ── Scrollbar — minimal ── */
-::-webkit-scrollbar { width: 4px; }
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #262626; border-radius: 0; }
-::-webkit-scrollbar-thumb:hover { background: #404040; }
+::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
-/* ── Accent line decorators ── */
-.accent-line {
-  width: 40px;
-  height: 2px;
-  background: var(--accent);
-}
+/* ── Animations (kept) ── */
+.animate-fade-in { animation: fadeIn 0.4s ease-out; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-/* ── Monospace label ── */
-.label-mono {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.7rem;
-  font-weight: 500;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
-/* ── Auth gate card — glitch border effect ── */
-.auth-gate-card {
-  position: relative;
-  animation: glitch-card-idle 4s ease-in-out infinite;
-}
-.auth-gate-card::before,
-.auth-gate-card::after {
-  content: '';
-  position: absolute;
-  inset: -1px;
-  border: 1px solid transparent;
-  pointer-events: none;
-}
-.auth-gate-card::before {
-  border-color: rgba(0, 255, 255, 0.15);
-  transform: translate(-2px, 0);
-  animation: glitch-border-cyan 4s ease-in-out infinite;
-}
-.auth-gate-card::after {
-  border-color: rgba(255, 0, 255, 0.15);
-  transform: translate(2px, 0);
-  animation: glitch-border-magenta 4s ease-in-out infinite;
-}
+/* ============================================================
+   THEME COMPATIBILITY LAYER
+   The interior pages were authored with hardcoded dark colors
+   (bg-[#0c0c0c], text-white, text-surface-500, white borders…).
+   These remap those exact Tailwind utilities onto the semantic
+   theme tokens so EVERY page flips together — light means fully
+   light, dark means fully dark — without editing each page file.
+   The amber accent (#ff8512) and violet agent tints already read
+   on both palettes and are intentionally left alone.
+   ============================================================ */
 
-@keyframes glitch-card-idle {
-  0%, 100% { transform: translate(0); }
-  2% { transform: translate(-1px, 0); }
-  4% { transform: translate(1px, 0); }
-  6% { transform: translate(0); }
-  50% { transform: translate(0); }
-  52% { transform: translate(1px, -1px); }
-  54% { transform: translate(-1px, 0); }
-  56% { transform: translate(0); }
-}
+/* ---- Fixed tiny labels → rem so they scale with the root type size ---- */
+.text-\[9px\]  { font-size: 0.68rem !important; }
+.text-\[10px\] { font-size: 0.72rem !important; }
+.text-\[11px\] { font-size: 0.78rem !important; }
+.text-\[12px\] { font-size: 0.82rem !important; }
 
-@keyframes glitch-border-cyan {
-  0%, 100% { transform: translate(-2px, 0); opacity: 0.15; }
-  2% { transform: translate(1px, 1px); opacity: 0.4; }
-  4% { transform: translate(-2px, 0); opacity: 0.15; }
-  50% { transform: translate(-2px, 0); opacity: 0.15; }
-  52% { transform: translate(2px, -1px); opacity: 0.5; }
-  54% { transform: translate(-2px, 0); opacity: 0.15; }
-}
+/* ---- Text ---- */
+.text-white        { color: var(--ink) !important; }
+.text-surface-50,
+.text-surface-100,
+.text-surface-200  { color: var(--ink) !important; }
+.text-surface-300  { color: var(--ink-soft) !important; }
+.text-surface-400  { color: var(--muted) !important; }
+.text-surface-500  { color: var(--muted) !important; }
+.text-surface-600  { color: var(--faint) !important; }
+.text-surface-700  { color: var(--faint) !important; }
+.hover\:text-surface-300:hover { color: var(--ink-soft) !important; }
 
-@keyframes glitch-border-magenta {
-  0%, 100% { transform: translate(2px, 0); opacity: 0.15; }
-  2% { transform: translate(-1px, -1px); opacity: 0.4; }
-  4% { transform: translate(2px, 0); opacity: 0.15; }
-  50% { transform: translate(2px, 0); opacity: 0.15; }
-  52% { transform: translate(-2px, 1px); opacity: 0.5; }
-  54% { transform: translate(2px, 0); opacity: 0.15; }
-}
+/* dark ink used as text ON amber fills — keep it contrasting */
+.text-\[\#050505\] { color: var(--accent-ink) !important; }
+
+/* ---- Backgrounds — dark surfaces become themed surfaces ---- */
+.bg-\[\#050505\],
+.bg-\[\#0a0a0a\],
+.bg-\[\#080808\],
+.bg-\[\#0d0d0d\],
+.bg-\[\#111\]      { background-color: var(--bg) !important; }
+.bg-\[\#0c0c0c\]   { background-color: var(--bg-card) !important; }
+.bg-\[\#141414\]   { background-color: var(--bg-alt) !important; }
+.bg-surface-900,
+.bg-surface-950,
+.bg-surface-800    { background-color: var(--bg-card) !important; }
+.bg-surface-700    { background-color: var(--bg-alt) !important; }
+.bg-surface-600,
+.bg-surface-500    { background-color: var(--muted) !important; }
+.hover\:bg-\[\#0c0c0c\]:hover { background-color: var(--bg-card) !important; }
+.hover\:bg-\[\#141414\]:hover { background-color: var(--bg-alt) !important; }
+.hover\:bg-\[\#111\]:hover    { background-color: var(--bg-alt) !important; }
+.hover\:bg-surface-500:hover,
+.hover\:bg-surface-600:hover  { background-color: var(--muted) !important; }
+
+/* white-tinted overlay fills → faint themed wash */
+.bg-\[rgba\(255\2c 255\2c 255\2c 0\.06\)\],
+.bg-\[rgba\(255\2c 255\2c 255\2c 0\.04\)\],
+.bg-\[rgba\(255\2c 255\2c 255\2c 0\.03\)\],
+.bg-\[rgba\(255\2c 255\2c 255\2c 0\.02\)\] { background-color: var(--rule-soft) !important; }
+
+/* ---- Borders — white hairlines become themed rules ---- */
+.border-\[rgba\(255\2c 255\2c 255\2c 0\.03\)\],
+.border-\[rgba\(255\2c 255\2c 255\2c 0\.04\)\],
+.border-\[rgba\(255\2c 255\2c 255\2c 0\.06\)\],
+.border-\[rgba\(255\2c 255\2c 255\2c 0\.08\)\],
+.border-\[rgba\(255\2c 255\2c 255\2c 0\.1\)\],
+.border-\[rgba\(255\2c 255\2c 255\2c 0\.12\)\],
+.border-\[rgba\(255\2c 255\2c 255\2c 0\.15\)\] { border-color: var(--rule) !important; }
+.border-surface-500,
+.border-surface-600,
+.border-surface-700 { border-color: var(--rule) !important; }
+.hover\:border-\[rgba\(255\2c 255\2c 255\2c 0\.12\)\]:hover,
+.hover\:border-\[rgba\(255\2c 255\2c 255\2c 0\.15\)\]:hover { border-color: var(--rule) !important; }
+
+/* ---- Gradients that faded to dark ---- */
+.from-\[\#050505\],
+.from-\[\#0c0c0c\] { --tw-gradient-from: var(--bg) var(--tw-gradient-from-position) !important; }
+.via-\[\#050505\]  { --tw-gradient-via: var(--bg) var(--tw-gradient-via-position) !important; }
+.to-\[\#050505\],
+.to-\[\#0c0c0c\]   { --tw-gradient-to: var(--bg) var(--tw-gradient-to-position) !important; }

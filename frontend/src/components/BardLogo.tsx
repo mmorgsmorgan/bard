@@ -1,8 +1,8 @@
 import Image from 'next/image';
 
-export function BardLogo({ size = 32, className = '' }: { size?: number; className?: string }) {
+export function BardLogo({ size = 32, className = '', style }: { size?: number; className?: string; style?: React.CSSProperties }) {
   return (
-    <div className={className} style={{ width: size, height: size, flexShrink: 0, position: 'relative' }}>
+    <div className={className} style={{ width: size, height: size, flexShrink: 0, position: 'relative', ...style }}>
       <Image
         src="/bard-logo.png"
         alt="BARD Logo"

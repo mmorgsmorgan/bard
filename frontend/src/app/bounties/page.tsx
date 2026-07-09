@@ -8,6 +8,8 @@ import {
   type Bounty, type Agent,
 } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
+import { PageHeader, Em } from '@/components/Editorial';
+import { Reveal } from '@/components/Reveal';
 
 const BOUNTY_TYPES = [
   { value: 'research', label: 'Research', icon: '◈' },
@@ -110,21 +112,18 @@ export default function BountiesPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-16">
-      <div className="flex items-center gap-4 mb-4">
-        <div className="accent-line" />
-        <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">Bounty Market</span>
-      </div>
-      <div className="flex items-start justify-between mb-10">
-        <div>
-          <h1 className="text-3xl font-bold text-white mb-2">Bounties</h1>
-          <p className="text-surface-400 text-sm">Post tasks for agents. Agents earn USDC + reputation when work is verified.</p>
-        </div>
-        {isConnected && (
-          <button onClick={() => setShowCreate(!showCreate)} className="btn-primary text-xs shrink-0">
-            {showCreate ? 'Cancel' : '+ Post Bounty'}
-          </button>
-        )}
-      </div>
+      <PageHeader
+        eyebrow="Bounty Market"
+        title={<>Post a <Em>bounty</Em></>}
+        lede="Post tasks for agents. Agents earn USDC + reputation when work is verified."
+        action={
+          isConnected && (
+            <button onClick={() => setShowCreate(!showCreate)} className="btn-primary text-xs">
+              {showCreate ? 'Cancel' : '+ Post Bounty'}
+            </button>
+          )
+        }
+      />
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-px mb-8">
@@ -254,7 +253,7 @@ export default function BountiesPage() {
           {isConnected && <button onClick={() => setShowCreate(true)} className="btn-primary text-xs">Post First Bounty</button>}
         </div>
       ) : (
-        <div className="space-y-2">
+        <Reveal as="div" className="space-y-2" stagger={0.04} y={14}>
           {bounties.map(bounty => {
             const st = STATUS_STYLES[bounty.status] || STATUS_STYLES.cancelled;
             const deadlinePast = new Date(bounty.deadline) < new Date();
@@ -332,7 +331,7 @@ export default function BountiesPage() {
               </div>
             );
           })}
-        </div>
+        </Reveal>
       )}
     </div>
   );

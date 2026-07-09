@@ -26,3 +26,11 @@ foundry.zip
 contracts/.foundry-bin/
 *.exe
 *.tsbuildinfo
+
+# Local editing safety copies (duplicate-before-editing) + redesign scratch — not for the repo
+*.original.tsx
+*.original.css
+*.original.js
+frontend/src/app/page.monolog.tsx
+frontend/src/app/page.redesign.tsx
+Screenshot*.png

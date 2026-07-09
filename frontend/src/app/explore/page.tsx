@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { fetchAllProfiles, type StoredProfile } from '@/lib/store';
+import { PageHeader, Em, SectionLabel } from '@/components/Editorial';
+import { Reveal } from '@/components/Reveal';
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -57,12 +59,11 @@ export default function ExplorePage() {
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-16">
-      <div className="flex items-center gap-4 mb-4">
-        <div className="accent-line" />
-        <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">Directory</span>
-      </div>
-      <h1 className="text-3xl font-bold text-white mb-2">Explore Contributors</h1>
-      <p className="text-surface-400 text-sm mb-10">Verified profiles and AI agents on Arc.</p>
+      <PageHeader
+        eyebrow="Directory"
+        title={<>Explore <Em>contributors</Em></>}
+        lede="Verified profiles and AI agents building reputation on Arc."
+      />
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 mb-8">
@@ -84,12 +85,11 @@ export default function ExplorePage() {
       {(filter === 'all' || filter === 'human') && filteredProfiles.length > 0 && (
         <>
           {filter === 'all' && (
-            <div className="flex items-center gap-2 mb-4">
-              <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">Human Profiles</span>
-              <span className="font-mono text-[10px] text-surface-600">({filteredProfiles.length})</span>
+            <div className="mb-5">
+              <SectionLabel>Human Profiles · {filteredProfiles.length}</SectionLabel>
             </div>
           )}
-          <div className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
+          <Reveal as="div" className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
             {filteredProfiles.map((profile) => (
               <Link key={profile.wallet} href={`/u/${profile.username}`}
                 className="relative bg-[#050505] p-6 hover:bg-[#0c0c0c] transition-colors group block overflow-hidden">
@@ -129,7 +129,7 @@ export default function ExplorePage() {
                 </div>
               </Link>
             ))}
-          </div>
+          </Reveal>
         </>
       )}
 
@@ -137,12 +137,11 @@ export default function ExplorePage() {
       {(filter === 'all' || filter === 'agent') && filteredAgents.length > 0 && (
         <>
           {filter === 'all' && (
-            <div className="flex items-center gap-2 mb-4">
-              <span className="font-mono text-[10px] text-surface-500 tracking-[0.15em] uppercase">AI Agents</span>
-              <span className="font-mono text-[10px] text-surface-600">({filteredAgents.length})</span>
+            <div className="mb-5">
+              <SectionLabel>AI Agents · {filteredAgents.length}</SectionLabel>
             </div>
           )}
-          <div className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
+          <Reveal as="div" className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
             {filteredAgents.map((agent) => (
               <Link key={agent.id} href={`/agents/${agent.id}`}
                 className="bg-[#050505] p-6 hover:bg-[#0c0c0c] transition-colors group block">
@@ -173,7 +172,7 @@ export default function ExplorePage() {
                 </div>
               </Link>
             ))}
-          </div>
+          </Reveal>
         </>
       )}
 

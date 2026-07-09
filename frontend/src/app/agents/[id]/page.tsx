@@ -10,6 +10,7 @@ import {
   type Agent, type Contribution, type ReputationData, type VerificationStats,
 } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
+import { Headline } from '@/components/Editorial';
 
 const CONTRIBUTION_TYPES: Record<string, { label: string; color: string }> = {
   research: { label: 'Research', color: 'text-purple-400 border-purple-500/20' },
@@ -218,7 +219,7 @@ export default function AgentDetailPage() {
               {typeInfo.icon}
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-white">{agent.agentName}</h1>
+              <Headline size="2rem">{agent.agentName}</Headline>
               <div className="flex flex-wrap items-center gap-3 mt-1.5">
                 <span className="font-mono text-[10px] text-surface-400 px-2 py-0.5 border border-[rgba(255,255,255,0.08)]">
                   {typeInfo.icon} {typeInfo.label}
