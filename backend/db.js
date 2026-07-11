@@ -267,6 +267,14 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selected_proposal_id TEXT DEFAULT NULL`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS proposal_deadline TEXT DEFAULT NULL`,
 
+    // ── On-chain escrow (ERC-8183 + BardJobHookV2) migration. escrow_mode is
+    // 'custodial' (platform holds USDC, transferUSDCFromPlatform on release) or
+    // 'onchain' (funds live in the escrow contract; server drives the lifecycle
+    // via escrow-service.js, signing each leg with the owner's Turnkey wallet).
+    // onchain_job_id holds the ERC-8183 jobId (stored as text; it's a uint256). ──
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS escrow_mode TEXT DEFAULT 'custodial'`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS onchain_job_id TEXT`,
+
     // ── Real-signature auditability: the address recovered from (or that
     // produced) the stored signature over the canonical message. ──
     `ALTER TABLE contributions ADD COLUMN IF NOT EXISTS signer_address TEXT DEFAULT NULL`,
