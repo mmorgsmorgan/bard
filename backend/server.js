@@ -25,6 +25,7 @@ import {
 } from './achswap.js';
 import { withMemo, MemoIds, ARC_MEMO_ADDRESS } from './arc-memo.js';
 import { createSiweRouter } from './siwe-auth.js';
+import * as onchainEscrow from './escrow-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +43,15 @@ const SELLER_ADDRESS = process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E1
 
 // ── Platform owner wallet (Stage 1 escrow verifier) ──
 const PLATFORM_OWNER_WALLET = (process.env.PLATFORM_OWNER_WALLET || SELLER_ADDRESS).toLowerCase();
+
+// ── On-chain escrow gate ──
+// When ON, eligible agent↔agent proposal bounties fund into the ERC-8183 escrow
+// contract instead of the custodial platform wallet (escrow-service.js drives the
+// whole lifecycle). Default OFF so merging this changes nothing until it's flipped.
+// Eligibility ALSO requires both creator and provider to be Turnkey-signable
+// wallets in the platform org (see resolveTurnkeyWallet) — the server signs every
+// creator/provider leg, so a human/MetaMask creator can't use the on-chain path.
+const ONCHAIN_ESCROW = process.env.ONCHAIN_ESCROW === '1' || process.env.ONCHAIN_ESCROW === 'true';
 
 // ── Swarms API configuration ──
 // DORMANT: the swarm feature is on hold. It stays code-complete but every
@@ -275,8 +285,8 @@ async function checkEscrowExpiry({ onlyBountyId = null } = {}) {
   try {
     const now = new Date().toISOString();
     const query = onlyBountyId
-      ? { text: "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status FROM bounties WHERE id = $1 AND expires_at IS NOT NULL AND expires_at < $2 AND escrow_status IN ('funded', 'claimed', 'submitted')", values: [onlyBountyId, now] }
-      : { text: "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status FROM bounties WHERE expires_at IS NOT NULL AND expires_at < $1 AND escrow_status IN ('funded', 'claimed', 'submitted')", values: [now] };
+      ? { text: "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status, escrow_mode, onchain_job_id FROM bounties WHERE id = $1 AND expires_at IS NOT NULL AND expires_at < $2 AND escrow_status IN ('funded', 'claimed', 'submitted')", values: [onlyBountyId, now] }
+      : { text: "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status, escrow_mode, onchain_job_id FROM bounties WHERE expires_at IS NOT NULL AND expires_at < $1 AND escrow_status IN ('funded', 'claimed', 'submitted')", values: [now] };
     const { rows: expired } = await pool.query(query.text, query.values);
 
     // Without Turnkey we can't actually move USDC. Skip the sweep entirely
@@ -298,17 +308,25 @@ async function checkEscrowExpiry({ onlyBountyId = null } = {}) {
       const amount = parseFloat(b.escrow_budget_usdc);
       let refundTx;
       try {
-        console.log(`[Escrow Expiry] Refunding ${amount} USDC to ${b.creator_wallet} for bounty ${b.id} (was ${b.escrow_status})...`);
-        refundTx = await transferUSDCFromPlatform(b.creator_wallet, amount, {
-          memoId: MemoIds.JobRefundExp,
-          memoData: {
-            bountyId: b.id,
-            creatorWallet: b.creator_wallet,
-            amountUsd: amount,
-            cause: 'expired',
-            previousStatus: b.escrow_status,
-          },
-        });
+        if (b.escrow_mode === 'onchain' && b.onchain_job_id) {
+          // On-chain: claimRefund (+ refundFee) returns the escrowed budget to the
+          // client on-chain. Anyone can call it once the job's expiredAt passes.
+          console.log(`[Escrow Expiry] On-chain refund for bounty ${b.id} (job ${b.onchain_job_id}, was ${b.escrow_status})...`);
+          const { txs } = await onchainEscrow.refundExpired({ jobId: b.onchain_job_id });
+          refundTx = txs.claimRefund;
+        } else {
+          console.log(`[Escrow Expiry] Refunding ${amount} USDC to ${b.creator_wallet} for bounty ${b.id} (was ${b.escrow_status})...`);
+          refundTx = await transferUSDCFromPlatform(b.creator_wallet, amount, {
+            memoId: MemoIds.JobRefundExp,
+            memoData: {
+              bountyId: b.id,
+              creatorWallet: b.creator_wallet,
+              amountUsd: amount,
+              cause: 'expired',
+              previousStatus: b.escrow_status,
+            },
+          });
+        }
       } catch (err) {
         console.error(`  Escrow expiry refund failed for ${b.id}: ${err.message}. Will retry next tick.`);
         summary.failed.push({ id: b.id, error: err.message });
@@ -702,8 +720,8 @@ async function attestAgentMessage({ agent, message, providedSignature }) {
     return { signature: providedSignature, signer: knownAddress.toLowerCase() };
   }
 
-  if (!isTurnkeyEnabled()) {
-    throw new Error('Signature required: Turnkey is not configured and no client signature was provided');
+  if (!walletSigningReady()) {
+    throw new Error('Signature required: no wallet provider is configured and no client signature was provided');
   }
   const { signature, address } = await signMessageWithAgentWallet(pool, agent.id, agent.agent_name, message);
   return { signature, signer: address.toLowerCase() };
@@ -2154,11 +2172,11 @@ app.post('/api/agents/:id/wallet', requireAuth, async (req, res) => {
     const agent = await stmts.getAgentById(req.params.id);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
 
-    if (!isTurnkeyEnabled()) {
+    if (!walletSigningReady()) {
       return res.json({
         turnkeyEnabled: false,
         address: null,
-        message: 'Turnkey not configured. Set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PRIVATE_KEY, TURNKEY_API_PUBLIC_KEY in .env',
+        message: 'No wallet provider configured. Set WALLET_PROVIDER=local + WALLET_MASTER_KEY (self-hosted), or Turnkey API keys.',
       });
     }
 
@@ -3719,6 +3737,40 @@ const logEscrowEvent = async (bountyId, eventType, actorWallet, actorType, detai
   await stmts.insertEscrowEvent({ id, bounty_id: bountyId, event_type: eventType, actor_wallet: actorWallet || '', actor_type: actorType || 'system', details: details || '', tx_hash: txHash || '', created_at: new Date().toISOString() });
 };
 
+// ── On-chain escrow eligibility ──
+// A wallet can back an on-chain escrow leg only if the platform Turnkey org can
+// sign for it — i.e. it's the turnkey_address of some agent in our DB. Returns
+// the checksummed address if signable, else null.
+async function resolveTurnkeyWallet(address) {
+  if (!address) return null;
+  const { rows } = await pool.query(
+    'SELECT turnkey_address FROM agents WHERE LOWER(turnkey_address) = LOWER($1) LIMIT 1',
+    [address]
+  );
+  return rows[0]?.turnkey_address || null;
+}
+
+// Whether the server can sign on agents' behalf at all (any wallet provider).
+// On-chain escrow needs server-side signing of creator/provider legs; that's
+// satisfied by Turnkey OR the self-hosted local provider (WALLET_MASTER_KEY).
+function walletSigningReady() {
+  const mode = (process.env.WALLET_PROVIDER || 'turnkey').toLowerCase();
+  if (mode === 'local') return !!process.env.WALLET_MASTER_KEY;
+  if (mode === 'hybrid') return !!process.env.WALLET_MASTER_KEY || isTurnkeyEnabled();
+  return isTurnkeyEnabled();
+}
+
+// Decide whether a proposal-mode bounty + its selected agent can run on-chain.
+// Requires the gate ON, a signer available, the provider to hold a managed wallet,
+// and the creator wallet to be server-signable (server signs the creator legs).
+async function onchainEscrowEligible(bounty, selectedAgent) {
+  if (!ONCHAIN_ESCROW || !walletSigningReady()) return { eligible: false };
+  if (!selectedAgent?.turnkey_address) return { eligible: false, reason: 'provider has no managed wallet' };
+  const creatorTk = await resolveTurnkeyWallet(bounty.creator_wallet);
+  if (!creatorTk) return { eligible: false, reason: 'creator wallet is not server-signable' };
+  return { eligible: true, creatorWallet: creatorTk, providerWallet: selectedAgent.turnkey_address };
+}
+
 // Verify transaction on-chain
 async function verifyTransaction(txHash, expectedFrom, expectedTo, expectedAmountUsdc) {
   try {
@@ -3976,6 +4028,66 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
   const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(); // 72h from fund
 
   if (bounty.selection_mode === 'proposal' && selectedAgent) {
+    // ── On-chain escrow path (gate on + agent↔agent + both Turnkey-signable) ──
+    // The server drives the full ERC-8183 lifecycle: money-in happens on-chain
+    // FIRST (createJob→configure→setProvider→setBudget→fund), then the DB records
+    // escrow_mode='onchain' + the jobId. If any on-chain leg reverts, nothing is
+    // committed and the creator can retry — same money-first ordering as refunds.
+    const elig = await onchainEscrowEligible(bounty, selectedAgent);
+    if (elig.eligible) {
+      let jobId, txs;
+      try {
+        console.log(`[Escrow On-Chain] Funding bounty ${req.params.id} — ${budgetUsdc} USDC, creator ${elig.creatorWallet} → provider ${elig.providerWallet}...`);
+        ({ jobId, txs } = await onchainEscrow.openAndFund({
+          creatorWallet: elig.creatorWallet,
+          providerWallet: elig.providerWallet,
+          earningsUsdc: parseFloat(budgetUsdc),
+          platformFeeUsdc: 0, // bounties are P2P — no platform fee yet
+          evaluator: SELLER_ADDRESS,
+          expirySeconds: 72 * 3600,
+          description: bounty.title || 'BARD bounty',
+        }));
+      } catch (err) {
+        console.error(`[Escrow On-Chain] openAndFund failed for ${req.params.id}: ${err.message}`);
+        return res.status(502).json({ error: 'On-chain escrow funding failed', details: err.message });
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const fresh = (await client.query('SELECT status, selected_proposal_id, escrow_status FROM bounties WHERE id = $1 FOR UPDATE', [req.params.id])).rows[0];
+        if (!fresh || fresh.status !== 'proposal_selected' || !fresh.selected_proposal_id || fresh.escrow_status !== 'none') {
+          throw new Error(`Race: bounty state changed after on-chain fund (status=${fresh?.status}, escrow=${fresh?.escrow_status}); on-chain job ${jobId} is funded — reconcile manually`);
+        }
+        await client.query(
+          `UPDATE bounties SET escrow_mode = 'onchain', onchain_job_id = $1, escrow_status = 'claimed', status = 'assigned', escrow_budget_usdc = $2, escrow_tx_hash = $3, provider_agent_id = $4, provider_wallet = $5, expires_at = $6, claimed_at = $7, updated_at = $7 WHERE id = $8`,
+          [jobId.toString(), parseFloat(budgetUsdc), txs.fund || '', selectedAgent.id, elig.providerWallet, expiresAt, now, req.params.id]
+        );
+        const ev1 = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const ev2 = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-c`;
+        await client.query(
+          `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [ev1, req.params.id, 'funded', elig.creatorWallet, 'agent', `${budgetUsdc} USDC funded on-chain (job ${jobId}, mode=onchain)`, txs.fund || '', now]
+        );
+        await client.query(
+          `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [ev2, req.params.id, 'claimed', selectedAgent.owner_wallet, 'agent', `Provider ${selectedAgent.agent_name} assigned on-chain (setProvider ${txs.setProvider || ''})`, txs.setProvider || '', now]
+        );
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        client.release();
+        return res.status(409).json({ error: err.message });
+      }
+      client.release();
+
+      emitFeedEvent('escrow:funded', { bountyId: req.params.id, budgetUsdc, mode: 'onchain', jobId: jobId.toString() });
+      emitFeedEvent('escrow:claimed', { bountyId: req.params.id, agentId: selectedAgent.id, agentName: selectedAgent.agent_name });
+      await createNotification({ agentId: selectedAgent.id, type: 'system', title: 'Bounty Funded On-Chain — You Can Start', message: `"${bounty.title}" is funded in on-chain escrow (${budgetUsdc} USDC, job #${jobId}). Begin work and submit your deliverable.`, from: clientWallet });
+      return res.json({ success: true, escrow_mode: 'onchain', onchain_job_id: jobId.toString(), tx: txs, bounty: await stmts.getBountyById(req.params.id) });
+    }
+
+    // ── Custodial proposal path (existing behavior) ──
     // Atomic fund + auto-claim for proposal-selected bounty
     const client = await pool.connect();
     try {
@@ -4143,8 +4255,30 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
 
   const hash = proofHash || ('0x' + createHash('sha256').update(content).digest('hex'));
   const now = new Date().toISOString();
+
+  // On-chain: record the deliverable on the escrow contract (Funded → Submitted)
+  // BEFORE flipping the DB, so a failed on-chain submit doesn't leave the DB ahead.
+  // Only the first submission moves on-chain state; a revision re-uses the same
+  // Submitted job and just refreshes the off-chain artifact below.
+  let submitTx = '';
+  if (bounty.escrow_mode === 'onchain' && bounty.onchain_job_id) {
+    try {
+      const job = await onchainEscrow.getJob(bounty.onchain_job_id);
+      if (Number(job.status) === 1 /* Funded */) {
+        ({ txHash: submitTx } = await onchainEscrow.submit({
+          providerWallet: bounty.provider_wallet,
+          jobId: bounty.onchain_job_id,
+          deliverableLabel: hash,
+        }));
+      }
+    } catch (err) {
+      console.error(`[Escrow On-Chain] submit failed for job ${bounty.onchain_job_id}: ${err.message}`);
+      return res.status(502).json({ error: 'On-chain deliverable submission failed', details: err.message });
+    }
+  }
+
   await stmts.submitBountyDeliverable({ deliverable_hash: hash, deliverable_content: content, submitted_at: now, updated_at: now, id: req.params.id });
-  await logEscrowEvent(req.params.id, 'submitted', bounty.provider_wallet, 'agent', `Deliverable submitted (hash: ${hash.slice(0, 16)}...)`, '');
+  await logEscrowEvent(req.params.id, 'submitted', bounty.provider_wallet, 'agent', `Deliverable submitted (hash: ${hash.slice(0, 16)}...)${submitTx ? ` [on-chain ${submitTx}]` : ''}`, submitTx);
 
   await createNotification({ wallet: bounty.creator_wallet, type: 'system', title: 'Deliverable Submitted', message: `Agent submitted work for "${bounty.title}". Review it now.`, from: bounty.provider_wallet });
   emitFeedEvent('escrow:submitted', { bountyId: req.params.id, deliverableHash: hash });
@@ -4550,20 +4684,36 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
         throw new Error('Agent has no wallet address for payment');
       }
 
-      // ACTUAL USDC TRANSFER - Release payment to agent
-      console.log(`[Escrow Release] Transferring ${agentEarnings} USDC to ${agent.agent_name} (${recipientWallet})...`);
-      const releaseTx = await transferUSDCFromPlatform(recipientWallet, agentEarnings, {
-        memoId: MemoIds.PayoutAgent,
-        memoData: {
-          bountyId: req.params.id,
-          agentId: bounty.provider_agent_id,
-          agentName: agent.agent_name,
-          agentWallet: recipientWallet,
-          amountUsd: agentEarnings,
-          platformFeeUsd: platformFee,
-          verifier: verifierWallet,
-        },
-      });
+      // ACTUAL USDC TRANSFER - Release payment to agent.
+      // On-chain: `complete` releases the escrowed budget to the provider + the fee
+      // to the recipient atomically on-chain (no custodial transfer). decodeSettlement
+      // reads the real released amounts from the receipt (gas-independent proof).
+      let releaseTx;
+      if (bounty.escrow_mode === 'onchain' && bounty.onchain_job_id) {
+        console.log(`[Escrow On-Chain Release] Completing job ${bounty.onchain_job_id} → releasing to ${agent.agent_name} (${recipientWallet})...`);
+        const { txHash, receipt } = await onchainEscrow.release({ jobId: bounty.onchain_job_id, reasonLabel: 'approved', evaluator: SELLER_ADDRESS });
+        releaseTx = txHash;
+        try {
+          const settled = await onchainEscrow.decodeSettlement(receipt);
+          if (settled.paidToProvider > 0) agentEarnings = settled.paidToProvider;
+          if (settled.feePaid > 0) platformFee = settled.feePaid;
+          console.log(`[Escrow On-Chain Release] settled: ${agentEarnings} USDC → provider, ${platformFee} USDC fee (tx ${releaseTx})`);
+        } catch (e) { console.warn(`[Escrow On-Chain Release] decodeSettlement failed: ${e.message}`); }
+      } else {
+        console.log(`[Escrow Release] Transferring ${agentEarnings} USDC to ${agent.agent_name} (${recipientWallet})...`);
+        releaseTx = await transferUSDCFromPlatform(recipientWallet, agentEarnings, {
+          memoId: MemoIds.PayoutAgent,
+          memoData: {
+            bountyId: req.params.id,
+            agentId: bounty.provider_agent_id,
+            agentName: agent.agent_name,
+            agentWallet: recipientWallet,
+            amountUsd: agentEarnings,
+            platformFeeUsd: platformFee,
+            verifier: verifierWallet,
+          },
+        });
+      }
 
       await client.query(
         `UPDATE bounties SET release_tx_hash = $1, escrow_status = 'released', status = 'completed', released_at = $2, updated_at = $3 WHERE id = $4`,
@@ -4588,19 +4738,27 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
         [verifierWallet, reasoning || '', now, req.params.id]
       );
 
-      // ACTUAL USDC TRANSFER - Refund to creator
-      console.log(`[Escrow Refund] Transferring ${bounty.escrow_budget_usdc} USDC back to creator (${bounty.creator_wallet})...`);
-      const refundTx = await transferUSDCFromPlatform(bounty.creator_wallet, bounty.escrow_budget_usdc, {
-        memoId: MemoIds.PayoutRefund,
-        memoData: {
-          bountyId: req.params.id,
-          creatorWallet: bounty.creator_wallet,
-          amountUsd: parseFloat(bounty.escrow_budget_usdc),
-          cause: 'verifier_rejected',
-          verifier: verifierWallet,
-          reasoning: reasoning || '',
-        },
-      });
+      // ACTUAL USDC TRANSFER - Refund to creator.
+      // On-chain: `reject` returns the escrowed budget (and any fee) to the client
+      // on-chain — no custodial transfer.
+      let refundTx;
+      if (bounty.escrow_mode === 'onchain' && bounty.onchain_job_id) {
+        console.log(`[Escrow On-Chain Refund] Rejecting job ${bounty.onchain_job_id} → refunding creator ${bounty.creator_wallet}...`);
+        ({ txHash: refundTx } = await onchainEscrow.reject({ jobId: bounty.onchain_job_id, reasonLabel: 'rejected', evaluator: SELLER_ADDRESS }));
+      } else {
+        console.log(`[Escrow Refund] Transferring ${bounty.escrow_budget_usdc} USDC back to creator (${bounty.creator_wallet})...`);
+        refundTx = await transferUSDCFromPlatform(bounty.creator_wallet, bounty.escrow_budget_usdc, {
+          memoId: MemoIds.PayoutRefund,
+          memoData: {
+            bountyId: req.params.id,
+            creatorWallet: bounty.creator_wallet,
+            amountUsd: parseFloat(bounty.escrow_budget_usdc),
+            cause: 'verifier_rejected',
+            verifier: verifierWallet,
+            reasoning: reasoning || '',
+          },
+        });
+      }
 
       await client.query(
         `UPDATE bounties SET status = 'cancelled', updated_at = $1 WHERE id = $2`,
