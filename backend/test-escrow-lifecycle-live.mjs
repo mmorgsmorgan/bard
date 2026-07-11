@@ -23,6 +23,7 @@
  */
 
 import { privateKeyToAccount } from 'viem/accounts';
+import { testKey } from './test-wallets.mjs';
 import {
   createPublicClient, createWalletClient, http, keccak256, toBytes, formatUnits,
 } from 'viem';
@@ -35,9 +36,9 @@ const ARC_RPC = 'https://rpc.testnet.arc.network';
 
 // W1 (client + treasury), W2 (provider), W3 (evaluator)
 const KEYS = {
-  W1: '0x19f02090dd79e4ec67182e9cee3a71e9c225ee22613d6a56bff4b10c380ad2c0',
-  W2: '0xc8ee7ed94c868a3a8bf183f004d577ff59f3f0cf74f8208362cb97b086624c4f',
-  W3: '0xd2200ae0fc6c5e0ee1da5edb53a5ef2611606ee1c2d9f01a71d5659a631cdda6',
+  W1: testKey('W1'),
+  W2: testKey('W2'),
+  W3: testKey('W3'),
 };
 
 const chain = {

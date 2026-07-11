@@ -154,7 +154,8 @@ export async function createAgentWallet(agentId, agentName) {
  * `db` is the pg Pool exported from ./db.js.
  */
 export async function getOrCreateAgentWallet(db, agentId, agentName) {
-  // Check if agent already has a Turnkey wallet
+  // Check if agent already has a managed wallet (columns are named turnkey_* for
+  // history but hold whichever provider's wallet — Turnkey or self-hosted local).
   const { rows } = await db.query(
     'SELECT turnkey_wallet_id, turnkey_address FROM agents WHERE id = $1',
     [agentId]
@@ -165,12 +166,24 @@ export async function getOrCreateAgentWallet(db, agentId, agentName) {
     return { walletId: agent.turnkey_wallet_id, address: agent.turnkey_address };
   }
 
-  // Create new wallet
-  const wallet = await createAgentWallet(agentId, agentName);
-  if (!wallet) return null;                  // Turnkey not configured
-  if (wallet.error) return wallet;           // Turnkey API failed — pass through
+  // Create new wallet via the configured provider. Default (turnkey) path is
+  // unchanged; local/hybrid create a self-hosted encrypted wallet instead.
+  const mode = (process.env.WALLET_PROVIDER || 'turnkey').toLowerCase();
+  let wallet;
+  if (mode === 'local' || mode === 'hybrid') {
+    const { getWalletProvider } = await import('./wallet-provider.js');
+    try {
+      wallet = await getWalletProvider(db).createWallet(`bard-agent-${agentId}`);
+    } catch (err) {
+      return { error: 'local_create_wallet_failed', detail: err.message };
+    }
+  } else {
+    wallet = await createAgentWallet(agentId, agentName);
+    if (!wallet) return null;                // Turnkey not configured
+    if (wallet.error) return wallet;         // Turnkey API failed — pass through
+  }
 
-  // Store in DB
+  // Store in DB (same columns regardless of provider)
   await db.query(
     'UPDATE agents SET turnkey_wallet_id = $1, turnkey_address = $2 WHERE id = $3',
     [wallet.walletId, wallet.address, agentId]
@@ -263,6 +276,17 @@ export async function mintERC8004Identity(db, agentId, agentName, metadataURI) {
  * Returns { signature, address }. Throws if Turnkey is not configured.
  */
 export async function signMessageWithAgentWallet(db, agentId, agentName, message) {
+  const mode = (process.env.WALLET_PROVIDER || 'turnkey').toLowerCase();
+
+  // local/hybrid: sign through the configured provider (self-hosted keystore).
+  if (mode === 'local' || mode === 'hybrid') {
+    const wallet = await getOrCreateAgentWallet(db, agentId, agentName);
+    if (!wallet || wallet.error) throw new Error(`Failed to resolve agent wallet: ${wallet?.detail || 'unknown'}`);
+    const { getWalletProvider } = await import('./wallet-provider.js');
+    const signature = await getWalletProvider(db).signMessage(wallet.address, message);
+    return { signature, address: wallet.address };
+  }
+
   const tk = getTurnkey();
   if (!tk) throw new Error('Turnkey not configured — cannot sign as agent');
 
