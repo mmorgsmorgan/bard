@@ -4421,6 +4421,55 @@ app.delete('/api/admin/platform-verifiers/:wallet', async (req, res) => {
   }
 });
 
+// POST /api/admin/provision-platform-wallet — mint a self-hosted (local) platform
+// wallet inside the service (which has internal DB + WALLET_MASTER_KEY), optionally
+// faucet it, and return its address. This is how the Turnkey-free platform wallet is
+// created in an environment where the DB isn't reachable from outside. Platform-
+// verifier-gated. After calling, set SELLER_ADDRESS / PLATFORM_OWNER_WALLET to the
+// returned address and redeploy.
+app.post('/api/admin/provision-platform-wallet', async (req, res) => {
+  const { callerWallet, faucet } = req.body || {};
+  if (!callerWallet) return res.status(400).json({ error: 'callerWallet required' });
+  if (!(await stmts.isPlatformVerifier(callerWallet))) {
+    return res.status(403).json({ error: 'Only a platform verifier can provision the platform wallet' });
+  }
+  const mode = (process.env.WALLET_PROVIDER || 'turnkey').toLowerCase();
+  if (mode !== 'local' && mode !== 'hybrid') {
+    return res.status(409).json({ error: `WALLET_PROVIDER must be local|hybrid to provision a self-hosted wallet (got ${mode})` });
+  }
+  if (!process.env.WALLET_MASTER_KEY) {
+    return res.status(409).json({ error: 'WALLET_MASTER_KEY not set — cannot create an encrypted local wallet' });
+  }
+  try {
+    const { getWalletProvider } = await import('./wallet-provider.js');
+    const provider = getWalletProvider(pool);
+    // Force local creation even in hybrid mode (hybrid.createWallet already goes local).
+    const wallet = await (provider.local ? provider.local.createWallet('platform') : provider.createWallet('platform'));
+
+    let faucetResult = null;
+    if (faucet && process.env.CIRCLE_API_KEY) {
+      const d = await fetch('https://api.circle.com/v1/faucet/drips', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.CIRCLE_API_KEY}` },
+        body: JSON.stringify({ address: wallet.address, blockchain: 'ARC-TESTNET', usdc: true }),
+      });
+      faucetResult = { status: d.status, ok: d.status === 204 || d.ok };
+    }
+
+    console.log(`[Admin] Provisioned local platform wallet ${wallet.address} (faucet: ${faucet ? faucetResult?.status : 'skipped'})`);
+    return res.json({
+      success: true,
+      address: wallet.address,
+      walletId: wallet.walletId,
+      faucet: faucetResult,
+      next: `Set SELLER_ADDRESS=${wallet.address} and PLATFORM_OWNER_WALLET=${wallet.address} on this service, then redeploy.`,
+    });
+  } catch (err) {
+    console.error('[Admin] provision-platform-wallet failed:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/expiry-sweep — Run the escrow expiry sweep on demand.
 //
 // Same logic the hourly cron runs. Platform-verifier-gated. Returns the
