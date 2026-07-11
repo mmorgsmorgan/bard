@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { privateKeyToAccount } from 'viem/accounts';
 import { createPublicClient, createWalletClient, http, formatUnits } from 'viem';
+import { testKey } from './test-wallets.mjs';
 
 const ARC_RPC = 'https://rpc.testnet.arc.network';
-const AC      = '0xa0756cF1107341a77Cf77054D12e4CE9DfDCbE2B';
-const HOOK    = '0x12131E21998063Fb06EEc189D77E7bc88630DEf5';
+// Secure redeploy 2026-07-10 (old 0xa0756c/0x12131e were owned by a leaked key).
+const AC      = process.env.AGENTIC_COMMERCE_ADDRESS || '0x417b10f3abB5355465e0c6B95B6Ee561e5aB42B5';
+const HOOK    = process.env.BARD_JOB_HOOK_ADDRESS    || '0x356Cde3c6E0218bDfE67D3B6c04D311A510958eE';
 const USDC    = '0x3600000000000000000000000000000000000000';
-const W3_KEY  = '0xd2200ae0fc6c5e0ee1da5edb53a5ef2611606ee1c2d9f01a71d5659a631cdda6';
+const W3_KEY  = testKey('W3');
 
 const chain = { id: 5042002, name:'Arc', nativeCurrency:{name:'USDC',symbol:'USDC',decimals:6}, rpcUrls:{default:{http:[ARC_RPC]}}};
 const pub = createPublicClient({ chain, transport: http(ARC_RPC) });
