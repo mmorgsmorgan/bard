@@ -2610,31 +2610,14 @@ app.post('/api/agents/:id/dex/swap', requireAuth, async (req, res) => {
     const minOut = (expectedOut * BigInt(10000 - slippage)) / 10000n;
     const routeData = quote.route_data;
 
-    // Turnkey signer setup (same pattern as /send-usdc).
-    const { Turnkey } = await import('@turnkey/sdk-server');
-    const { createAccount } = await import('@turnkey/viem');
-    const { createWalletClient, http, encodeFunctionData, decodeEventLog } = await import('viem');
-
-    const arcTestnet = {
-      id: 5042002,
-      name: 'Arc Testnet',
-      nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
-      rpcUrls: { default: { http: ['https://rpc.testnet.arc.network'] } },
-      blockExplorers: { default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' } },
-    };
-
-    const tk = new Turnkey({
-      defaultOrganizationId: process.env.TURNKEY_ORGANIZATION_ID,
-      apiBaseUrl: 'https://api.turnkey.com',
-      apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
-      apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
-    });
-    const account = await createAccount({
-      client: tk.apiClient(),
-      organizationId: process.env.TURNKEY_ORGANIZATION_ID,
-      signWith: walletAddress,
-    });
-    const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http() });
+    // Sign+send via the wallet provider (self-hosted/hybrid = no Turnkey), the same
+    // abstraction as /send-usdc and escrow. Native gas is topped up from the platform
+    // wallet first; sendAs waits for each receipt and throws on revert.
+    if (!walletSigningReady()) {
+      return res.status(400).json({ error: 'No wallet provider configured. Cannot sign transactions.' });
+    }
+    const { encodeFunctionData, decodeEventLog } = await import('viem');
+    await onchainEscrow.ensureGas(walletAddress);
 
     // ERC-20 input → ensure adapter allowance.
     let approveTxHash = null;
@@ -2651,29 +2634,24 @@ app.post('/api/agents/:id/dex/swap', requireAuth, async (req, res) => {
           functionName: 'approve',
           args: [ACHSWAP_ADAPTER, MAX_UINT256],
         });
-        approveTxHash = await walletClient.sendTransaction({
-          to: inAddr,
-          data: approveData,
-          value: 0n,
-        });
-        // Wait for inclusion before swap (Arc blocks are quick; ~5s).
-        await arcTestnetClient.waitForTransactionReceipt({ hash: approveTxHash });
+        // sendAs waits for the approve receipt before returning, preserving the
+        // approve-before-swap ordering.
+        ({ txHash: approveTxHash } = await onchainEscrow.sendAs(walletAddress, { to: inAddr, data: approveData }, `swap-approve:${agent.agent_name}`));
         console.log(`[Swap] ${agent.agent_name}: approved adapter to spend ${inAddr} | tx ${approveTxHash}`);
       }
     }
 
-    // Build + send the swap.
+    // Build + send the swap (native-token input carries value).
     const swapData = encodeFunctionData({
       abi: ADAPTER_ABI,
       functionName: 'swap',
       args: [inAddr, outAddr, BigInt(amountIn), minOut, walletAddress, routeData],
     });
-    const swapTxHash = await walletClient.sendTransaction({
-      to: ACHSWAP_ADAPTER,
-      data: swapData,
-      value: inAddr === NATIVE_TOKEN ? BigInt(amountIn) : 0n,
-    });
-    const receipt = await arcTestnetClient.waitForTransactionReceipt({ hash: swapTxHash });
+    const { txHash: swapTxHash, receipt } = await onchainEscrow.sendAs(
+      walletAddress,
+      { to: ACHSWAP_ADAPTER, data: swapData, value: inAddr === NATIVE_TOKEN ? BigInt(amountIn) : 0n },
+      `swap:${agent.agent_name}`,
+    );
 
     // Parse actualOut from a Transfer event whose `to` is the agent's wallet.
     let actualOut = null;
@@ -3832,8 +3810,8 @@ async function getPlatformWalletBalance() {
 
 // Transfer USDC from platform escrow wallet to recipient
 async function transferUSDCFromPlatform(toAddress, amountUsdc, memo = null) {
-  if (!isTurnkeyEnabled()) {
-    throw new Error('Turnkey not configured. Cannot sign platform transactions.');
+  if (!walletSigningReady()) {
+    throw new Error('No wallet provider configured. Cannot sign platform transactions.');
   }
 
   // Validate inputs
@@ -3854,40 +3832,8 @@ async function transferUSDCFromPlatform(toAddress, amountUsdc, memo = null) {
   console.log(`[Platform Transfer] Sending ${amountUsdc} USDC to ${toAddress}${memoTag}... (balance: ${balance.toFixed(2)} USDC)`);
 
   try {
-    const { Turnkey } = await import('@turnkey/sdk-server');
-    const { createAccount } = await import('@turnkey/viem');
-    const { createWalletClient, http, encodeFunctionData } = await import('viem');
-
-    // Arc Testnet chain definition
-    const arcTestnet = {
-      id: 5042002,
-      name: 'Arc Testnet',
-      nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
-      rpcUrls: { default: { http: [ARC_TESTNET_RPC] } },
-      blockExplorers: { default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' } },
-    };
-
+    const { encodeFunctionData } = await import('viem');
     const amountWei = BigInt(Math.round(amountUsdc * 1_000_000)); // 6 decimals
-
-    // Create Turnkey signer for platform wallet
-    const tk = new Turnkey({
-      defaultOrganizationId: process.env.TURNKEY_ORGANIZATION_ID,
-      apiBaseUrl: 'https://api.turnkey.com',
-      apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
-      apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
-    });
-
-    const account = await createAccount({
-      client: tk.apiClient(),
-      organizationId: process.env.TURNKEY_ORGANIZATION_ID,
-      signWith: SELLER_ADDRESS, // Platform escrow wallet
-    });
-
-    const walletClient = createWalletClient({
-      account,
-      chain: arcTestnet,
-      transport: http(),
-    });
 
     // ERC-20 transfer(address, uint256)
     const data = encodeFunctionData({
@@ -3913,11 +3859,9 @@ async function transferUSDCFromPlatform(toAddress, amountUsdc, memo = null) {
         )
       : { to: USDC_CONTRACT_ADDRESS, data };
 
-    const txHash = await walletClient.sendTransaction({
-      to: tx.to,
-      data: tx.data,
-      value: 0n,
-    });
+    // Sign+send from the platform wallet via the provider (self-hosted/hybrid = no
+    // Turnkey). The platform wallet is the gas source, so no ensureGas here.
+    const { txHash } = await onchainEscrow.sendAs(SELLER_ADDRESS, tx, 'platform-transfer');
 
     console.log(`✓ Platform transfer successful: ${amountUsdc} USDC → ${toAddress}${memoTag} | tx: ${txHash}`);
     return txHash;
