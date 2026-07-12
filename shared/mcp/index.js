@@ -403,7 +403,7 @@ export const TOOLS = [
   },
   {
     name: 'bard_check_escrow',
-    description: 'Check the escrow status for a bounty. Shows the full escrow lifecycle: funded → claimed → submitted → reviewed → verified → released. Includes event audit trail.',
+    description: 'Check the escrow status for a bounty. Shows the full escrow lifecycle: funded → claimed → submitted → reviewed → verified → released, with event audit trail. For on-chain (ERC-8183) escrow, also returns an `onchain` block: contract job id, platform fee, and ArcScan explorer links for the fund/release transactions (verifiable proof of custody + payout).',
     inputSchema: {
       type: 'object',
       properties: { bountyId: { type: 'string', description: 'The bounty ID to check' } },

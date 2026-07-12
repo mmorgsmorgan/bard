@@ -4899,13 +4899,44 @@ app.get('/api/bounties/:id/events', async (req, res) => {
   res.json({ events });
 });
 
+// Build a client-friendly on-chain escrow summary (null for custodial/unfunded
+// bounties). Gives the frontend + MCP job id, ArcScan links, and the platform fee
+// without them having to know the contract layout. Fee is the configured rate
+// applied to the funded budget (display estimate; the exact fee is settled on-chain
+// at release and recorded in the escrow_events trail).
+const ARC_EXPLORER = 'https://testnet.arcscan.app';
+function onchainEscrowSummary(bounty) {
+  if (!bounty || bounty.escrow_mode !== 'onchain' || !bounty.onchain_job_id) return null;
+  const feeBps = Math.max(0, Math.min(10000, parseInt(process.env.PLATFORM_FEE_BPS || '0', 10) || 0));
+  const budget = parseFloat(bounty.escrow_budget_usdc || bounty.amount_usdc || 0) || 0;
+  const platformFeeUsdc = feeBps > 0 ? Math.floor(budget * feeBps / 10000 * 1e6) / 1e6 : 0;
+  const contract = process.env.AGENTIC_COMMERCE_ADDRESS || null;
+  const tx = (h) => (h ? `${ARC_EXPLORER}/tx/${h}` : null);
+  return {
+    mode: 'onchain',
+    jobId: String(bounty.onchain_job_id),
+    status: bounty.escrow_status,
+    budgetUsdc: budget,
+    feeBps,
+    platformFeeUsdc,
+    contract,
+    fundTx: bounty.escrow_tx_hash || null,
+    releaseTx: bounty.release_tx_hash || null,
+    explorer: {
+      contract: contract ? `${ARC_EXPLORER}/address/${contract}` : null,
+      fund: tx(bounty.escrow_tx_hash),
+      release: tx(bounty.release_tx_hash),
+    },
+  };
+}
+
 // GET /api/bounties/:id/escrow — Full escrow status
 app.get('/api/bounties/:id/escrow', async (req, res) => {
   const bounty = await stmts.getBountyById(req.params.id);
   if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
   const events = await stmts.getEscrowEvents(req.params.id);
   const decisions = await stmts.getVerificationDecisions(req.params.id);
-  res.json({ bounty, events, decisions });
+  res.json({ bounty, events, decisions, onchain: onchainEscrowSummary(bounty) });
 });
 
 // ══════════════════════════════════════════════════════
