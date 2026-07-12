@@ -2379,47 +2379,17 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Max transfer: 100 USDC per transaction (testnet safety cap)' });
     }
 
-    // Import Turnkey functions dynamically
-    const { mintERC8004Identity, isTurnkeyEnabled } = await import('./turnkey-wallet.js');
-    if (!isTurnkeyEnabled()) {
-      return res.status(400).json({ error: 'Turnkey not configured. Cannot sign transactions.' });
+    // Sign+send through the wallet provider (WALLET_PROVIDER=local|hybrid → self-hosted
+    // keystore; turnkey → Turnkey) — the same abstraction the escrow engine uses, so
+    // self-hosted agent wallets can transfer without Turnkey. Native gas (USDC on Arc)
+    // is topped up from the platform wallet first.
+    if (!walletSigningReady()) {
+      return res.status(400).json({ error: 'No wallet provider configured. Cannot sign transactions.' });
     }
-
-    const { Turnkey } = await import('@turnkey/sdk-server');
-    const { createAccount } = await import('@turnkey/viem');
-    const { createWalletClient, http, encodeFunctionData } = await import('viem');
-
-    // Arc Testnet chain definition
-    const arcTestnet = {
-      id: 5042002,
-      name: 'Arc Testnet',
-      nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
-      rpcUrls: { default: { http: ['https://rpc.testnet.arc.network'] } },
-      blockExplorers: { default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' } },
-    };
+    const { encodeFunctionData } = await import('viem');
 
     const ARC_USDC = '0x3600000000000000000000000000000000000000';
     const amountWei = BigInt(Math.round(parsedAmount * 1_000_000)); // 6 decimals
-
-    // Create Turnkey signer
-    const tk = new Turnkey({
-      defaultOrganizationId: process.env.TURNKEY_ORGANIZATION_ID,
-      apiBaseUrl: 'https://api.turnkey.com',
-      apiPrivateKey: process.env.TURNKEY_API_PRIVATE_KEY,
-      apiPublicKey: process.env.TURNKEY_API_PUBLIC_KEY,
-    });
-
-    const account = await createAccount({
-      client: tk.apiClient(),
-      organizationId: process.env.TURNKEY_ORGANIZATION_ID,
-      signWith: walletAddress,
-    });
-
-    const walletClient = createWalletClient({
-      account,
-      chain: arcTestnet,
-      transport: http(),
-    });
 
     // ERC-20 transfer(address, uint256)
     const data = encodeFunctionData({
@@ -2451,11 +2421,9 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       },
     );
 
-    const txHash = await walletClient.sendTransaction({
-      to: wrapped.to,
-      data: wrapped.data,
-      value: 0n,
-    });
+    // Ensure the sender can pay gas, then sign+send via the provider.
+    await onchainEscrow.ensureGas(walletAddress);
+    const { txHash } = await onchainEscrow.sendAs(walletAddress, wrapped, `send-usdc:${agent.agent_name}`);
 
     const displayRecipient = toUsername
       ? `@${toUsername}`
