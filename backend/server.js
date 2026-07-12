@@ -4470,6 +4470,36 @@ app.post('/api/admin/provision-platform-wallet', async (req, res) => {
   }
 });
 
+// POST /api/admin/platform-send — send USDC from the platform wallet (SELLER_ADDRESS)
+// to any address, signed via the configured wallet provider. Ops tool for seeding
+// agent budgets or withdrawing platform funds. Platform-verifier-gated. Requires the
+// platform wallet to be server-signable (local/hybrid provider or Turnkey).
+app.post('/api/admin/platform-send', async (req, res) => {
+  const { callerWallet, to, amountUsdc } = req.body || {};
+  if (!callerWallet || !to || !amountUsdc) return res.status(400).json({ error: 'callerWallet, to, amountUsdc required' });
+  if (!/^0x[0-9a-fA-F]{40}$/.test(to)) return res.status(400).json({ error: 'to must be a 0x address' });
+  if (!(await stmts.isPlatformVerifier(callerWallet))) {
+    return res.status(403).json({ error: 'Only a platform verifier can send from the platform wallet' });
+  }
+  try {
+    const amountWei = BigInt(Math.round(parseFloat(amountUsdc) * 1e6));
+    const { getWalletProvider } = await import('./wallet-provider.js');
+    const signer = await getWalletProvider(pool).getSigner(SELLER_ADDRESS);
+    const { encodeFunctionData } = await import('viem');
+    const data = encodeFunctionData({
+      abi: [{ name: 'transfer', type: 'function', stateMutability: 'nonpayable', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }] }],
+      functionName: 'transfer',
+      args: [to, amountWei],
+    });
+    const txHash = await signer.sendTransaction({ to: USDC_CONTRACT_ADDRESS, data, value: 0n });
+    console.log(`[Admin] platform-send ${amountUsdc} USDC ${SELLER_ADDRESS} → ${to} (tx ${txHash})`);
+    return res.json({ success: true, txHash, from: SELLER_ADDRESS, to, amountUsdc });
+  } catch (err) {
+    console.error('[Admin] platform-send failed:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/admin/expiry-sweep — Run the escrow expiry sweep on demand.
 //
 // Same logic the hourly cron runs. Platform-verifier-gated. Returns the
