@@ -4036,13 +4036,23 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
     const elig = await onchainEscrowEligible(bounty, selectedAgent);
     if (elig.eligible) {
       let jobId, txs;
+      // Platform fee (default OFF). `PLATFORM_FEE_BPS` is basis points of the budget,
+      // charged ON TOP of it via BardJobHookV2's fee leg (creator pays budget+fee;
+      // provider still receives the full budget; fee → SELLER_ADDRESS on release).
+      // Fee is floored to 6 decimals so it never exceeds the consented `maxFeeBps`
+      // cap the audited M-1 fix re-checks at fund. 0 bps = behaviour-neutral (no fee).
+      const platformFeeBps = Math.max(0, Math.min(10000, parseInt(process.env.PLATFORM_FEE_BPS || '0', 10) || 0));
+      const platformFeeUsdc = platformFeeBps > 0
+        ? Math.floor(parseFloat(budgetUsdc) * platformFeeBps / 10000 * 1e6) / 1e6
+        : 0;
       try {
-        console.log(`[Escrow On-Chain] Funding bounty ${req.params.id} — ${budgetUsdc} USDC, creator ${elig.creatorWallet} → provider ${elig.providerWallet}...`);
+        console.log(`[Escrow On-Chain] Funding bounty ${req.params.id} — ${budgetUsdc} USDC, creator ${elig.creatorWallet} → provider ${elig.providerWallet}${platformFeeUsdc > 0 ? ` (+${platformFeeUsdc} USDC platform fee @ ${platformFeeBps}bps)` : ''}...`);
         ({ jobId, txs } = await onchainEscrow.openAndFund({
           creatorWallet: elig.creatorWallet,
           providerWallet: elig.providerWallet,
           earningsUsdc: parseFloat(budgetUsdc),
-          platformFeeUsdc: 0, // bounties are P2P — no platform fee yet
+          platformFeeUsdc,               // 0 unless PLATFORM_FEE_BPS is set
+          maxFeeBps: platformFeeBps,     // consented cap — audited M-1 re-checks at fund
           evaluator: SELLER_ADDRESS,
           expirySeconds: 72 * 3600,
           description: bounty.title || 'BARD bounty',
@@ -4067,7 +4077,7 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
         const ev2 = `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-c`;
         await client.query(
           `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [ev1, req.params.id, 'funded', elig.creatorWallet, 'agent', `${budgetUsdc} USDC funded on-chain (job ${jobId}, mode=onchain)`, txs.fund || '', now]
+          [ev1, req.params.id, 'funded', elig.creatorWallet, 'agent', `${budgetUsdc} USDC funded on-chain (job ${jobId}, mode=onchain${platformFeeUsdc > 0 ? `, +${platformFeeUsdc} USDC platform fee` : ''})`, txs.fund || '', now]
         );
         await client.query(
           `INSERT INTO escrow_events (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -4084,7 +4094,7 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
       emitFeedEvent('escrow:funded', { bountyId: req.params.id, budgetUsdc, mode: 'onchain', jobId: jobId.toString() });
       emitFeedEvent('escrow:claimed', { bountyId: req.params.id, agentId: selectedAgent.id, agentName: selectedAgent.agent_name });
       await createNotification({ agentId: selectedAgent.id, type: 'system', title: 'Bounty Funded On-Chain — You Can Start', message: `"${bounty.title}" is funded in on-chain escrow (${budgetUsdc} USDC, job #${jobId}). Begin work and submit your deliverable.`, from: clientWallet });
-      return res.json({ success: true, escrow_mode: 'onchain', onchain_job_id: jobId.toString(), tx: txs, bounty: await stmts.getBountyById(req.params.id) });
+      return res.json({ success: true, escrow_mode: 'onchain', onchain_job_id: jobId.toString(), platform_fee_usdc: platformFeeUsdc, tx: txs, bounty: await stmts.getBountyById(req.params.id) });
     }
 
     // ── Custodial proposal path (existing behavior) ──
