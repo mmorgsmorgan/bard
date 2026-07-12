@@ -13,6 +13,10 @@ DBURL="postgres://postgres:smoke@localhost:${PGPORT}/bard"
 CONTAINER="bard-feeescrow-pg"
 MASTER="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
 
+# Faucet-free: seed wallets from the funded W1 actor (recovered burned testnet key,
+# no contract authority). Overridable via env. Avoids the rate-limited Circle faucet.
+export BARD_TEST_W1="${BARD_TEST_W1:-0x19f02090dd79e4ec67182e9cee3a71e9c225ee22613d6a56bff4b10c380ad2c0}"
+
 cleanup() { [ -n "${SVPID:-}" ] && kill "$SVPID" 2>/dev/null; docker rm -f "$CONTAINER" >/dev/null 2>&1; }
 trap cleanup EXIT
 
@@ -26,6 +30,11 @@ PROV_OUT="$(WALLET_PROVIDER=local WALLET_MASTER_KEY="$MASTER" DATABASE_URL="$DBU
 PLATFORM_ADDR="$(echo "$PROV_OUT" | grep '^PLATFORM_ADDR=' | cut -d= -f2)"
 [ -z "$PLATFORM_ADDR" ] && { echo "✗ failed to provision platform wallet"; exit 2; }
 echo "  PLATFORM_ADDR=$PLATFORM_ADDR"
+
+# The provisioner's faucet is rate-limited; seed the platform from W1 instead. It
+# needs native gas (ensureGas tops up agents/itself) + a little USDC for its own gas.
+echo "▸ seed platform wallet from W1 (no faucet)"
+node fund-address.mjs "$PLATFORM_ADDR" 1 4 || { echo "✗ failed to seed platform from W1"; exit 2; }
 
 echo "▸ boot server (WALLET_PROVIDER=local, ONCHAIN_ESCROW=1, PLATFORM_FEE_BPS=${FEE_BPS})"
 WALLET_PROVIDER=local WALLET_MASTER_KEY="$MASTER" ONCHAIN_ESCROW=1 PLATFORM_FEE_BPS=$FEE_BPS \

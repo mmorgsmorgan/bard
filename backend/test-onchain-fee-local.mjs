@@ -16,6 +16,7 @@ import 'dotenv/config';
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
 import { getWalletProvider } from './wallet-provider.js';
+import { fundAddress } from './fund-address.mjs';
 
 const PLATFORM = process.env.PLATFORM_ADDR;
 process.env.SELLER_ADDRESS = PLATFORM; // escrow-service reads this at import
@@ -42,12 +43,10 @@ const pool = new pg.Pool({ connectionString: DB });
 const provider = getWalletProvider(pool);
 if (provider.name !== 'local') die(`expected local provider, got ${provider.name}`);
 
-async function faucet(address) {
-  const d = await fetch('https://api.circle.com/v1/faucet/drips', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${CIRCLE}` },
-    body: JSON.stringify({ address, blockchain: 'ARC-TESTNET', usdc: true }),
-  });
-  if (!(d.status === 204 || d.ok)) throw new Error(`faucet ${d.status}: ${await d.text()}`);
+// Faucet-free seeding: transfer USDC + native gas from the funded W1 actor. Keeps
+// this test off the rate-limited Circle faucet (uses testnet USDC already on hand).
+async function seed(address, usdc, native) {
+  await fundAddress(address, { usdc, native });
 }
 async function post(path, body, token) {
   const r = await fetch(`${API}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) });
@@ -72,12 +71,13 @@ const providerW = (await provider.createWallet('fee-provider')).address;
 console.log(`  creator=${creator}  provider=${providerW}`);
 A(!!creator && !!providerW, 'two local wallets created');
 
-// 2. Faucet creator (needs budget + fee) + provider (gas).
-console.log(`\n${C.c}▸ 2. faucet creator + provider${C.x}`);
-await faucet(creator); await faucet(providerW);
-await new Promise(r => setTimeout(r, 12000));
+// 2. Seed creator (budget + fee + gas) + provider (gas) from W1 — no faucet.
+console.log(`\n${C.c}▸ 2. seed creator + provider from W1 (no faucet)${C.x}`);
+await seed(creator, EARN + EXPECTED_FEE + 0.2, 0.5);
+await seed(providerW, 0, 0.5);
+await new Promise(r => setTimeout(r, 3000));
 const creatorStart = await escrow.usdcBalance(creator);
-A(fromUsdcWei(creatorStart) >= EARN + EXPECTED_FEE, `creator funded (${fromUsdcWei(creatorStart)} USDC ≥ budget+fee)`);
+A(fromUsdcWei(creatorStart) >= EARN + EXPECTED_FEE, `creator seeded (${fromUsdcWei(creatorStart)} USDC ≥ budget+fee)`);
 
 // 3. Seed agents + proposal_selected bounty + accepted proposal.
 console.log(`\n${C.c}▸ 3. seed DB${C.x}`);
