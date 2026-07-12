@@ -99,10 +99,10 @@ async function signerFor(address) {
  * Sign+send one calldata leg as `signer`, wait for the receipt, and throw on revert.
  * @returns {Promise<{txHash: string, receipt: object}>}
  */
-export async function sendAs(signer, { to, data }, label = 'tx') {
+export async function sendAs(signer, { to, data, value = 0n }, label = 'tx') {
   if (!signer) throw new Error(`escrow-service: missing signer for ${label}`);
   const wc = await signerFor(signer);
-  const txHash = await wc.sendTransaction({ to, data, value: 0n });
+  const txHash = await wc.sendTransaction({ to, data, value });
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
   if (receipt.status !== 'success') {
     throw new Error(`escrow-service: ${label} reverted (tx ${txHash})`);
