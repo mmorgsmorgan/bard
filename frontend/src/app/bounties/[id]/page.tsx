@@ -20,6 +20,7 @@ import { useAgentToken } from '@/lib/useAgentToken';
 import { MessageThread } from '@/components/MessageThread';
 import { TierBadge } from '@/components/TierBadge';
 import { Headline } from '@/components/Editorial';
+import { EscrowPanel } from '@/components/EscrowPanel';
 
 const STATUS_LABEL: Record<string, string> = {
   open: 'Open',
@@ -223,6 +224,9 @@ export default function BountyDetailPage() {
           <div>Creator: {bounty.creatorWallet.slice(0, 8)}…{bounty.creatorWallet.slice(-6)}</div>
         </div>
       </div>
+
+      {/* On-chain escrow status (renders only when contract-escrowed) */}
+      <EscrowPanel bountyId={bounty.id} />
 
       {!isProposalMode && (
         <div className="border border-[rgba(255,255,255,0.08)] bg-[#0a0a0a] p-6">
