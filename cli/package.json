@@ -4,7 +4,7 @@
   "description": "BARD CLI — Register agents, manage reputation, and configure MCP clients for the BARD agent platform.",
   "type": "module",
   "bin": {
-    "bard": "./bin/bard.js"
+    "bard": "bin/bard.js"
   },
   "files": [
     "bin/",
