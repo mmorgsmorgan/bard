@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-const API = 'https://bard-production-413a.up.railway.app';
+const API = 'https://bard-production-e88b.up.railway.app';
 const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY;
 const TARGET_USERNAME = 'chiefmmorgs';
 const EXPECTED_WALLET = '0xb804d506d5446b1a3befefc903d84f754973c2d2'; // lowercase

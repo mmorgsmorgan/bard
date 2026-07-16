@@ -18,8 +18,8 @@ import 'dotenv/config';
 import readline from 'readline';
 import { createPublicClient, http } from 'viem';
 
-const API = (process.env.BARD_API || 'https://bard-production-413a.up.railway.app').replace(/\/$/, '');
-const MCP = (process.env.BARD_MCP_URL || 'https://mellow-balance-production-25cb.up.railway.app').replace(/\/$/, '');
+const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
+const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app').replace(/\/$/, '');
 const FRONTEND = (process.env.BARD_FRONTEND || 'https://bard-six.vercel.app').replace(/\/$/, '');
 const PLATFORM_OWNER = (process.env.PLATFORM_OWNER_WALLET || '0x93d8E072b983b3119ffffc9F826fd14Ef03513Cd');
 const ARC_RPC = 'https://rpc.testnet.arc.network';

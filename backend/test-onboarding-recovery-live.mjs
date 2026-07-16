@@ -29,8 +29,8 @@ import { randomBytes } from 'crypto';
 // JWT_SECRET — registering an agent there yields a valid token whose agent
 // row does NOT exist on the target backend. That's the exact cross-
 // deployment failure mode the Codex trace hit.
-const API = (process.env.BARD_API || 'https://bard-production-413a.up.railway.app').replace(/\/$/, '');
-const MCP = (process.env.BARD_MCP_URL || 'https://mellow-balance-production-25cb.up.railway.app').replace(/\/$/, '');
+const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
+const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app').replace(/\/$/, '');
 const ISSUER_API = (process.env.BARD_ISSUER_API || 'https://adorable-caring-production-7a3a.up.railway.app').replace(/\/$/, '');
 
 const c = {

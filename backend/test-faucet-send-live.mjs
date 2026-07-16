@@ -14,8 +14,8 @@
 import 'dotenv/config';
 import { createPublicClient, http } from 'viem';
 
-const API = (process.env.BARD_API || 'https://bard-production-413a.up.railway.app').replace(/\/$/, '');
-const MCP = (process.env.BARD_MCP_URL || 'https://mellow-balance-production-25cb.up.railway.app').replace(/\/$/, '');
+const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
+const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app').replace(/\/$/, '');
 const ARC_RPC = 'https://rpc.testnet.arc.network';
 const USDC = '0x3600000000000000000000000000000000000000';
 const ARC_CHAIN_ID = 5042002;

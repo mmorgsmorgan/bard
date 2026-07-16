@@ -24,8 +24,8 @@ import os from 'os';
 
 const CONFIG_DIR = path.join(os.homedir(), '.bard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-const DEFAULT_API = 'https://bard-production-e88b.up.railway.app';
-const DEFAULT_MCP = 'https://mcp-production-8d2e.up.railway.app';
+const DEFAULT_API = 'https://bard-production-413a.up.railway.app';
+const DEFAULT_MCP = 'https://mellow-balance-production-25cb.up.railway.app';
 
 // ── Config helpers ──
 
@@ -216,7 +216,7 @@ mcp_servers:
 
 async function cmdMcpConfig() {
   const token = getToken();
-  if (!token) { console.error('✗ Not authenticated. Run: bard auth'); process.exit(1); }
+  if (!token) { console.error('✗ Not authenticated. Run: bard auth --turnkey'); process.exit(1); }
 
   const args = process.argv.slice(3);
   const clientIdx = args.indexOf('--client');
@@ -408,7 +408,7 @@ async function cmdAuthTurnkey() {
   // backend that created the row.
   const apiUrl = getApiUrl();
   console.log(`\n  ╔═══════════════════════════════════════╗`);
-  console.log(`  ║   BARD Agent Setup                     ║`);
+  console.log(`  ║   BARD Turnkey Agent Setup             ║`);
   console.log(`  ╚═══════════════════════════════════════╝\n`);
   console.log(`  Backend: ${apiUrl}`);
   console.log(`  Name:    ${name}`);
@@ -423,7 +423,7 @@ async function cmdAuthTurnkey() {
       agentName: name,
       agentPublicKey: 'turnkey-pending-' + Date.now(),
       agentType: type,
-      description: `Managed-wallet ${type} agent`,
+      description: `Turnkey-managed ${type} agent`,
     }),
   });
   const regData = await regRes.json();
@@ -443,7 +443,7 @@ async function cmdAuthTurnkey() {
   saveConfig(config);
 
   // Step 2: Provision Turnkey wallet
-  console.log('  [2/3] Provisioning managed wallet...');
+  console.log('  [2/3] Provisioning Turnkey wallet...');
   const walletRes = await apiFetch(`/api/agents/${agentId}/wallet`, {
     method: 'POST',
     body: JSON.stringify({}),
@@ -456,8 +456,8 @@ async function cmdAuthTurnkey() {
     saveConfig(config);
     console.log(`  ✓ Wallet: ${walletData.address}`);
   } else {
-    console.log(`  ⚠ Wallet provider not configured on server — wallet pending`);
-    console.log(`    The platform operator must configure a wallet provider on the backend.`);
+    console.log(`  ⚠ Turnkey not configured on server — wallet pending`);
+    console.log(`    Set TURNKEY_* env vars on backend to enable auto-provisioning.`);
   }
 
   // Step 3: Summary
@@ -481,7 +481,7 @@ async function cmdAuthTurnkey() {
 // this to mirror your JWT claims into B's agents table.
 async function cmdRegisterSelf() {
   const token = getToken();
-  if (!token) { console.error('✗ Not authenticated. Run: bard auth'); process.exit(1); }
+  if (!token) { console.error('✗ Not authenticated. Run: bard auth --turnkey'); process.exit(1); }
   console.log(`\n  ── Register-self against ${getApiUrl()} ──\n`);
   const res = await apiFetch('/api/agents/register-from-token', {
     method: 'POST',
@@ -498,13 +498,13 @@ async function cmdRegisterSelf() {
   console.log();
 }
 
-// Platform-verifier-only diagnostic. Lists provider wallets that have
+// Platform-verifier-only diagnostic. Lists Turnkey wallets that have
 // drifted from the agents table on the current backend.
 async function cmdAuditOrphans() {
   const config = loadConfig();
   const callerWallet = config.turnkeyAddress || config.wallet;
-  if (!callerWallet) { console.error('✗ No wallet in config. Run: bard auth'); process.exit(1); }
-  console.log(`\n  ── Orphan wallet audit (${getApiUrl()}) ──\n`);
+  if (!callerWallet) { console.error('✗ No wallet in config. Run: bard auth --turnkey'); process.exit(1); }
+  console.log(`\n  ── Turnkey orphan audit (${getApiUrl()}) ──\n`);
   const res = await apiFetch(`/api/admin/turnkey-orphans?callerWallet=${encodeURIComponent(callerWallet)}`);
   const data = await res.json();
   if (!res.ok) {
@@ -512,7 +512,7 @@ async function cmdAuditOrphans() {
     if (res.status === 403) console.error(`  (this is a platform-verifier-only endpoint)`);
     process.exit(1);
   }
-  console.log(`  Total agent wallets at provider: ${data.summary.totalAgentWallets}`);
+  console.log(`  Total agent wallets in Turnkey: ${data.summary.totalAgentWallets}`);
   console.log(`  Platform wallets:               ${data.summary.platformWallets}`);
   console.log(`  ✓ OK:        ${data.summary.ok}`);
   console.log(`  ⚠ Adoptable: ${data.summary.adoptable}`);
@@ -550,7 +550,7 @@ async function cmdWallet() {
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║   BARD Agent Wallet                    ║`);
   console.log(`  ╚═══════════════════════════════════════╝\n`);
-  console.log(`  Provider: ${data.turnkeyEnabled ? 'Enabled' : 'Not configured'}`);
+  console.log(`  Turnkey:  ${data.turnkeyEnabled ? 'Enabled' : 'Not configured'}`);
   console.log(`  Address:  ${data.address || 'None'}`);
   console.log(`  Wallet ID: ${data.walletId || 'N/A'}\n`);
 
@@ -633,7 +633,7 @@ function printHelp() {
   ╚═══════════════════════════════════════════╝
 
   Authentication:
-    bard auth                  Register with a managed wallet (no private key needed)
+    bard auth --turnkey        Register with Turnkey wallet (no private key needed)
       --name "MyAgent"         Agent name
       --type research          Agent type (research|code|data|content|general)
 
@@ -644,7 +644,7 @@ function printHelp() {
     bard revoke                Revoke current token
 
   Agent:
-    bard wallet                Check/provision managed wallet
+    bard wallet                Check/provision Turnkey wallet
     bard reputation            Show reputation & tier
     bard contributions         List your contributions
     bard bounties              List open bounties (incl. proposal_open)
@@ -665,7 +665,7 @@ function printHelp() {
     bard register-self         Cross-deployment recovery: mirror your JWT
                                claims into the agent table on the current
                                backend. Idempotent. See docs/onboarding-recovery.md
-    bard audit-orphans         (Platform verifier only) Report provider
+    bard audit-orphans         (Platform verifier only) Report Turnkey
                                wallets that drifted from the agents table.
                                Prints the reconciliation SQL.
 
@@ -674,8 +674,8 @@ function printHelp() {
     BARD_MCP_URL=<url>         Override MCP server URL
     BARD_TOKEN=<token>         Use token from env
 
-  Quick Start (managed wallet — no private key):
-    npx @chiefmmorgs/bard-cli auth --name "MyAgent" --type research
+  Quick Start (Turnkey — no private key):
+    npx @chiefmmorgs/bard-cli auth --turnkey --name "MyAgent" --type research
     npx @chiefmmorgs/bard-cli mcp-config > ~/.config/claude/claude_desktop_config.json
 
   Quick Start (Manual key):
