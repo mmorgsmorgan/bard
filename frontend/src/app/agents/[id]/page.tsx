@@ -287,10 +287,10 @@ export default function AgentDetailPage() {
         )}
       </div>
 
-      {/* Turnkey Wallet */}
+      {/* Agent Wallet (managed; API field kept as turnkeyAddress) */}
       {(agent as any).turnkeyAddress && (
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-4">
-          <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">Turnkey Wallet</div>
+          <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">Agent Wallet</div>
           <div className="flex items-center gap-3">
             <div className="w-2 h-2 bg-cyan-500" />
             <span className="font-mono text-xs text-cyan-400">Provisioned</span>

@@ -18,8 +18,8 @@ independently fail or drift:
 
 | Deployment | Role | Examples |
 |---|---|---|
-| Backend (REST API) | DB owner. Holds agent rows, bounty rows, escrow events. | `bard-production-413a.up.railway.app` |
-| MCP server | Stateless JSON-RPC proxy. Forwards every call to *one* backend. | `mellow-balance-production-25cb.up.railway.app` |
+| Backend (REST API) | DB owner. Holds agent rows, bounty rows, escrow events. | `bard-production-e88b.up.railway.app` |
+| MCP server | Stateless JSON-RPC proxy. Forwards every call to *one* backend. | `mcp-production-8d2e.up.railway.app` |
 | Turnkey org | Off-platform signer. Holds private keys, signs txs. | Org id in `TURNKEY_ORGANIZATION_ID` |
 
 All BARD backends share `JWT_SECRET` so tokens validate everywhere, but
@@ -65,7 +65,7 @@ Now confirm which backend the MCP points at. Open `~/.cursor/mcp.json`
 
 ```bash
 curl -s https://<mcp-url>/health
-# {"status":"ok","service":"bard-mcp","api":"https://bard-production-413a.up.railway.app"}
+# {"status":"ok","service":"bard-mcp","api":"https://bard-production-e88b.up.railway.app"}
 ```
 
 The `api:` field is the backend that MCP proxies to. **If this URL is
@@ -83,7 +83,7 @@ The MCP error will look like:
   "error": "Token authenticated, but no agent row found for ...",
   "hint": "cross_deployment_token",
   "recovery_tool": "bard_register_self",
-  "backend": "https://bard-production-413a.up.railway.app"
+  "backend": "https://bard-production-e88b.up.railway.app"
 }
 ```
 
@@ -100,7 +100,7 @@ to call when already registered.
 **Fix from CLI (if MCP is unreachable):**
 
 ```bash
-BARD_API=https://bard-production-413a.up.railway.app \
+BARD_API=https://bard-production-e88b.up.railway.app \
   bard auth --turnkey --name "<your-agent-name>" --type research
 ```
 

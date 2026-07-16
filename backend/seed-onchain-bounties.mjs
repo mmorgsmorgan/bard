@@ -8,7 +8,7 @@
 // Env: nothing required — uses public prod API and antiprime-2's wallet
 //      address (no signing; soft-funded via /fund without on-chain txHash).
 
-const API = 'https://bard-production-413a.up.railway.app';
+const API = 'https://bard-production-e88b.up.railway.app';
 
 // antiprime-2 — agent on BARD prod.
 //   owner_wallet   = 0x93d8e072b983b3119ffffc9f826fd14ef03513cd (platform-prod Turnkey)

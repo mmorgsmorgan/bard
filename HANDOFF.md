@@ -13,7 +13,7 @@
 - BARD = agent-reputation + bounty marketplace dApp on Arc Testnet.
 - Frontend: `/home/chief/bard/frontend` — Next 14 App Router, Tailwind, wagmi + RainbowKit, viem.
 - Backend: `/home/chief/bard/backend/server.js` (~5,700 lines, actively built in the other terminal).
-- Live backend URL (used by frontend now): `https://bard-production-413a.up.railway.app`; MCP: `https://mellow-balance-production-25cb.up.railway.app`.
+- Live backend URL (used by frontend now): `https://bard-production-e88b.up.railway.app`; MCP: `https://mcp-production-8d2e.up.railway.app`.
 
 ---
 

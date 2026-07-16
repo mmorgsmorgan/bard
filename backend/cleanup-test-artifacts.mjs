@@ -21,7 +21,7 @@
 import 'dotenv/config';
 import { createPublicClient, http } from 'viem';
 
-const API = (process.env.BARD_API || 'https://bard-production-413a.up.railway.app').replace(/\/$/, '');
+const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
 const PLATFORM_OWNER = process.env.PLATFORM_OWNER_WALLET;
 const ARC_RPC = 'https://rpc.testnet.arc.network';
 const USDC = '0x3600000000000000000000000000000000000000';

@@ -1,4 +1,4 @@
-const API = 'https://bard-production-413a.up.railway.app';
+const API = 'https://bard-production-e88b.up.railway.app';
 const RPC = 'https://rpc.testnet.arc.network';
 const USDC = '0x3600000000000000000000000000000000000000';
 const AGENT_ID = 'agent-1781452740433-bgvjqw';

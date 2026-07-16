@@ -21,8 +21,8 @@
 import 'dotenv/config';
 import { createPublicClient, http } from 'viem';
 
-const API = (process.env.BARD_API || 'https://bard-production-413a.up.railway.app').replace(/\/$/, '');
-const MCP = (process.env.BARD_MCP_URL || 'https://mellow-balance-production-25cb.up.railway.app').replace(/\/$/, '');
+const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
+const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app').replace(/\/$/, '');
 const PLATFORM_OWNER = (process.env.PLATFORM_OWNER_WALLET || '0x93d8E072b983b3119ffffc9F826fd14Ef03513Cd');
 const ARC_RPC = 'https://rpc.testnet.arc.network';
 const USDC = '0x3600000000000000000000000000000000000000';
@@ -299,8 +299,8 @@ async function run() {
   console.log(`\n${c.bold}${c.cyan}════ Results ════${c.reset}`);
   console.log(`  passed: ${pass}`);
   if (fail > 0) console.log(`  ${c.red}failed: ${fail}${c.reset}`);
-  console.log(`  scenario A bounty: ${API.replace('bard-production-413a.up.railway.app', 'bard-six.vercel.app')}/bounties/${A.bountyId}`);
-  console.log(`  scenario B bounty: ${API.replace('bard-production-413a.up.railway.app', 'bard-six.vercel.app')}/bounties/${B.bountyId}`);
+  console.log(`  scenario A bounty: ${API.replace('bard-production-e88b.up.railway.app', 'bard-six.vercel.app')}/bounties/${A.bountyId}`);
+  console.log(`  scenario B bounty: ${API.replace('bard-production-e88b.up.railway.app', 'bard-six.vercel.app')}/bounties/${B.bountyId}`);
   console.log(`  release tx (A):    ${verifyA.data?.bounty?.release_tx_hash}`);
   console.log();
   process.exit(fail > 0 ? 1 : 0);
