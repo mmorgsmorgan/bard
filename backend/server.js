@@ -289,16 +289,20 @@ async function checkEscrowExpiry({ onlyBountyId = null } = {}) {
       : { text: "SELECT id, title, escrow_budget_usdc, creator_wallet, provider_agent_id, escrow_status, escrow_mode, onchain_job_id FROM bounties WHERE expires_at IS NOT NULL AND expires_at < $1 AND escrow_status IN ('funded', 'claimed', 'submitted')", values: [now] };
     const { rows: expired } = await pool.query(query.text, query.values);
 
-    // Without Turnkey we can't actually move USDC. Skip the sweep entirely
-    // rather than lie in the DB (the old behavior was to flip escrow_status
-    // to 'refunded' even though the platform wallet still held the funds).
-    if (expired.length > 0 && !isTurnkeyEnabled()) {
-      console.warn(`  Escrow expiry: ${expired.length} bounty(ies) past expires_at, but Turnkey is not configured. Skipping auto-refund.`);
-      for (const b of expired) summary.skipped.push({ id: b.id, reason: 'turnkey_disabled' });
-      return summary;
+    // Without a signing provider we can't actually move USDC. Skip the
+    // refund loop (but NOT the DB-only sweeps below) rather than lie in the
+    // DB (the old behavior was to flip escrow_status to 'refunded' even
+    // though the platform wallet still held the funds). Gate on
+    // walletSigningReady(), not isTurnkeyEnabled() — prod runs Turnkey-free
+    // (WALLET_PROVIDER=local/hybrid) and the old gate skipped refunds forever.
+    let refundable = expired;
+    if (expired.length > 0 && !walletSigningReady()) {
+      console.warn(`  Escrow expiry: ${expired.length} bounty(ies) past expires_at, but no wallet provider is configured. Skipping auto-refund.`);
+      for (const b of expired) summary.skipped.push({ id: b.id, reason: 'wallet_provider_disabled' });
+      refundable = [];
     }
 
-    for (const b of expired) {
+    for (const b of refundable) {
       // Move USDC FIRST. If the transfer throws, leave the row in its
       // current state so the next sweep retries. This is the same
       // ordering as the rejection refund at the verify endpoint
@@ -404,6 +408,44 @@ async function checkEscrowExpiry({ onlyBountyId = null } = {}) {
         console.log(`  Proposal selection reverted: ${b.id} (unfunded after 24h)`);
       } catch (err) {
         console.error(`  Proposal revert error for ${b.id}:`, err.message);
+      }
+    }
+
+    // Expire stale claimable bounties past their deadline (dogfood F6).
+    // Only open/proposal_open with NO active escrow — pure DB flip, no funds
+    // move, so it's safe regardless of wallet-provider availability. Funded
+    // escrows are handled by the refund sweep above via expires_at.
+    const { rows: staleOpen } = await pool.query(
+      `SELECT id, title, creator_wallet, selection_mode FROM bounties
+       WHERE status IN ('open', 'proposal_open')
+         AND escrow_status NOT IN ('funded', 'claimed', 'submitted')
+         AND deadline ~ '^\\d{4}-\\d{2}-\\d{2}' AND deadline::timestamptz < NOW()`
+    );
+    for (const b of staleOpen) {
+      try {
+        await pool.query(
+          "UPDATE bounties SET status = 'expired', updated_at = $1 WHERE id = $2",
+          [now, b.id]
+        );
+        if (b.selection_mode === 'proposal') {
+          const proposals = await stmts.getProposalsByBounty(b.id);
+          for (const p of proposals) {
+            if (p.status === 'pending') {
+              await stmts.rejectProposal({ id: p.id, rejected_at: now, rejection_reason: 'Bounty deadline passed' });
+              await createNotification({
+                agentId: p.proposer_agent_id,
+                type: 'system',
+                title: 'Bounty Expired',
+                message: `"${b.title}" expired before a proposal was accepted. Your proposal is no longer active.`,
+                from: 'BARD System',
+              }).catch(() => {});
+            }
+          }
+        }
+        await logEscrowEvent(b.id, 'expired', '', 'system', 'Deadline passed with no active escrow — bounty auto-expired.', '');
+        console.log(`  Stale bounty expired: ${b.id} ("${b.title}", deadline passed)`);
+      } catch (err) {
+        console.error(`  Stale bounty expire error for ${b.id}:`, err.message);
       }
     }
   } catch (err) {

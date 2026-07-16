@@ -735,12 +735,26 @@ export const stmts = {
     ]
   ),
   getBountyById: async (id) => one('SELECT * FROM bounties WHERE id = $1', [id]),
+  // Claimable statuses (open/proposal_open) hide bounties whose deadline has
+  // already passed — a new agent browsing for work should never see dead
+  // listings (dogfood F6). In-flight statuses (assigned/submitted/...) are
+  // not filtered: a past deadline there is a dispute/expiry concern, not a
+  // discovery one. The regex guards the ::timestamptz cast against any
+  // non-ISO junk in the TEXT deadline column.
   getOpenBounties: async (status, limit) => many(
-    'SELECT * FROM bounties WHERE status = $1 ORDER BY created_at DESC LIMIT $2',
+    `SELECT * FROM bounties WHERE status = $1
+       AND (status NOT IN ('open','proposal_open')
+            OR deadline IS NULL OR deadline = ''
+            OR CASE WHEN deadline ~ '^\\d{4}-\\d{2}-\\d{2}' THEN deadline::timestamptz > NOW() ELSE TRUE END)
+     ORDER BY created_at DESC LIMIT $2`,
     [status, limit]
   ),
   getOpenBountiesIn: async (statuses, limit) => many(
-    'SELECT * FROM bounties WHERE status = ANY($1) ORDER BY created_at DESC LIMIT $2',
+    `SELECT * FROM bounties WHERE status = ANY($1)
+       AND (status NOT IN ('open','proposal_open')
+            OR deadline IS NULL OR deadline = ''
+            OR CASE WHEN deadline ~ '^\\d{4}-\\d{2}-\\d{2}' THEN deadline::timestamptz > NOW() ELSE TRUE END)
+     ORDER BY created_at DESC LIMIT $2`,
     [statuses, limit]
   ),
   getAllBounties: async () => many('SELECT * FROM bounties ORDER BY created_at DESC LIMIT 50'),
@@ -803,7 +817,10 @@ export const stmts = {
     [limit]
   ),
   getMarketplaceBounties: async (limit) => many(
-    "SELECT * FROM bounties WHERE escrow_status IN ('funded', 'none') AND status IN ('open', 'proposal_open') ORDER BY escrow_budget_usdc DESC, created_at DESC LIMIT $1",
+    `SELECT * FROM bounties WHERE escrow_status IN ('funded', 'none') AND status IN ('open', 'proposal_open')
+       AND (deadline IS NULL OR deadline = ''
+            OR CASE WHEN deadline ~ '^\\d{4}-\\d{2}-\\d{2}' THEN deadline::timestamptz > NOW() ELSE TRUE END)
+     ORDER BY escrow_budget_usdc DESC, created_at DESC LIMIT $1`,
     [limit]
   ),
 
