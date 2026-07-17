@@ -26,6 +26,7 @@ import {
 import { withMemo, MemoIds, ARC_MEMO_ADDRESS } from './arc-memo.js';
 import { createSiweRouter } from './siwe-auth.js';
 import * as onchainEscrow from './escrow-service.js';
+import { computeReputationScore } from './reputation-score.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -654,21 +655,59 @@ async function calculateReputation(agentId) {
     totalEndorsements += c.endorsement_count || 0;
   }
 
-  const agent = await stmts.getAgentById(agentId);
+  const [agent, bountyResult, verifierResult] = await Promise.all([
+    stmts.getAgentById(agentId),
+    pool.query(
+      `SELECT
+         COUNT(*) FILTER (
+           WHERE status = 'completed'
+             AND escrow_status = 'released'
+             AND verifier_decision = 'approved'
+         ) AS completed,
+         COUNT(*) FILTER (WHERE verifier_decision = 'rejected') AS rejected
+       FROM bounties
+       WHERE provider_agent_id = $1`,
+      [agentId],
+    ),
+    pool.query(
+      `SELECT COUNT(*) FILTER (WHERE result = 'approved') AS approvals
+       FROM agent_verifications
+       WHERE verifier_agent_id = $1`,
+      [agentId],
+    ),
+  ]);
+  const completedBounties = Number(bountyResult.rows[0]?.completed || 0);
+  const rejectedBounties = Number(bountyResult.rows[0]?.rejected || 0);
+  const verificationApprovals = Number(verifierResult.rows[0]?.approvals || 0);
   const ageInDays = agent ? (Date.now() - new Date(agent.created_at).getTime()) / (1000 * 60 * 60 * 24) : 0;
   const timeDecay = Math.max(0, Math.floor(ageInDays * 0.1));
 
-  const score = Math.max(0, Math.min(100,
-    (verified * 10) +
-    (pending * 2) +
-    (totalEndorsements * 3) -
-    (rejected * 5) -
-    timeDecay
-  ));
+  const score = computeReputationScore({
+    verified,
+    pending,
+    rejected,
+    totalEndorsements,
+    completedBounties,
+    rejectedBounties,
+    verificationApprovals,
+    timeDecay,
+  });
 
   const { tier, level } = getTier(score);
   await stmts.updateAgentReputation(score, contributions.length, totalEndorsements, agentId);
-  return { score, tier, level, totalContributions: contributions.length, totalEndorsements, verified, pending, rejected };
+  return {
+    score,
+    tier,
+    level,
+    totalContributions: contributions.length,
+    totalEndorsements,
+    verified,
+    pending,
+    rejected,
+    completedBounties,
+    rejectedBounties,
+    verificationApprovals,
+  };
 }
 
 // ── SSE Live Feed ──
@@ -2250,6 +2289,46 @@ app.post('/api/agents/:id/wallet', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/agents/:id/wallet-balance — Authenticated agent wallet balance
+app.get('/api/agents/:id/wallet-balance', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) {
+      return res.status(403).json({ error: 'Can only read your own agent wallet balance' });
+    }
+    const agent = await stmts.getAgentById(req.params.id);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+    const walletAddress = agent.turnkey_address || agent.owner_wallet;
+    if (!walletAddress || walletAddress === '0x0000000000000000000000000000000000000000') {
+      return res.status(400).json({
+        error: 'Agent has no managed wallet. Use bard_create_wallet first.',
+        hint: 'wallet_missing',
+      });
+    }
+
+    const [usdcRaw, nativeRaw] = await Promise.all([
+      onchainEscrow.usdcBalance(walletAddress),
+      onchainEscrow.nativeBalance(walletAddress),
+    ]);
+
+    res.json({
+      agentId: agent.id,
+      agentName: agent.agent_name,
+      wallet: walletAddress,
+      network: 'Arc Testnet',
+      chainId: 5042002,
+      balanceUsdc: formatUnits(usdcRaw, 6),
+      nativeGasBalance: formatUnits(nativeRaw, 18),
+      nativeGasBalanceWei: nativeRaw.toString(),
+      token: USDC_CONTRACT_ADDRESS,
+      explorer: `https://testnet.arcscan.app/address/${walletAddress}`,
+    });
+  } catch (err) {
+    console.error('Agent wallet balance error:', err);
+    res.status(502).json({ error: 'Wallet balance unavailable', details: err.message });
+  }
+});
+
 // ── Circle Faucet Claim ──
 // Agents can claim testnet USDC via Circle's faucet API.
 // Requires CIRCLE_API_KEY in env (testnet key from console.circle.com).
@@ -2504,6 +2583,16 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('Send USDC error:', err);
+    if (err.txHash) {
+      return res.status(202).json({
+        success: true,
+        pending: true,
+        txHash: err.txHash,
+        explorer: `https://testnet.arcscan.app/tx/${err.txHash}`,
+        message: 'Transaction was broadcast, but Arc RPC confirmation is pending. Check the transaction before retrying.',
+        details: err.message,
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -3763,7 +3852,10 @@ async function onchainEscrowEligible(bounty, selectedAgent) {
 async function verifyTransaction(txHash, expectedFrom, expectedTo, expectedAmountUsdc) {
   try {
     // Fetch transaction receipt
-    const receipt = await arcTestnetClient.getTransactionReceipt({ hash: txHash });
+    const receipt = await onchainEscrow.withArcRpcRetry(
+      () => arcTestnetClient.getTransactionReceipt({ hash: txHash }),
+      { label: `transaction ${txHash} receipt` },
+    );
 
     if (!receipt) {
       return { valid: false, error: 'Transaction not found on-chain' };
@@ -3774,7 +3866,10 @@ async function verifyTransaction(txHash, expectedFrom, expectedTo, expectedAmoun
     }
 
     // Fetch transaction details
-    const tx = await arcTestnetClient.getTransaction({ hash: txHash });
+    const tx = await onchainEscrow.withArcRpcRetry(
+      () => arcTestnetClient.getTransaction({ hash: txHash }),
+      { label: `transaction ${txHash} details` },
+    );
 
     // Verify it's a USDC transfer (to USDC contract)
     if (tx.to?.toLowerCase() !== USDC_CONTRACT_ADDRESS.toLowerCase()) {
@@ -3829,20 +3924,7 @@ async function verifyTransaction(txHash, expectedFrom, expectedTo, expectedAmoun
 // Get USDC balance of platform wallet
 async function getPlatformWalletBalance() {
   try {
-    // ERC-20 balanceOf(address) returns uint256
-    const balanceWei = await arcTestnetClient.readContract({
-      address: USDC_CONTRACT_ADDRESS,
-      abi: [{
-        name: 'balanceOf',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [{ name: 'account', type: 'address' }],
-        outputs: [{ name: '', type: 'uint256' }],
-      }],
-      functionName: 'balanceOf',
-      args: [SELLER_ADDRESS],
-    });
-
+    const balanceWei = await onchainEscrow.usdcBalance(SELLER_ADDRESS);
     return Number(balanceWei) / 1e6; // USDC has 6 decimals
   } catch (error) {
     console.error('Failed to get platform wallet balance:', error);
@@ -4013,7 +4095,14 @@ app.post('/api/bounties/:id/fund', async (req, res) => {
         }));
       } catch (err) {
         console.error(`[Escrow On-Chain] openAndFund failed for ${req.params.id}: ${err.message}`);
-        return res.status(502).json({ error: 'On-chain escrow funding failed', details: err.message });
+        return res.status(502).json({
+          error: 'On-chain escrow funding failed',
+          details: err.message,
+          transactionHash: err.txHash || null,
+          onchainJobId: err.jobId || null,
+          completedTransactions: err.completedTransactions || {},
+          recoverable: !!(err.txHash || err.jobId),
+        });
       }
 
       const client = await pool.connect();
@@ -4237,6 +4326,16 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
       }
     } catch (err) {
       console.error(`[Escrow On-Chain] submit failed for job ${bounty.onchain_job_id}: ${err.message}`);
+      if (err.txHash) {
+        return res.status(202).json({
+          success: true,
+          pending: true,
+          txHash: err.txHash,
+          onchainJobId: String(bounty.onchain_job_id),
+          message: 'Deliverable transaction was broadcast, but confirmation is pending. Retry the same deliverable later to reconcile the database.',
+          details: err.message,
+        });
+      }
       return res.status(502).json({ error: 'On-chain deliverable submission failed', details: err.message });
     }
   }
@@ -4734,14 +4833,35 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
       let releaseTx;
       if (bounty.escrow_mode === 'onchain' && bounty.onchain_job_id) {
         console.log(`[Escrow On-Chain Release] Completing job ${bounty.onchain_job_id} → releasing to ${agent.agent_name} (${recipientWallet})...`);
-        const { txHash, receipt } = await onchainEscrow.release({ jobId: bounty.onchain_job_id, reasonLabel: 'approved', evaluator: SELLER_ADDRESS });
-        releaseTx = txHash;
-        try {
-          const settled = await onchainEscrow.decodeSettlement(receipt);
-          if (settled.paidToProvider > 0) agentEarnings = settled.paidToProvider;
-          if (settled.feePaid > 0) platformFee = settled.feePaid;
-          console.log(`[Escrow On-Chain Release] settled: ${agentEarnings} USDC → provider, ${platformFee} USDC fee (tx ${releaseTx})`);
-        } catch (e) { console.warn(`[Escrow On-Chain Release] decodeSettlement failed: ${e.message}`); }
+        const job = await onchainEscrow.getJob(bounty.onchain_job_id);
+        const pendingSettlement = (await client.query(
+          `SELECT tx_hash FROM escrow_events
+           WHERE bounty_id = $1 AND event_type = 'settlement_pending' AND tx_hash <> ''
+           ORDER BY created_at DESC LIMIT 1`,
+          [req.params.id],
+        )).rows[0]?.tx_hash || '';
+        if (Number(job.status) === 2 /* Submitted */) {
+          if (pendingSettlement) {
+            const pendingError = new Error(`Settlement transaction ${pendingSettlement} is still pending on-chain confirmation.`);
+            pendingError.txHash = pendingSettlement;
+            throw pendingError;
+          }
+          const { txHash, receipt } = await onchainEscrow.release({ jobId: bounty.onchain_job_id, reasonLabel: 'approved', evaluator: SELLER_ADDRESS });
+          releaseTx = txHash;
+          try {
+            const settled = await onchainEscrow.decodeSettlement(receipt);
+            if (settled.paidToProvider > 0) agentEarnings = settled.paidToProvider;
+            if (settled.feePaid > 0) platformFee = settled.feePaid;
+            console.log(`[Escrow On-Chain Release] settled: ${agentEarnings} USDC → provider, ${platformFee} USDC fee (tx ${releaseTx})`);
+          } catch (e) { console.warn(`[Escrow On-Chain Release] decodeSettlement failed: ${e.message}`); }
+        } else if (Number(job.status) === 3 /* Completed */) {
+          releaseTx = bounty.release_tx_hash || pendingSettlement;
+          const feeBps = Math.max(0, Math.min(10000, parseInt(process.env.PLATFORM_FEE_BPS || '0', 10) || 0));
+          platformFee = Math.floor(agentEarnings * feeBps / 10000 * 1e6) / 1e6;
+          console.warn(`[Escrow On-Chain Release] job ${bounty.onchain_job_id} already completed on-chain; reconciling database state.`);
+        } else {
+          throw new Error(`On-chain job ${bounty.onchain_job_id} cannot be released from status ${Number(job.status)}`);
+        }
       } else {
         console.log(`[Escrow Release] Transferring ${agentEarnings} USDC to ${agent.agent_name} (${recipientWallet})...`);
         releaseTx = await transferUSDCFromPlatform(recipientWallet, agentEarnings, {
@@ -4787,7 +4907,26 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
       let refundTx;
       if (bounty.escrow_mode === 'onchain' && bounty.onchain_job_id) {
         console.log(`[Escrow On-Chain Refund] Rejecting job ${bounty.onchain_job_id} → refunding creator ${bounty.creator_wallet}...`);
-        ({ txHash: refundTx } = await onchainEscrow.reject({ jobId: bounty.onchain_job_id, reasonLabel: 'rejected', evaluator: SELLER_ADDRESS }));
+        const job = await onchainEscrow.getJob(bounty.onchain_job_id);
+        const pendingSettlement = (await client.query(
+          `SELECT tx_hash FROM escrow_events
+           WHERE bounty_id = $1 AND event_type = 'settlement_pending' AND tx_hash <> ''
+           ORDER BY created_at DESC LIMIT 1`,
+          [req.params.id],
+        )).rows[0]?.tx_hash || '';
+        if (Number(job.status) === 2 /* Submitted */) {
+          if (pendingSettlement) {
+            const pendingError = new Error(`Settlement transaction ${pendingSettlement} is still pending on-chain confirmation.`);
+            pendingError.txHash = pendingSettlement;
+            throw pendingError;
+          }
+          ({ txHash: refundTx } = await onchainEscrow.reject({ jobId: bounty.onchain_job_id, reasonLabel: 'rejected', evaluator: SELLER_ADDRESS }));
+        } else if (Number(job.status) === 4 /* Rejected */) {
+          refundTx = pendingSettlement;
+          console.warn(`[Escrow On-Chain Refund] job ${bounty.onchain_job_id} already rejected on-chain; reconciling database state.`);
+        } else {
+          throw new Error(`On-chain job ${bounty.onchain_job_id} cannot be rejected from status ${Number(job.status)}`);
+        }
       } else {
         console.log(`[Escrow Refund] Transferring ${bounty.escrow_budget_usdc} USDC back to creator (${bounty.creator_wallet})...`);
         refundTx = await transferUSDCFromPlatform(bounty.creator_wallet, bounty.escrow_budget_usdc, {
@@ -4826,6 +4965,32 @@ app.post('/api/bounties/:id/platform-verify', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     client.release();
+    if (err.txHash) {
+      const existing = await pool.query(
+        `SELECT 1 FROM escrow_events
+         WHERE bounty_id = $1 AND event_type = 'settlement_pending' AND tx_hash = $2
+         LIMIT 1`,
+        [req.params.id, err.txHash],
+      );
+      if (existing.rows.length === 0) {
+        await logEscrowEvent(
+          req.params.id,
+          'settlement_pending',
+          verifierWallet,
+          'platform',
+          'Settlement transaction broadcast; awaiting Arc RPC confirmation',
+          err.txHash,
+        );
+      }
+      return res.status(202).json({
+        success: true,
+        pending: true,
+        txHash: err.txHash,
+        onchainJobId: bounty.onchain_job_id ? String(bounty.onchain_job_id) : null,
+        message: 'Platform settlement was broadcast, but confirmation is pending. Retry the same verification later to reconcile database state.',
+        details: err.message,
+      });
+    }
     return res.status(409).json({ error: err.message });
   }
   client.release();

@@ -22,7 +22,7 @@ import {
   buildSetBudgetCalldata, buildApproveCalldata, buildDepositFeeCalldata,
   buildFundCalldata, buildSubmitCalldata, buildCompleteCalldata,
   buildRejectCalldata, buildClaimRefundCalldata, buildRefundFeeCalldata,
-  getJob, getFeeMeta,
+  getJob as readJob, getFeeMeta as readFeeMeta,
 } from './erc8183-client.js';
 
 const ARC_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
@@ -42,6 +42,61 @@ export function toUsdcWei(amountUsdc) {
 }
 export function fromUsdcWei(wei) {
   return Number(wei) / 10 ** USDC_DECIMALS;
+}
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function errorChain(error) {
+  const values = [];
+  const seen = new Set();
+  let current = error;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    values.push(current.code, current.message, current.details, current.shortMessage);
+    current = current.cause;
+  }
+  return values.filter(value => value !== undefined && value !== null).join(' ');
+}
+
+export function isTransientArcRpcError(error) {
+  const detail = errorChain(error);
+  return /-32011|request limit|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|fetch failed|socket hang up/i.test(detail);
+}
+
+export async function withArcRpcRetry(operation, {
+  label = 'Arc RPC request',
+  attempts = 8,
+  baseDelayMs = 500,
+  sleepFn = sleep,
+} = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientArcRpcError(error) || attempt === attempts) throw error;
+      const delayMs = Math.min(baseDelayMs * (2 ** (attempt - 1)), 8_000);
+      console.warn(`[Arc RPC] ${label} transient failure (${attempt}/${attempts}): ${error.shortMessage || error.message}. Retrying in ${delayMs}ms.`);
+      await sleepFn(delayMs);
+    }
+  }
+  throw lastError;
+}
+
+async function waitForReceipt(txHash, label) {
+  try {
+    return await withArcRpcRetry(
+      () => publicClient.waitForTransactionReceipt({ hash: txHash }),
+      { label: `${label} receipt` },
+    );
+  } catch (cause) {
+    const error = new Error(`${label} transaction was broadcast, but confirmation could not be read. Check ${txHash} before retrying.`);
+    error.code = 'ARC_TX_CONFIRMATION_PENDING';
+    error.txHash = txHash;
+    error.cause = cause;
+    throw error;
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -103,7 +158,7 @@ export async function sendAs(signer, { to, data, value = 0n }, label = 'tx') {
   if (!signer) throw new Error(`escrow-service: missing signer for ${label}`);
   const wc = await signerFor(signer);
   const txHash = await wc.sendTransaction({ to, data, value });
-  const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+  const receipt = await waitForReceipt(txHash, label);
   if (receipt.status !== 'success') {
     throw new Error(`escrow-service: ${label} reverted (tx ${txHash})`);
   }
@@ -115,17 +170,28 @@ export async function sendAs(signer, { to, data, value = 0n }, label = 'tx') {
 // ──────────────────────────────────────────────
 
 export async function usdcBalance(address) {
-  const raw = await publicClient.readContract({
+  const raw = await withArcRpcRetry(() => publicClient.readContract({
     address: USDC_ADDRESS,
     abi: [{ type: 'function', name: 'balanceOf', stateMutability: 'view', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] }],
     functionName: 'balanceOf',
     args: [address],
-  });
+  }), { label: `USDC balance for ${address}` });
   return BigInt(raw);
 }
 
 export async function nativeBalance(address) {
-  return publicClient.getBalance({ address });
+  return withArcRpcRetry(
+    () => publicClient.getBalance({ address }),
+    { label: `native balance for ${address}` },
+  );
+}
+
+export async function getJob(jobId) {
+  return withArcRpcRetry(() => readJob(jobId), { label: `job ${jobId} read` });
+}
+
+export async function getFeeMeta(jobId) {
+  return withArcRpcRetry(() => readFeeMeta(jobId), { label: `job ${jobId} fee read` });
 }
 
 /**
@@ -138,7 +204,7 @@ export async function ensureGas(address, minNativeWei = 2_000_000_000_000_000n, 
   if (!SELLER_ADDRESS) throw new Error('ensureGas: SELLER_ADDRESS not set for gas top-up');
   const wc = await signerFor(SELLER_ADDRESS);
   const txHash = await wc.sendTransaction({ to: address, value: topUpWei });
-  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  await waitForReceipt(txHash, `gas top-up for ${address}`);
   return { funded: true, txHash, balance: await nativeBalance(address) };
 }
 
@@ -200,62 +266,69 @@ export async function openAndFund(p) {
   const expiredAt = Math.floor(Date.now() / 1000) + (p.expirySeconds || 72 * 3600);
   const txs = {};
 
-  // Make sure both agents can pay gas.
-  await ensureGas(p.creatorWallet);
-  await ensureGas(p.providerWallet);
+  let jobId;
+  try {
+    // Make sure both agents can pay gas.
+    await ensureGas(p.creatorWallet);
+    await ensureGas(p.providerWallet);
 
-  // 1. createJob (creator). Provider assigned via setProvider below (first-come style).
-  {
-    const cd = buildCreateJobCalldata({
-      provider: '0x0000000000000000000000000000000000000000',
-      evaluator,
-      expiredAt,
-      description: p.description || 'BARD bounty',
-      providerAgentId: 0n,
-    });
-    const r = await sendAs(p.creatorWallet, cd, 'createJob');
-    txs.createJob = r.txHash;
-    var jobId = await jobIdFromReceipt(r.receipt);
+    // 1. createJob (creator). Provider assigned via setProvider below (first-come style).
+    {
+      const cd = buildCreateJobCalldata({
+        provider: '0x0000000000000000000000000000000000000000',
+        evaluator,
+        expiredAt,
+        description: p.description || 'BARD bounty',
+        providerAgentId: 0n,
+      });
+      const r = await sendAs(p.creatorWallet, cd, 'createJob');
+      txs.createJob = r.txHash;
+      jobId = await jobIdFromReceipt(r.receipt);
+    }
+
+    // 2. configureBardJob (creator).
+    {
+      const cd = buildConfigureBardJobCalldata({
+        jobId, platformFee: feeWei, feeRecipient,
+        maxFeeBps: p.maxFeeBps || 0, minRepScore: p.minRepScore || 0,
+      });
+      txs.configure = (await sendAs(p.creatorWallet, cd, 'configureBardJob')).txHash;
+    }
+
+    // 3. setProvider (creator).
+    {
+      const cd = buildSetProviderCalldata({ jobId, provider: p.providerWallet, agentId: p.providerAgentId || 0n });
+      txs.setProvider = (await sendAs(p.creatorWallet, cd, 'setProvider')).txHash;
+    }
+
+    // 4. setBudget (provider).
+    {
+      const cd = buildSetBudgetCalldata({ jobId, amount: earningsWei });
+      txs.setBudget = (await sendAs(p.providerWallet, cd, 'setBudget')).txHash;
+    }
+
+    // 5. depositFee (creator): approve hook then deposit.
+    if (feeWei > 0n) {
+      const approve = buildApproveCalldata({ spender: BARD_JOB_HOOK_ADDRESS, amount: feeWei });
+      txs.approveFee = (await sendAs(p.creatorWallet, approve, 'approve(hook,fee)')).txHash;
+      const deposit = buildDepositFeeCalldata({ jobId });
+      txs.depositFee = (await sendAs(p.creatorWallet, deposit, 'depositFee')).txHash;
+    }
+
+    // 6. fund (creator): approve AgenticCommerce then fund.
+    {
+      const approve = buildApproveCalldata({ spender: AGENTIC_COMMERCE_ADDRESS, amount: earningsWei });
+      txs.approveBudget = (await sendAs(p.creatorWallet, approve, 'approve(ac,budget)')).txHash;
+      const fund = buildFundCalldata({ jobId, expectedBudget: earningsWei });
+      txs.fund = (await sendAs(p.creatorWallet, fund, 'fund')).txHash;
+    }
+
+    return { jobId, txs };
+  } catch (error) {
+    error.jobId = jobId?.toString() || null;
+    error.completedTransactions = { ...txs };
+    throw error;
   }
-
-  // 2. configureBardJob (creator).
-  {
-    const cd = buildConfigureBardJobCalldata({
-      jobId, platformFee: feeWei, feeRecipient,
-      maxFeeBps: p.maxFeeBps || 0, minRepScore: p.minRepScore || 0,
-    });
-    txs.configure = (await sendAs(p.creatorWallet, cd, 'configureBardJob')).txHash;
-  }
-
-  // 3. setProvider (creator).
-  {
-    const cd = buildSetProviderCalldata({ jobId, provider: p.providerWallet, agentId: p.providerAgentId || 0n });
-    txs.setProvider = (await sendAs(p.creatorWallet, cd, 'setProvider')).txHash;
-  }
-
-  // 4. setBudget (provider).
-  {
-    const cd = buildSetBudgetCalldata({ jobId, amount: earningsWei });
-    txs.setBudget = (await sendAs(p.providerWallet, cd, 'setBudget')).txHash;
-  }
-
-  // 5. depositFee (creator): approve hook then deposit.
-  if (feeWei > 0n) {
-    const approve = buildApproveCalldata({ spender: BARD_JOB_HOOK_ADDRESS, amount: feeWei });
-    txs.approveFee = (await sendAs(p.creatorWallet, approve, 'approve(hook,fee)')).txHash;
-    const deposit = buildDepositFeeCalldata({ jobId });
-    txs.depositFee = (await sendAs(p.creatorWallet, deposit, 'depositFee')).txHash;
-  }
-
-  // 6. fund (creator): approve AgenticCommerce then fund.
-  {
-    const approve = buildApproveCalldata({ spender: AGENTIC_COMMERCE_ADDRESS, amount: earningsWei });
-    txs.approveBudget = (await sendAs(p.creatorWallet, approve, 'approve(ac,budget)')).txHash;
-    const fund = buildFundCalldata({ jobId, expectedBudget: earningsWei });
-    txs.fund = (await sendAs(p.creatorWallet, fund, 'fund')).txHash;
-  }
-
-  return { jobId, txs };
 }
 
 /** Provider submits a deliverable (Funded -> Submitted). */
@@ -332,4 +405,4 @@ export async function refundExpired({ jobId, caller = SELLER_ADDRESS }) {
   return { txs };
 }
 
-export { getJob, getFeeMeta, AGENTIC_COMMERCE_ADDRESS, BARD_JOB_HOOK_ADDRESS, SELLER_ADDRESS };
+export { AGENTIC_COMMERCE_ADDRESS, BARD_JOB_HOOK_ADDRESS, SELLER_ADDRESS };

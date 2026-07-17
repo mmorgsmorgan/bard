@@ -88,6 +88,11 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
+    name: 'bard_get_wallet_balance',
+    description: 'Get your authenticated managed-wallet balance on Arc Testnet. Returns ERC-20 USDC balance, native gas balance, wallet address, and ArcScan link. The wallet is resolved from your token; no address or private key is accepted.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
     name: 'bard_register_self',
     description: 'Cross-deployment recovery: if your token authenticates but the MCP backend has no matching agent row (you will see hint:"cross_deployment_token" from other tools), call this. It reads your JWT claims and creates the agent row on THIS backend so every other MCP tool works. Idempotent — safe to call when already registered.',
     inputSchema: {
@@ -153,6 +158,15 @@ export const TOOLS = [
       type: 'object',
       properties: { status: { type: 'string', enum: ['open', 'assigned', 'submitted', 'proposal_open', 'proposal_selected'], default: 'open' } },
       required: [],
+    },
+  },
+  {
+    name: 'bard_get_bounty',
+    description: 'Get one bounty by ID with its full escrow lifecycle, audit events, verification decisions, and on-chain ERC-8183 job/explorer details when applicable.',
+    inputSchema: {
+      type: 'object',
+      properties: { bountyId: { type: 'string', description: 'Bounty ID to retrieve' } },
+      required: ['bountyId'],
     },
   },
   {
@@ -574,6 +588,21 @@ async function handleTool(name, args, token) {
         return await res.json();
       }
 
+      case 'bard_get_wallet_balance': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/agents/${auth.agentId}/wallet-balance`, {}, token);
+        const data = await res.json();
+        if (!res.ok) {
+          return {
+            error: data.error || 'Wallet balance unavailable',
+            details: data.details,
+            hint: data.hint,
+          };
+        }
+        return { success: true, ...data };
+      }
+
       case 'bard_cleanup_orphans': {
         if (args.confirm !== true) {
           return { error: 'confirm: true required (this is destructive). Run bard_audit_orphans first to see what will be deleted.' };
@@ -711,6 +740,22 @@ async function handleTool(name, args, token) {
         const res = await apiFetch(`/api/bounties?status=${status}`, {}, token);
         const data = await res.json();
         return { bounties: data.bounties || [], count: data.bounties?.length || 0 };
+      }
+
+      case 'bard_get_bounty': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        if (!args.bountyId) return { error: 'Missing required: bountyId' };
+        const res = await apiFetch(`/api/bounties/${encodeURIComponent(args.bountyId)}/escrow`, {}, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || `Bounty ${args.bountyId} not found` };
+        return {
+          success: true,
+          bounty: data.bounty,
+          events: data.events || [],
+          decisions: data.decisions || [],
+          onchain: data.onchain || null,
+        };
       }
 
       case 'bard_accept_bounty': {
@@ -955,6 +1000,7 @@ async function handleTool(name, args, token) {
         if (!res.ok) return { error: data.error };
         return {
           success: true,
+          pending: data.pending || false,
           from: data.from,
           to: data.to,
           toUsername: data.toUsername,
@@ -963,6 +1009,8 @@ async function handleTool(name, args, token) {
           amount: data.amount,
           txHash: data.txHash,
           explorer: data.explorer,
+          message: data.message,
+          details: data.details,
         };
       }
 
@@ -1107,6 +1155,16 @@ async function handleTool(name, args, token) {
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
+        if (data.pending) {
+          return {
+            success: true,
+            pending: true,
+            txHash: data.txHash,
+            onchainJobId: data.onchainJobId,
+            message: data.message,
+            details: data.details,
+          };
+        }
         return { success: true, message: 'Deliverable submitted! The client will review, then platform verifies for USDC release.', bounty: data.bounty };
       }
 

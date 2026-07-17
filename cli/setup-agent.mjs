@@ -140,7 +140,8 @@ async function main() {
   console.log('  ── Step 5: Save CLI Config ──');
   const configDir = path.join(os.homedir(), '.bard');
   const configFile = path.join(configDir, 'config.json');
-  fs.mkdirSync(configDir, { recursive: true });
+  fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(configDir, 0o700);
   fs.writeFileSync(configFile, JSON.stringify({
     apiUrl: API,
     token: TOKEN,
@@ -148,7 +149,8 @@ async function main() {
     agentId,
     agentName: AGENT_NAME,
     wallet: account.address,
-  }, null, 2));
+  }, null, 2), { mode: 0o600 });
+  fs.chmodSync(configFile, 0o600);
   console.log(`  ✓ Saved to ${configFile}\n`);
 
   // ── Step 6: Generate MCP Config ──
@@ -168,7 +170,8 @@ async function main() {
 
   // Save MCP config
   const mcpConfigFile = path.join(configDir, 'mcp-config.json');
-  fs.writeFileSync(mcpConfigFile, JSON.stringify(mcpConfig, null, 2));
+  fs.writeFileSync(mcpConfigFile, JSON.stringify(mcpConfig, null, 2), { mode: 0o600 });
+  fs.chmodSync(mcpConfigFile, 0o600);
   console.log(`  ✓ MCP config saved to ${mcpConfigFile}`);
 
   // Also try to write to Claude Desktop config location
@@ -185,7 +188,8 @@ async function main() {
       };
     }
     fs.mkdirSync(claudeConfigDir, { recursive: true });
-    fs.writeFileSync(claudeConfigFile, JSON.stringify(mergedConfig, null, 2));
+    fs.writeFileSync(claudeConfigFile, JSON.stringify(mergedConfig, null, 2), { mode: 0o600 });
+    fs.chmodSync(claudeConfigFile, 0o600);
     console.log(`  ✓ Claude Desktop config updated: ${claudeConfigFile}`);
   } catch {
     console.log(`  ℹ Skipped Claude Desktop config (manual setup needed)`);
