@@ -75,17 +75,22 @@ export function Navbar() {
   useEffect(() => {
     if (!mcpSetupOpen) return;
 
-    const originalOverflow = document.body.style.overflow;
+    const root = document.documentElement;
+    const body = document.body;
+    const originalRootOverflow = root.style.overflow;
+    const originalBodyOverflow = body.style.overflow;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setMcpSetupOpen(false);
     };
 
-    document.body.style.overflow = 'hidden';
+    root.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
     document.addEventListener('keydown', closeOnEscape);
     requestAnimationFrame(() => mcpDialogRef.current?.focus());
 
     return () => {
-      document.body.style.overflow = originalOverflow;
+      root.style.overflow = originalRootOverflow;
+      body.style.overflow = originalBodyOverflow;
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [mcpSetupOpen]);
@@ -255,7 +260,7 @@ export function Navbar() {
 
       {mcpSetupOpen && (
         <div
-          className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-6"
+          className="fixed inset-0 z-[70] flex items-center justify-center overscroll-none p-3 sm:p-6"
           role="presentation"
           onMouseDown={() => setMcpSetupOpen(false)}
         >
@@ -266,7 +271,8 @@ export function Navbar() {
             aria-modal="true"
             aria-labelledby="mcp-setup-title"
             tabIndex={-1}
-            className="relative z-10 flex max-h-[calc(100vh-1.5rem)] w-full max-w-4xl flex-col overflow-hidden border outline-none sm:max-h-[calc(100vh-3rem)]"
+            data-lenis-prevent
+            className="relative z-10 flex max-h-[calc(100dvh-1.5rem)] w-full max-w-4xl flex-col overflow-hidden overscroll-contain border outline-none sm:max-h-[calc(100dvh-3rem)]"
             style={{ background: 'var(--bg)', borderColor: 'var(--rule)', boxShadow: 'var(--shadow)' }}
             onMouseDown={(event) => event.stopPropagation()}
           >
@@ -290,7 +296,11 @@ export function Navbar() {
                 ×
               </button>
             </div>
-            <div className="overflow-y-auto p-3 sm:p-6">
+            <div
+              data-lenis-prevent
+              className="min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-6"
+              style={{ touchAction: 'pan-y' }}
+            >
               <AgentAuth />
             </div>
           </div>
