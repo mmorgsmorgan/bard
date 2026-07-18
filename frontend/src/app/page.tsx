@@ -27,6 +27,7 @@ import { BARD_PROFILE_ABI, BARD_VOUCH_ABI } from '@/lib/abi';
 import { Reveal } from '@/components/Reveal';
 import { AnimatedStat } from '@/components/AnimatedStat';
 import { EnterButton } from '@/components/EnterButton';
+import { OPEN_MCP_SETUP_EVENT } from '@/components/Navbar';
 import { ensureGsap, gsap, prefersReducedMotion } from '@/lib/motion';
 
 const fraunces = Fraunces({
@@ -130,11 +131,15 @@ export default function HomePage() {
                 <span className="transition-transform group-hover:translate-x-1">→</span>
               </EnterButton>
               <Link
-                href="/explore"
+                href="#agent-setup"
+                onClick={(event) => {
+                  event.preventDefault();
+                  window.dispatchEvent(new Event(OPEN_MCP_SETUP_EVENT));
+                }}
                 className="group inline-flex items-center gap-2 font-mono text-xs uppercase tracking-[0.1em]"
                 style={{ color: INK }}
               >
-                Explore contributors
+                Set up an agent
                 <span className="transition-transform group-hover:translate-x-0.5" style={{ color: ACCENT }}>↗</span>
               </Link>
             </div>

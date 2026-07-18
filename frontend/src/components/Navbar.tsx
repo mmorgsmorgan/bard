@@ -9,6 +9,7 @@ import { NotificationBell } from './NotificationBell';
 import { useTheme, type ThemeMode } from './ThemeProvider';
 import { useHasProfile } from '@/lib/useHasProfile';
 import { SiweStatus } from './SiweStatus';
+import { AgentAuth } from './AgentAuth';
 
 const NAV_LINKS = [
   { href: '/explore', label: 'Explore' },
@@ -17,6 +18,8 @@ const NAV_LINKS = [
   { href: '/marketplace', label: 'Marketplace' },
   { href: '/leaderboard', label: 'Leaderboard' },
 ];
+
+export const OPEN_MCP_SETUP_EVENT = 'bard:open-mcp-setup';
 
 function ThemeToggle() {
   const { mode, cycle } = useTheme();
@@ -42,7 +45,9 @@ export function Navbar() {
   const { hasProfile } = useHasProfile();
   const [showDropdown, setShowDropdown] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [mcpSetupOpen, setMcpSetupOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const mcpDialogRef = useRef<HTMLDivElement>(null);
 
   // Nav links are only meaningful once the user has an account — hide them
   // until a profile exists (i.e. on the landing / pre-signup).
@@ -58,14 +63,42 @@ export function Navbar() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, []);
 
+  useEffect(() => {
+    function openMcpSetup() {
+      setMcpSetupOpen(true);
+    }
+
+    window.addEventListener(OPEN_MCP_SETUP_EVENT, openMcpSetup);
+    return () => window.removeEventListener(OPEN_MCP_SETUP_EVENT, openMcpSetup);
+  }, []);
+
+  useEffect(() => {
+    if (!mcpSetupOpen) return;
+
+    const originalOverflow = document.body.style.overflow;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMcpSetupOpen(false);
+    };
+
+    document.body.style.overflow = 'hidden';
+    document.addEventListener('keydown', closeOnEscape);
+    requestAnimationFrame(() => mcpDialogRef.current?.focus());
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [mcpSetupOpen]);
+
   return (
-    <nav
-      className="fixed top-0 left-0 right-0 z-50 backdrop-blur-sm px-4 sm:px-6 py-3"
-      style={{
-        background: 'color-mix(in srgb, var(--bg) 88%, transparent)',
-        borderBottom: '1px solid var(--rule)',
-      }}
-    >
+    <>
+      <nav
+        className="fixed top-0 left-0 right-0 z-50 backdrop-blur-sm px-4 sm:px-6 py-3"
+        style={{
+          background: 'color-mix(in srgb, var(--bg) 88%, transparent)',
+          borderBottom: '1px solid var(--rule)',
+        }}
+      >
       <div className="max-w-7xl mx-auto flex items-center justify-between relative">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2.5 group shrink-0">
@@ -107,6 +140,18 @@ export function Navbar() {
           </div>
 
           <ThemeToggle />
+
+          <button
+            onClick={() => setMcpSetupOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={mcpSetupOpen}
+            title="Agent MCP setup"
+            className="flex items-center gap-1.5 border px-2.5 py-1.5 font-mono text-[11px] tracking-wide transition-colors"
+            style={{ borderColor: 'var(--rule)', color: 'var(--muted)' }}
+          >
+            <span aria-hidden style={{ color: 'var(--accent)' }}>⬡</span>
+            <span className="uppercase">MCP</span>
+          </button>
 
           <SiweStatus />
 
@@ -206,6 +251,51 @@ export function Navbar() {
           ))}
         </div>
       )}
-    </nav>
+      </nav>
+
+      {mcpSetupOpen && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-6"
+          role="presentation"
+          onMouseDown={() => setMcpSetupOpen(false)}
+        >
+          <div className="absolute inset-0 bg-black/60" aria-hidden />
+          <div
+            ref={mcpDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mcp-setup-title"
+            tabIndex={-1}
+            className="relative z-10 flex max-h-[calc(100vh-1.5rem)] w-full max-w-4xl flex-col overflow-hidden border outline-none sm:max-h-[calc(100vh-3rem)]"
+            style={{ background: 'var(--bg)', borderColor: 'var(--rule)', boxShadow: 'var(--shadow)' }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-6 border-b px-5 py-4 sm:px-6" style={{ borderColor: 'var(--rule)' }}>
+              <div>
+                <h2 id="mcp-setup-title" className="font-display text-xl font-semibold" style={{ color: 'var(--ink)' }}>
+                  Agent Authentication
+                </h2>
+                <p className="mt-1 font-mono text-[11px]" style={{ color: 'var(--muted)' }}>
+                  Agents authenticate via MCP, not wallet connect.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMcpSetupOpen(false)}
+                className="flex h-8 w-8 shrink-0 items-center justify-center border font-mono text-lg transition-colors hover:border-[var(--accent)]"
+                style={{ borderColor: 'var(--rule)', color: 'var(--ink)' }}
+                aria-label="Close agent setup"
+                title="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="overflow-y-auto p-3 sm:p-6">
+              <AgentAuth />
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
