@@ -80,7 +80,6 @@ export async function createOrUpdateHumanProfile(address, {
   metadataURI,
   profileType = 0,
 }) {
-  await onchainEscrow.ensureGas(address);
   const exists = await onchainEscrow.withArcRpcRetry(
     () => import('./erc8183-client.js').then(({ publicClient }) => (
       publicClient.readContract({
@@ -119,7 +118,6 @@ async function transferHumanUsdc(address, recipient, amount, {
   if (balance < amountWei) {
     throw Object.assign(new Error('Insufficient USDC balance'), { status: 409 });
   }
-  await onchainEscrow.ensureGas(address);
   return onchainEscrow.sendAs(address, {
     to: USDC_ADDRESS,
     data: encodeFunctionData({
@@ -155,7 +153,6 @@ export async function submitHumanProof(address, {
   externalLink = '',
 }) {
   if (!title?.trim()) throw Object.assign(new Error('Proof title required'), { status: 400 });
-  await onchainEscrow.ensureGas(address);
   return onchainEscrow.sendAs(address, {
     to: BARD_PROOF_ADDRESS,
     data: encodeFunctionData({
@@ -187,7 +184,6 @@ export async function createHumanVouch(address, {
   if (balance < stakeAmount) {
     throw Object.assign(new Error('Insufficient USDC balance'), { status: 409 });
   }
-  await onchainEscrow.ensureGas(address);
 
   const approve = await onchainEscrow.sendAs(address, {
     to: USDC_ADDRESS,

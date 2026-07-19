@@ -32,10 +32,15 @@ const USDC_DECIMALS = 6;
 const ARC_CHAIN = {
   id: 5042002,
   name: 'Arc Testnet',
-  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
   rpcUrls: { default: { http: [ARC_RPC] } },
   blockExplorers: { default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' } },
 };
+
+const GAS_LIMIT_BUFFER_BPS = BigInt(process.env.GAS_LIMIT_BUFFER_BPS || '12000');
+const GAS_PRICE_BUFFER_BPS = BigInt(process.env.GAS_PRICE_BUFFER_BPS || '12500');
+const GAS_RESERVE_WEI = BigInt(process.env.GAS_RESERVE_WEI || '2000000000000000');
+const BPS_DENOMINATOR = 10_000n;
 
 export function toUsdcWei(amountUsdc) {
   return BigInt(Math.round(Number(amountUsdc) * 10 ** USDC_DECIMALS));
@@ -45,6 +50,30 @@ export function fromUsdcWei(wei) {
 }
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const _walletQueues = new Map();
+
+function ceilDiv(value, divisor) {
+  return (value + divisor - 1n) / divisor;
+}
+
+function buffered(value, basisPoints) {
+  return ceilDiv(value * basisPoints, BPS_DENOMINATOR);
+}
+
+async function withWalletQueue(address, operation) {
+  const key = address.toLowerCase();
+  const previous = _walletQueues.get(key) || Promise.resolve();
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  _walletQueues.set(key, current);
+  await previous.catch(() => {});
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (_walletQueues.get(key) === current) _walletQueues.delete(key);
+  }
+}
 
 function errorChain(error) {
   const values = [];
@@ -156,13 +185,22 @@ async function signerFor(address) {
  */
 export async function sendAs(signer, { to, data, value = 0n }, label = 'tx') {
   if (!signer) throw new Error(`escrow-service: missing signer for ${label}`);
-  const wc = await signerFor(signer);
-  const txHash = await wc.sendTransaction({ to, data, value });
-  const receipt = await waitForReceipt(txHash, label);
-  if (receipt.status !== 'success') {
-    throw new Error(`escrow-service: ${label} reverted (tx ${txHash})`);
-  }
-  return { txHash, receipt };
+  return withWalletQueue(signer, async () => {
+    const wc = await signerFor(signer);
+    const gasFunding = await ensureGasForTransaction(signer, { to, data, value }, { label });
+    const txHash = await wc.sendTransaction({
+      to,
+      data,
+      value,
+      gas: gasFunding.gasLimit,
+      gasPrice: gasFunding.bufferedGasPrice,
+    });
+    const receipt = await waitForReceipt(txHash, label);
+    if (receipt.status !== 'success') {
+      throw new Error(`escrow-service: ${label} reverted (tx ${txHash})`);
+    }
+    return { txHash, receipt, gasFunding };
+  });
 }
 
 // ──────────────────────────────────────────────
@@ -192,6 +230,139 @@ export async function getJob(jobId) {
 
 export async function getFeeMeta(jobId) {
   return withArcRpcRetry(() => readFeeMeta(jobId), { label: `job ${jobId} fee read` });
+}
+
+export function calculateGasFundingPlan({
+  balance,
+  estimatedGas,
+  gasPrice,
+  value = 0n,
+  gasLimitBufferBps = GAS_LIMIT_BUFFER_BPS,
+  gasPriceBufferBps = GAS_PRICE_BUFFER_BPS,
+  reserveWei = GAS_RESERVE_WEI,
+}) {
+  const gasLimit = buffered(BigInt(estimatedGas), BigInt(gasLimitBufferBps));
+  const bufferedGasPrice = buffered(BigInt(gasPrice), BigInt(gasPriceBufferBps));
+  const requiredBalance = BigInt(value) + (gasLimit * bufferedGasPrice) + BigInt(reserveWei);
+  const currentBalance = BigInt(balance);
+  return {
+    gasLimit,
+    gasPrice: BigInt(gasPrice),
+    bufferedGasPrice,
+    requiredBalance,
+    topUpWei: currentBalance < requiredBalance ? requiredBalance - currentBalance : 0n,
+  };
+}
+
+async function estimateTransactionFunding(address, { to, data, value = 0n }, label) {
+  const [balance, estimatedGas, gasPrice] = await Promise.all([
+    nativeBalance(address),
+    withArcRpcRetry(
+      () => publicClient.estimateGas({ account: address, to, data, value }),
+      { label: `${label} gas estimate` },
+    ),
+    withArcRpcRetry(
+      () => publicClient.getGasPrice(),
+      { label: `${label} gas price` },
+    ),
+  ]);
+  return {
+    balance,
+    estimatedGas,
+    ...calculateGasFundingPlan({ balance, estimatedGas, gasPrice, value }),
+  };
+}
+
+async function assertSponsorCanTopUp(recipient, topUpWei, label) {
+  const [sponsorBalance, transferGas, gasPrice] = await Promise.all([
+    nativeBalance(SELLER_ADDRESS),
+    withArcRpcRetry(
+      () => publicClient.estimateGas({
+        account: SELLER_ADDRESS,
+        to: recipient,
+        value: topUpWei,
+      }),
+      { label: `${label} sponsor transfer gas estimate` },
+    ),
+    withArcRpcRetry(
+      () => publicClient.getGasPrice(),
+      { label: `${label} sponsor transfer gas price` },
+    ),
+  ]);
+  const sponsorRequired = topUpWei + (
+    buffered(transferGas, GAS_LIMIT_BUFFER_BPS)
+    * buffered(gasPrice, GAS_PRICE_BUFFER_BPS)
+  );
+  if (sponsorBalance < sponsorRequired) {
+    const error = new Error(
+      `BARD gas sponsor is underfunded for ${label}. Retry after the platform gas wallet is funded.`,
+    );
+    error.code = 'GAS_SPONSOR_UNDERFUNDED';
+    error.status = 503;
+    error.requiredWei = sponsorRequired.toString();
+    error.balanceWei = sponsorBalance.toString();
+    throw error;
+  }
+}
+
+/**
+ * Estimate one exact transaction and make sure its signer can pay the buffered fee.
+ * Arc exposes native USDC with 18-decimal RPC units, while its ERC-20 interface uses
+ * 6 decimals, so all values in this helper are native wei.
+ */
+export async function ensureGasForTransaction(address, tx, { label = 'transaction' } = {}) {
+  const plan = await estimateTransactionFunding(address, tx, label);
+  if (plan.topUpWei === 0n) return { ...plan, funded: false };
+  if (!SELLER_ADDRESS) {
+    throw Object.assign(
+      new Error('BARD gas sponsor is not configured'),
+      { code: 'GAS_SPONSOR_NOT_CONFIGURED', status: 503 },
+    );
+  }
+  if (address.toLowerCase() === SELLER_ADDRESS.toLowerCase()) {
+    throw Object.assign(
+      new Error(`BARD platform wallet lacks enough native USDC for ${label}`),
+      {
+        code: 'GAS_SPONSOR_UNDERFUNDED',
+        status: 503,
+        requiredWei: plan.requiredBalance.toString(),
+        balanceWei: plan.balance.toString(),
+      },
+    );
+  }
+
+  return withWalletQueue(SELLER_ADDRESS, async () => {
+    const refreshed = await estimateTransactionFunding(address, tx, label);
+    if (refreshed.topUpWei === 0n) return { ...refreshed, funded: false };
+    await assertSponsorCanTopUp(address, refreshed.topUpWei, label);
+
+    const wc = await signerFor(SELLER_ADDRESS);
+    const txHash = await wc.sendTransaction({ to: address, value: refreshed.topUpWei });
+    try {
+      await waitForReceipt(txHash, `gas top-up for ${address}`);
+    } catch (error) {
+      const balance = await nativeBalance(address).catch(() => 0n);
+      if (balance < refreshed.requiredBalance) {
+        error.gasTopUpTxHash = error.txHash || txHash;
+        delete error.txHash;
+        throw error;
+      }
+    }
+
+    const balance = await nativeBalance(address);
+    if (balance < refreshed.requiredBalance) {
+      const error = new Error(
+        `Gas top-up for ${label} confirmed, but the managed wallet is still underfunded`,
+      );
+      error.code = 'GAS_TOP_UP_INSUFFICIENT';
+      error.status = 502;
+      error.gasTopUpTxHash = txHash;
+      error.requiredWei = refreshed.requiredBalance.toString();
+      error.balanceWei = balance.toString();
+      throw error;
+    }
+    return { ...refreshed, funded: true, txHash, balance };
+  });
 }
 
 /**
@@ -268,10 +439,6 @@ export async function openAndFund(p) {
 
   let jobId;
   try {
-    // Make sure both agents can pay gas.
-    await ensureGas(p.creatorWallet);
-    await ensureGas(p.providerWallet);
-
     // 1. createJob (creator). Provider assigned via setProvider below (first-come style).
     {
       const cd = buildCreateJobCalldata({

@@ -35,7 +35,7 @@ export const ARC_TESTNET = {
   id: ARC_CHAIN_ID,
   name: 'Arc Testnet',
   network: 'arc-testnet',
-  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
   rpcUrls: { default: { http: [ARC_RPC] }, public: { http: [ARC_RPC] } },
 };
 

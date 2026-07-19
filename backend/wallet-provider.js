@@ -28,7 +28,7 @@ const ARC_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network'
 export const ARC_CHAIN = {
   id: 5042002,
   name: 'Arc Testnet',
-  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
+  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
   rpcUrls: { default: { http: [ARC_RPC] } },
   blockExplorers: { default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' } },
 };

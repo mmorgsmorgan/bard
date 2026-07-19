@@ -102,7 +102,7 @@ const arcTestnetClient = createPublicClient({
     id: 5042002,
     name: 'Arc Testnet',
     network: 'arc-testnet',
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 18 },
     rpcUrls: {
       default: { http: [ARC_TESTNET_RPC] },
       public: { http: [ARC_TESTNET_RPC] }
@@ -1232,7 +1232,12 @@ app.post('/api/human/profile', requireHuman, async (req, res) => {
       explorer: `https://testnet.arcscan.app/tx/${chain.txHash}`,
     });
   } catch (error) {
-    res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
+    res.status(error.status || 502).json({
+      error: error.message,
+      code: error.code,
+      txHash: error.txHash,
+      gasTopUpTxHash: error.gasTopUpTxHash,
+    });
   }
 });
 
@@ -2767,8 +2772,7 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       },
     );
 
-    // Ensure the sender can pay gas, then sign+send via the provider.
-    await onchainEscrow.ensureGas(walletAddress);
+    // sendAs estimates and provisions the exact Arc gas requirement.
     const { txHash } = await onchainEscrow.sendAs(walletAddress, wrapped, `send-usdc:${agent.agent_name}`);
 
     const displayRecipient = toUsername
@@ -2967,13 +2971,12 @@ app.post('/api/agents/:id/dex/swap', requireAuth, async (req, res) => {
     const routeData = quote.route_data;
 
     // Sign+send via the wallet provider (self-hosted/hybrid = no Turnkey), the same
-    // abstraction as /send-usdc and escrow. Native gas is topped up from the platform
-    // wallet first; sendAs waits for each receipt and throws on revert.
+    // abstraction as /send-usdc and escrow. sendAs estimates and provisions gas for
+    // each leg, waits for its receipt, and throws on revert.
     if (!walletSigningReady()) {
       return res.status(400).json({ error: 'No wallet provider configured. Cannot sign transactions.' });
     }
     const { encodeFunctionData, decodeEventLog } = await import('viem');
-    await onchainEscrow.ensureGas(walletAddress);
 
     // ERC-20 input → ensure adapter allowance.
     let approveTxHash = null;
