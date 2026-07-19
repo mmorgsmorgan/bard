@@ -23,9 +23,11 @@ import { createPublicClient, http } from 'viem';
 
 const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
 const PLATFORM_OWNER = process.env.PLATFORM_OWNER_WALLET;
-const ARC_RPC = 'https://rpc.testnet.arc.network';
+const ARC_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
 const USDC = '0x3600000000000000000000000000000000000000';
 const ARC_CHAIN_ID = 5042002;
+const BALANCE_PROBE_ATTEMPTS = Math.max(1, Number(process.env.CLEANUP_BALANCE_ATTEMPTS || 6));
+const BALANCE_PROBE_DELAY_MS = Math.max(0, Number(process.env.CLEANUP_BALANCE_DELAY_MS || 250));
 
 const DEFAULT_PREFIXES = ['live-', 'fc-', 'rf-', 'neg-', 'fa-', 'rv-', 'cc-', 'pc-', 'hybrid-'];
 
@@ -59,19 +61,34 @@ console.log(`Mode:          ${EXECUTE ? c.red + 'EXECUTE — destructive' : c.gr
 
 const pub = createPublicClient({
   chain: { id: ARC_CHAIN_ID, name: 'Arc Testnet', nativeCurrency:{ name:'USDC', symbol:'USDC', decimals:6 }, rpcUrls:{ default:{ http:[ARC_RPC] } } },
-  transport: http(ARC_RPC),
+  transport: http(ARC_RPC, { retryCount: 4, retryDelay: 500 }),
 });
 const ERC20_BAL_ABI = [{
   name: 'balanceOf', type: 'function', stateMutability: 'view',
   inputs: [{ name: 'a', type: 'address' }], outputs: [{ name: '', type: 'uint256' }],
 }];
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 async function usdcBal(addr) {
-  try {
-    const raw = await pub.readContract({
-      address: USDC, abi: ERC20_BAL_ABI, functionName: 'balanceOf', args: [addr],
-    });
-    return Number(raw) / 1_000_000;
-  } catch { return null; }
+  let lastError;
+  for (let attempt = 1; attempt <= BALANCE_PROBE_ATTEMPTS; attempt++) {
+    try {
+      const raw = await pub.readContract({
+        address: USDC, abi: ERC20_BAL_ABI, functionName: 'balanceOf', args: [addr],
+      });
+      return Number(raw) / 1_000_000;
+    } catch (err) {
+      lastError = err;
+      if (attempt < BALANCE_PROBE_ATTEMPTS) {
+        const backoffMs = Math.min(8_000, 500 * (2 ** (attempt - 1)));
+        await sleep(backoffMs);
+      }
+    }
+  }
+
+  const detail = lastError?.details || lastError?.shortMessage || lastError?.message || 'unknown RPC error';
+  console.warn(`\n  ${c.yellow}⚠${c.reset} balance UNKNOWN for ${addr}: ${String(detail).split('\n')[0]}`);
+  return null;
 }
 
 async function listTestAgents() {
@@ -119,17 +136,23 @@ async function main() {
     const a = tests[i];
     const bal = a.turnkeyAddress ? await usdcBal(a.turnkeyAddress) : 0;
     withBalances.push({ ...a, _balance: bal });
+    if (i < tests.length - 1) await sleep(BALANCE_PROBE_DELAY_MS);
     if ((i + 1) % 10 === 0 || i === tests.length - 1) {
       process.stdout.write(`\r  ${c.dim}probed ${i + 1}/${tests.length}${c.reset}`);
     }
   }
   console.log();
 
-  const funded = withBalances.filter(a => (a._balance || 0) > 0);
-  const empty = withBalances.filter(a => (a._balance || 0) === 0);
+  const funded = withBalances.filter(a => a._balance !== null && a._balance > 0);
+  const unknown = withBalances.filter(a => a._balance === null);
+  const empty = withBalances.filter(a => a._balance === 0);
   console.log(`  ${c.yellow}⚠${c.reset} ${funded.length} agents hold USDC (will be PRESERVED)`);
   for (const a of funded) {
     console.log(`    ${c.dim}${a.agentName.padEnd(28)} ${a.turnkeyAddress}  bal=${a._balance.toFixed(6)} USDC${c.reset}`);
+  }
+  console.log(`  ${c.yellow}⚠${c.reset} ${unknown.length} agents have UNKNOWN balance (will be PRESERVED)`);
+  for (const a of unknown) {
+    console.log(`    ${c.dim}${a.agentName.padEnd(28)} ${a.turnkeyAddress}${c.reset}`);
   }
   console.log(`  ${c.green}✓${c.reset} ${empty.length} agents have zero balance (candidates for cleanup)`);
 
@@ -143,6 +166,7 @@ async function main() {
   console.log(`  ${c.green}KEEP${c.reset}     ${keep.length} (${KEEP_PERCENT}% of empty pool, by random sample)`);
   console.log(`  ${c.red}DELETE${c.reset}   ${drop.length}`);
   console.log(`  ${c.yellow}PRESERVE${c.reset} ${funded.length} (funded)`);
+  console.log(`  ${c.yellow}PRESERVE${c.reset} ${unknown.length} (balance unknown)`);
   console.log(`  ${c.dim}—— total: ${tests.length}${c.reset}`);
 
   console.log(`\n${c.dim}First 10 to delete:${c.reset}`);
@@ -181,7 +205,8 @@ async function main() {
   console.log(`  deleted: ${c.green}${ok}${c.reset}`);
   if (fail > 0) console.log(`  failed:  ${c.red}${fail}${c.reset}`);
   console.log(`  kept:    ${keep.length}`);
-  console.log(`  funded preserved: ${funded.length}\n`);
+  console.log(`  funded preserved: ${funded.length}`);
+  console.log(`  unknown preserved: ${unknown.length}\n`);
 }
 
 main().catch(err => {
