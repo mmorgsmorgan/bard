@@ -1,19 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { useReadContract } from 'wagmi';
 import { PROFILE_TYPES, CONTRACTS, CONTRIBUTION_TYPES, API_URL } from '@/lib/config';
-import { BARD_PROFILE_ABI, BARD_PFP_ABI, BARD_PROOF_ABI, BARD_AGENT_ABI, BARD_VOUCH_ABI, IDENTITY_REGISTRY_ABI } from '@/lib/abi';
-import { saveProfile, fetchProfileByWallet, fetchProofsByWallet, saveProof, fetchPortfolioByWallet, savePortfolioItem, deletePortfolioItem, type StoredProfile, type StoredProof, type PortfolioItem } from '@/lib/store';
+import { BARD_PROFILE_ABI, BARD_PFP_ABI, BARD_PROOF_ABI, BARD_VOUCH_ABI, IDENTITY_REGISTRY_ABI } from '@/lib/abi';
+import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, savePortfolioItem, deletePortfolioItem, type StoredProfile, type StoredProof, type PortfolioItem } from '@/lib/store';
 import Link from 'next/link';
 import { BardLogo } from '@/components/BardLogo';
 import { AgentAuth } from '@/components/AgentAuth';
 import { LinkAgentForm } from '@/components/LinkAgentForm';
 import { LinkedAgentStatus } from '@/components/LinkedAgentStatus';
+import { useBardAccount } from '@/components/BardAccountProvider';
 
 export default function ProfilePage() {
-  const { address, isConnected, status } = useAccount();
+  const { address, isConnected, status, login, authFetch } = useBardAccount();
   const [step, setStep] = useState(1);
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -26,21 +26,15 @@ export default function ProfilePage() {
   const [discord, setDiscord] = useState('');
   const [linkedin, setLinkedin] = useState('');
   const [existingProfile, setExistingProfile] = useState<StoredProfile | null>(null);
-  const [txStatus, setTxStatus] = useState<'idle' | 'signing' | 'confirming' | 'done' | 'error'>('idle');
+  const [txStatus, setTxStatus] = useState<'idle' | 'submitting' | 'done' | 'error'>('idle');
+  const [profileTxHash, setProfileTxHash] = useState('');
+  const [profileExplorer, setProfileExplorer] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-
-  // Agent-specific state
-  const [operatorAddress, setOperatorAddress] = useState('');
-  const [apiEndpoint, setApiEndpoint] = useState('');
-  const [agentCapabilities, setAgentCapabilities] = useState('');
 
   // PFP state
   const [pfpPreview, setPfpPreview] = useState<string | null>(null);
   const [pfpDataURI, setPfpDataURI] = useState<string | null>(null);
   const [pfpUploading, setPfpUploading] = useState(false);
-  const [pfpMinting, setPfpMinting] = useState(false);
-  const [pfpMinted, setPfpMinted] = useState(false);
-  const [identityRegistered, setIdentityRegistered] = useState(false);
 
   // Dashboard state (merged)
   const [activeTab, setActiveTab] = useState<'portfolio' | 'proofs' | 'vouches'>('portfolio');
@@ -121,24 +115,7 @@ export default function ProfilePage() {
   });
   const myVouchCount = ownVouchCount ? Number(ownVouchCount) : 0;
   const myTotalStaked = ownTotalStaked ? Number(ownTotalStaked) / 1_000_000 : 0;
-
-  const { writeContract, data: txHash } = useWriteContract();
-  const { writeContract: writePfpMint, data: pfpTxHash } = useWriteContract();
-  const { writeContract: writeIdentity, data: identityTxHash } = useWriteContract();
-  const { writeContract: writeProof, data: proofTxHash } = useWriteContract();
-  const { writeContract: writeAgent } = useWriteContract();
-  const { isSuccess: txConfirmed } = useWaitForTransactionReceipt({ hash: txHash });
-  const { isSuccess: identityTxConfirmed } = useWaitForTransactionReceipt({ hash: identityTxHash });
-  const { isSuccess: proofTxConfirmed } = useWaitForTransactionReceipt({ hash: proofTxHash });
-
-  // Track identity registration
-  useEffect(() => {
-    if (identityTxConfirmed) setIdentityRegistered(true);
-  }, [identityTxConfirmed]);
-  useEffect(() => {
-    if (isIdentityRegistered === true) setIdentityRegistered(true);
-  }, [isIdentityRegistered]);
-  const { isSuccess: pfpTxConfirmed } = useWaitForTransactionReceipt({ hash: pfpTxHash });
+  const identityRegistered = isIdentityRegistered === true;
 
   // Handle PFP file upload
   const handlePfpUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -180,14 +157,6 @@ export default function ProfilePage() {
       setPfpUploading(false);
     }
   };
-
-  // Mint PFP after profile created
-  useEffect(() => {
-    if (pfpTxConfirmed && pfpMinting) {
-      setPfpMinting(false);
-      setPfpMinted(true);
-    }
-  }, [pfpTxConfirmed, pfpMinting]);
 
   useEffect(() => {
     // Reset all per-wallet state whenever the connected wallet changes, so a
@@ -234,11 +203,6 @@ export default function ProfilePage() {
     args: address ? [address] : undefined, query: { enabled: !!address },
   });
 
-  // Refresh proofs after on-chain submission
-  useEffect(() => {
-    if (proofTxConfirmed) refetchProofs();
-  }, [proofTxConfirmed]);
-
   useEffect(() => {
     if (onChainProfile && Array.isArray(onChainProfile) && onChainProfile[5] === true && address) {
       const synced: StoredProfile = {
@@ -254,61 +218,47 @@ export default function ProfilePage() {
     }
   }, [onChainProfile, address]);
 
-  useEffect(() => {
-    if (txConfirmed && txStatus === 'confirming') {
-      setTxStatus('done');
-      if (address) {
-        const profile: StoredProfile = {
-          wallet: address, username, displayName, bio, profileType,
-          ecosystems: ecosystems.split(',').map((e) => e.trim()).filter(Boolean),
-          farcaster: farcaster || undefined, github: github || undefined,
-          x: xHandle || undefined, discord: discord || undefined,
-          pfp: pfpDataURI || undefined,
-          createdAt: new Date().toISOString(),
-        };
-        saveProfile(profile);
-        setExistingProfile(profile);
-
-        // ERC-8004 identity is now minted by agents, not humans
-        // Human profiles are stored in the backend DB only
-
-        // Auto-register as agent if agent profile type with operator
-        if (profileType === 'agent' && operatorAddress) {
-          writeAgent({
-            address: CONTRACTS.BARD_AGENT, abi: BARD_AGENT_ABI, functionName: 'registerAgent',
-            args: [operatorAddress as `0x${string}`, apiEndpoint, agentCapabilities],
-          }, {
-            onError: () => { /* Agent registration is best-effort */ },
-          });
-        }
-
-        setStep(3);
-      }
-    }
-  }, [txConfirmed, txStatus]);
-
   const isValidUsername = (name: string) => /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(name) && !name.includes('--');
 
   const handleSubmit = async () => {
     if (!isConnected || !address) return;
-    setTxStatus('signing');
+    setTxStatus('submitting');
     setErrorMsg('');
     try {
-      const metadata = { username, display_name: displayName, profile_type: profileType, bio, ecosystems: ecosystems.split(',').map((e) => e.trim()).filter(Boolean), wallet: address, farcaster: farcaster || undefined, github: github || undefined, x: xHandle || undefined, discord: discord || undefined, linkedin: linkedin || undefined, created_at: new Date().toISOString() };
-      const metadataURI = `data:application/json,${encodeURIComponent(JSON.stringify(metadata))}`;
-      writeContract({
-        address: CONTRACTS.BARD_PROFILE, abi: BARD_PROFILE_ABI, functionName: 'createProfile',
-        args: [username, metadataURI, profileType === 'human' ? 0 : 1],
-      }, {
-        onSuccess: () => setTxStatus('confirming'),
-        onError: (err: Error) => {
-          setTxStatus('error');
-          setErrorMsg(err.message?.includes('UsernameTaken') ? 'Username is already taken.' : err.message?.includes('ProfileAlreadyExists') ? 'Wallet already has a profile.' : err.message?.includes('user rejected') ? 'Transaction rejected.' : `Failed: ${err.message?.slice(0, 100)}`);
-        },
+      const response = await authFetch('/api/human/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          displayName,
+          bio,
+          profileType,
+          ecosystems: ecosystems.split(',').map((item) => item.trim()).filter(Boolean),
+          farcaster,
+          github,
+          x: xHandle,
+          discord,
+          linkedin,
+          pfp: pfpDataURI || '',
+        }),
       });
+      const data = await response.json() as {
+        profile?: StoredProfile;
+        txHash?: string;
+        explorer?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.profile) {
+        throw new Error(data.error || 'Profile registration failed');
+      }
+      setExistingProfile(data.profile);
+      setProfileTxHash(data.txHash || '');
+      setProfileExplorer(data.explorer || '');
+      setTxStatus('done');
+      setStep(3);
     } catch (err: unknown) {
       setTxStatus('error');
-      setErrorMsg(err instanceof Error ? err.message.slice(0, 100) : 'Unknown error');
+      setErrorMsg(err instanceof Error ? err.message.slice(0, 180) : 'Unknown error');
     }
   };
 
@@ -332,49 +282,54 @@ export default function ProfilePage() {
   const handleSubmitProof = async () => {
     if (!address) return;
     setProofUploading(true);
+    setErrorMsg('');
 
-    let fileUrl: string | undefined;
-
-    // Upload file first if present
-    if (proofFile) {
-      try {
+    try {
+      let fileUrl = '';
+      if (proofFile) {
         const formData = new FormData();
         formData.append('file', proofFile);
         formData.append('wallet', address);
         const uploadRes = await fetch(`${API_URL}/api/upload/proof`, { method: 'POST', body: formData });
-        const uploadData = await uploadRes.json();
-        if (uploadData.success) {
-          fileUrl = uploadData.url;
-          if (uploadData.deletedOldest) {
-            setErrorMsg('Video limit reached (3 max). Your oldest video was removed to make room. The proof post is still intact.');
-          }
+        const uploadData = await uploadRes.json() as {
+          success?: boolean;
+          url?: string;
+          error?: string;
+        };
+        if (!uploadRes.ok || !uploadData.success || !uploadData.url) {
+          throw new Error(uploadData.error || 'Proof upload failed');
         }
-      } catch (err) {
-        console.error('Proof file upload failed:', err);
+        fileUrl = uploadData.url;
       }
-    }
 
-    // Submit on-chain
-    writeProof({
-      address: CONTRACTS.BARD_PROOF, abi: BARD_PROOF_ABI, functionName: 'submitProof',
-      args: [proofTitle, proofDescription, proofEcosystem, proofType, proofLinks.split(',')[0]?.trim() || ''],
-    }, {
-      onError: () => { /* fallback: save locally */ },
-    });
-    // Also save locally as backup
-    const proof: StoredProof = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      title: proofTitle, ecosystem: proofEcosystem, contributionType: proofType,
-      description: proofDescription,
-      externalLinks: [...proofLinks.split(',').map((l) => l.trim()).filter(Boolean), ...(fileUrl ? [fileUrl] : [])],
-      contributor: address, status: 'unvalidated', timestamp: new Date().toISOString(),
-    };
-    saveProof(proof);
-    fetchProofsByWallet(address).then(setProofs);
-    setShowAddProof(false);
-    setProofUploading(false);
-    setProofTitle(''); setProofEcosystem(''); setProofDescription(''); setProofLinks('');
-    setProofFile(null); setProofFilePreview(null);
+      const response = await authFetch('/api/human/proofs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: proofTitle,
+          ecosystem: proofEcosystem,
+          contributionType: proofType,
+          description: proofDescription,
+          externalLinks: proofLinks.split(',').map((link) => link.trim()).filter(Boolean),
+          fileUrl,
+        }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || 'Proof submission failed');
+
+      const [storedProofs] = await Promise.all([
+        fetchProofsByWallet(address),
+        refetchProofs(),
+      ]);
+      setProofs(storedProofs);
+      setShowAddProof(false);
+      setProofTitle(''); setProofEcosystem(''); setProofDescription(''); setProofLinks('');
+      setProofFile(null); setProofFilePreview(null);
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Proof submission failed');
+    } finally {
+      setProofUploading(false);
+    }
   };
 
   const [pFile, setPFile] = useState<File | null>(null);
@@ -438,7 +393,7 @@ export default function ProfilePage() {
   };
 
   // ── Not connected (or Agent entry) ──
-  if (status === 'connecting' || status === 'reconnecting') {
+  if (status === 'connecting') {
     return <div className="min-h-[80vh]" />;
   }
 
@@ -457,7 +412,7 @@ export default function ProfilePage() {
             </div>
             <h1 className="text-3xl font-bold text-white mb-3">Join BARD</h1>
             <p className="text-surface-400 text-sm max-w-xs mx-auto leading-relaxed">
-              Build your reputation. Choose how you want to register on Arc.
+              Build your reputation with a BARD-managed wallet on Arc.
             </p>
           </div>
 
@@ -465,23 +420,18 @@ export default function ProfilePage() {
           <div className="mb-6">
             <div className="p-5 text-left border border-[rgba(255,133,18,0.4)] bg-[rgba(255,133,18,0.06)]">
               <div className="font-mono text-sm font-bold text-white mb-1">Human Profile</div>
-              <div className="font-mono text-[10px] text-surface-500">Connect wallet to register on Arc</div>
+              <div className="font-mono text-[10px] text-surface-500">Continue with email or an existing login wallet</div>
             </div>
           </div>
 
-          {/* Wallet connect */}
+          {/* Privy login */}
           <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-8 animate-fade-in">
-            <ConnectButton.Custom>
-              {({ openConnectModal, mounted }) => (
-                <button
-                  onClick={openConnectModal}
-                  disabled={!mounted}
-                  className="btn-primary w-full text-xs py-3.5"
-                >
-                  Connect Wallet to Register
-                </button>
-              )}
-            </ConnectButton.Custom>
+            <button
+              onClick={login}
+              className="btn-primary w-full text-xs py-3.5"
+            >
+              Continue with email or wallet
+            </button>
           </div>
 
           {/* Agent note */}
@@ -523,23 +473,36 @@ export default function ProfilePage() {
 
     const handleSaveSettings = async () => {
       setSaving(true); setSaveMsg('');
-      const updated: StoredProfile = {
-        ...existingProfile,
-        displayName: editDisplayName,
-        bio: editBio,
-        ecosystems: editEcosystems.split(',').map(e => e.trim()).filter(Boolean),
-        farcaster: editFarcaster || undefined,
-        github: editGithub || undefined,
-        x: editX || undefined,
-        discord: editDiscord || undefined,
-        linkedin: editLinkedin || undefined,
-        pfp: editPfpUrl || undefined,
-      };
-      saveProfile(updated);
-      setExistingProfile(updated);
-      setSaving(false);
-      setSaveMsg('Settings saved');
-      setTimeout(() => setSaveMsg(''), 3000);
+      try {
+        const response = await authFetch('/api/human/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: existingProfile.username,
+            displayName: editDisplayName,
+            bio: editBio,
+            profileType: existingProfile.profileType,
+            ecosystems: editEcosystems.split(',').map((item) => item.trim()).filter(Boolean),
+            farcaster: editFarcaster,
+            github: editGithub,
+            x: editX,
+            discord: editDiscord,
+            linkedin: editLinkedin,
+            pfp: editPfpUrl,
+          }),
+        });
+        const data = await response.json() as { profile?: StoredProfile; error?: string };
+        if (!response.ok || !data.profile) {
+          throw new Error(data.error || 'Profile update failed');
+        }
+        setExistingProfile(data.profile);
+        setSaveMsg('Settings saved');
+        setTimeout(() => setSaveMsg(''), 3000);
+      } catch (error) {
+        setSaveMsg(error instanceof Error ? error.message : 'Profile update failed');
+      } finally {
+        setSaving(false);
+      }
     };
 
     return (
@@ -972,6 +935,11 @@ export default function ProfilePage() {
                   <span className="label-mono block mb-2">Links <span className="text-surface-600">(comma-separated)</span></span>
                   <input value={proofLinks} onChange={(e) => setProofLinks(e.target.value)} placeholder="https://..." className="input-field font-mono" />
                 </div>
+                {errorMsg && (
+                  <div className="p-3 bg-red-900/20 border border-red-900/30 text-red-400 text-sm font-mono">
+                    {errorMsg}
+                  </div>
+                )}
               </div>
               <div className="flex gap-3 mt-8">
                 <button onClick={() => { setShowAddProof(false); setProofFile(null); setProofFilePreview(null); }} className="btn-secondary flex-1 text-xs">Cancel</button>
@@ -1139,7 +1107,7 @@ export default function ProfilePage() {
           <div className="space-y-6">
             {/* PFP Upload */}
             <div className="lg:col-span-2">
-              <span className="label-mono block mb-2">Profile Picture <span className="text-surface-600">(soulbound NFT · locked 6 months)</span></span>
+              <span className="label-mono block mb-2">Profile Picture <span className="text-surface-600">(stored with your BARD profile)</span></span>
               <div className="flex items-center gap-5">
                 <label className="w-20 h-20 border border-dashed border-[rgba(255,255,255,0.12)] bg-[#050505] flex items-center justify-center cursor-pointer hover:border-[#ff8512] transition-colors overflow-hidden shrink-0">
                   {pfpPreview ? (
@@ -1199,31 +1167,11 @@ export default function ProfilePage() {
                 <input type="text" value={linkedin} onChange={(e) => setLinkedin(e.target.value)} placeholder="in/username" className="input-field font-mono" />
               </div>
             </div>
-            {/* Agent-specific fields */}
-            {(profileType as string) === 'agent' && (
-              <div className="border border-[rgba(255,133,18,0.15)] bg-[rgba(255,133,18,0.03)] p-5 space-y-4">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="font-mono text-xs text-[#ff8512] tracking-wider uppercase">Agent Configuration</span>
-                </div>
-                <div>
-                  <span className="label-mono block mb-2">Operator Address <span className="text-surface-600">(can act on your behalf)</span></span>
-                  <input type="text" value={operatorAddress} onChange={(e) => setOperatorAddress(e.target.value)} placeholder="0x..." className="input-field font-mono" />
-                </div>
-                <div>
-                  <span className="label-mono block mb-2">API Endpoint <span className="text-surface-600">(for discovery)</span></span>
-                  <input type="text" value={apiEndpoint} onChange={(e) => setApiEndpoint(e.target.value)} placeholder="https://api.myagent.xyz" className="input-field font-mono" />
-                </div>
-                <div>
-                  <span className="label-mono block mb-2">Capabilities <span className="text-surface-600">(comma-separated)</span></span>
-                  <input type="text" value={agentCapabilities} onChange={(e) => setAgentCapabilities(e.target.value)} placeholder="trading, analysis, monitoring" className="input-field" />
-                </div>
-              </div>
-            )}
             {errorMsg && <div className="p-3 bg-red-900/20 border border-red-900/30 text-red-400 text-sm font-mono">{errorMsg}</div>}
             <div className="flex gap-3 pt-4">
               <button onClick={() => { setStep(1); setTxStatus('idle'); setErrorMsg(''); }} className="btn-secondary flex-1 text-xs">Back</button>
-              <button onClick={handleSubmit} disabled={!displayName || txStatus === 'signing' || txStatus === 'confirming'} className="btn-primary flex-1 text-xs">
-                {txStatus === 'signing' ? 'Sign in wallet...' : txStatus === 'confirming' ? 'Confirming...' : 'Register on Arc'}
+              <button onClick={handleSubmit} disabled={!displayName || txStatus === 'submitting'} className="btn-primary flex-1 text-xs">
+                {txStatus === 'submitting' ? 'Registering...' : 'Register on Arc'}
               </button>
             </div>
           </div>
@@ -1237,8 +1185,8 @@ export default function ProfilePage() {
             <h2 className="text-2xl font-bold text-white mb-3">Profile Registered</h2>
             <p className="text-surface-400 text-sm mb-2">Profile registered on BARD. Link an agent to mint your ERC-8004 identity.</p>
             <p className="text-[#ff8512] font-mono text-lg mb-4">@{existingProfile.username}</p>
-            {txHash && (
-              <a href={`https://explorer.testnet.arc.network/tx/${txHash}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-surface-500 hover:text-[#ff8512] underline mb-8 block">
+            {profileTxHash && (
+              <a href={profileExplorer || `https://testnet.arcscan.app/tx/${profileTxHash}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-surface-500 hover:text-[#ff8512] underline mb-8 block">
                 View transaction ↗
               </a>
             )}

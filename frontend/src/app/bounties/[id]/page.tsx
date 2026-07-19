@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { useParams } from 'next/navigation';
-import { useAccount } from 'wagmi';
+import { useBardAccount } from '@/components/BardAccountProvider';
 import {
   fetchBountyById,
   fetchBountyProposals,
@@ -10,8 +10,10 @@ import {
   submitBountyProposal,
   updateBountyProposal,
   withdrawBountyProposal,
-  acceptBountyProposal,
-  rejectBountyProposal,
+  acceptHumanBountyProposal,
+  cancelHumanBounty,
+  fundHumanBounty,
+  rejectHumanBountyProposal,
   type Bounty,
   type BountyProposal,
   type Agent,
@@ -36,7 +38,7 @@ const STATUS_LABEL: Record<string, string> = {
 export default function BountyDetailPage() {
   const params = useParams<{ id: string }>();
   const bountyId = params.id;
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, authFetch } = useBardAccount();
   const { getToken, busy: tokenBusy, error: tokenError } = useAgentToken();
 
   const [bounty, setBounty] = useState<Bounty | null>(null);
@@ -99,7 +101,7 @@ export default function BountyDetailPage() {
     setSubmitting(true);
     const token = await getToken(selectedAgentId);
     if (!token) {
-      setSubmitError('Wallet signature required to authenticate as agent.');
+      setSubmitError('Could not authenticate the selected agent.');
       setSubmitting(false);
       return;
     }
@@ -147,14 +149,63 @@ export default function BountyDetailPage() {
 
   async function handleAccept(p: BountyProposal) {
     if (!address) return;
-    if (!confirm(`Accept this proposal at ${p.proposedPriceUsdc} USDC? All other proposals will be auto-rejected.`)) return;
+    if (!confirm(`Accept and fund this proposal at ${p.proposedPriceUsdc} USDC? All other proposals will be auto-rejected.`)) return;
     setActionError(null);
     setActionBusy(true);
-    const res = await acceptBountyProposal(p.bountyId, p.id, address);
-    if (res.error) {
-      setActionError(res.error);
+    const selection = await acceptHumanBountyProposal(authFetch, p.bountyId, p.id);
+    if (selection.error) {
+      setActionError(selection.error);
     } else {
+      const funding = await fundHumanBounty(authFetch, p.bountyId);
+      if (funding.error) {
+        setActionError(
+          funding.txHash
+            ? `${funding.error} Transaction: ${funding.txHash}`
+            : `Proposal selected, but funding failed: ${funding.error}`
+        );
+      }
       await loadAll();
+    }
+    setActionBusy(false);
+  }
+
+  async function handleFund() {
+    if (!bounty) return;
+    setActionError(null);
+    setActionBusy(true);
+    const result = await fundHumanBounty(authFetch, bounty.id);
+    if (result.error) {
+      setActionError(
+        result.txHash
+          ? `${result.error} Transaction: ${result.txHash}`
+          : result.error
+      );
+    }
+    await loadAll();
+    setActionBusy(false);
+  }
+
+  async function handleCancel() {
+    if (!bounty) return;
+    const willRefund = bounty.status === 'open' && bounty.escrowStatus === 'funded';
+    const confirmed = confirm(
+      willRefund
+        ? `Cancel this bounty and refund ${bounty.amountUsdc} USDC to the funding wallet?`
+        : 'Cancel this bounty? Any active proposals will be rejected.'
+    );
+    if (!confirmed) return;
+    setActionError(null);
+    setActionBusy(true);
+    const result = await cancelHumanBounty(authFetch, bounty.id);
+    if (result.ok) {
+      setBounty(current => current ? {
+        ...current,
+        status: 'cancelled',
+        escrowStatus: result.refunded ? 'refunded' : current.escrowStatus,
+      } : current);
+      await loadAll();
+    } else {
+      setActionError(result.error || 'Bounty cancellation failed');
     }
     setActionBusy(false);
   }
@@ -162,9 +213,11 @@ export default function BountyDetailPage() {
   async function handleReject(p: BountyProposal) {
     if (!address) return;
     const reason = prompt('Reason for rejection (shown to proposer, optional):') || '';
+    setActionError(null);
     setActionBusy(true);
-    const ok = await rejectBountyProposal(p.bountyId, p.id, address, reason);
-    if (ok) await loadAll();
+    const result = await rejectHumanBountyProposal(authFetch, p.bountyId, p.id, reason);
+    if (result.ok) await loadAll();
+    else setActionError(result.error || 'Proposal rejection failed');
     setActionBusy(false);
   }
 
@@ -211,6 +264,17 @@ export default function BountyDetailPage() {
             <div className="mt-3 inline-block px-2 py-1 border border-[rgba(255,255,255,0.08)] font-mono text-[10px]">
               {STATUS_LABEL[bounty.status] || bounty.status}
             </div>
+            {isCreator && ['open', 'proposal_open', 'proposal_selected'].includes(bounty.status) && (
+              <button
+                onClick={handleCancel}
+                disabled={actionBusy}
+                className="mt-2 block ml-auto font-mono text-[10px] px-2 py-1 border border-red-500/30 text-red-400 hover:bg-red-500/10 disabled:opacity-40"
+              >
+                {bounty.status === 'open' && bounty.escrowStatus === 'funded'
+                  ? 'Cancel & Refund'
+                  : 'Cancel Bounty'}
+              </button>
+            )}
           </div>
         </div>
         <div className="flex flex-wrap gap-4 text-[10px] font-mono text-surface-500">
@@ -225,6 +289,10 @@ export default function BountyDetailPage() {
         </div>
       </div>
 
+      {actionError && (
+        <div className="mb-4 p-3 border border-red-500/30 bg-red-500/5 font-mono text-xs text-red-400">{actionError}</div>
+      )}
+
       {/* On-chain escrow status (renders only when contract-escrowed) */}
       <EscrowPanel bountyId={bounty.id} />
 
@@ -232,7 +300,9 @@ export default function BountyDetailPage() {
         <div className="border border-[rgba(255,255,255,0.08)] bg-[#0a0a0a] p-6">
           <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-2">First-Come Mode</div>
           <p className="text-sm text-surface-300">
-            This bounty uses first-come selection. Use the marketplace or Bounties page to claim.
+            {bounty.escrowStatus === 'funded'
+              ? `${bounty.escrowBudgetUsdc || bounty.amountUsdc} USDC is funded in escrow. The first eligible agent to claim can begin work.`
+              : 'This bounty is not funded and cannot be claimed.'}
           </p>
         </div>
       )}
@@ -240,10 +310,6 @@ export default function BountyDetailPage() {
       {/* ──── Proposal mode views ──── */}
       {isProposalMode && (
         <>
-          {actionError && (
-            <div className="mb-4 p-3 border border-red-500/30 bg-red-500/5 font-mono text-xs text-red-400">{actionError}</div>
-          )}
-
           {/* AGENT (non-creator) view */}
           {!isCreator && (
             <div className="space-y-6">
@@ -330,7 +396,7 @@ export default function BountyDetailPage() {
                         <button onClick={handleSubmitProposal}
                           disabled={submitting || tokenBusy || form.plan.length < 10}
                           className="btn-primary text-xs disabled:opacity-40">
-                          {tokenBusy ? 'Signing…' : submitting ? 'Submitting…' : (editingProposalId ? 'Update Proposal' : 'Submit Proposal')}
+                          {tokenBusy ? 'Authenticating...' : submitting ? 'Submitting...' : (editingProposalId ? 'Update Proposal' : 'Submit Proposal')}
                         </button>
                         <button onClick={() => { setShowForm(false); setEditingProposalId(null); setSubmitError(null); }}
                           className="font-mono text-xs px-3 py-1.5 border border-[rgba(255,255,255,0.1)] text-surface-300">
@@ -358,11 +424,15 @@ export default function BountyDetailPage() {
                   <div className="font-mono text-[10px] text-amber-400 uppercase tracking-wider mb-2">Awaiting Funding</div>
                   <p className="text-sm text-surface-300 mb-3">
                     You accepted {acceptedProposal.agentName || 'an agent'}'s proposal at <strong className="text-amber-400">${bounty.amountUsdc} USDC</strong>.
-                    Send that exact amount to the platform escrow address and call <code className="text-xs">/api/bounties/{bounty.id}/fund</code> with the transaction hash.
+                    Fund the accepted price from your BARD wallet to assign the agent.
                   </p>
-                  <p className="text-xs text-surface-500">
-                    If you don't fund within 24 hours, the selection will be reverted and the bounty will accept new proposals.
-                  </p>
+                  <button
+                    onClick={handleFund}
+                    disabled={actionBusy}
+                    className="btn-primary text-xs disabled:opacity-40"
+                  >
+                    {actionBusy ? 'Funding...' : `Fund ${bounty.amountUsdc} USDC`}
+                  </button>
                 </div>
               )}
 
@@ -391,7 +461,7 @@ export default function BountyDetailPage() {
                           <div className="mt-3 flex gap-2 items-center">
                             <button onClick={() => handleAccept(p)} disabled={actionBusy}
                               className="btn-primary text-xs disabled:opacity-40">
-                              Accept @ ${p.proposedPriceUsdc}
+                              Accept & Fund ${p.proposedPriceUsdc}
                             </button>
                             <button onClick={() => handleReject(p)} disabled={actionBusy}
                               className="font-mono text-xs px-3 py-1.5 border border-red-500/30 text-red-400 hover:bg-red-500/10">

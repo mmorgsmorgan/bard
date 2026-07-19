@@ -2,117 +2,120 @@
 
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, useBalance } from 'wagmi';
-import { parseUnits, formatUnits } from 'viem';
-import { CONTRACTS } from '@/lib/config';
-import { BARD_PROFILE_ABI, ERC20_ABI } from '@/lib/abi';
 import { BardLogo } from '@/components/BardLogo';
-import { addNotification, getProfileByWallet } from '@/lib/store';
+import { useBardAccount } from '@/components/BardAccountProvider';
+import { fetchProfileByUsername, type StoredProfile } from '@/lib/store';
 import { Headline } from '@/components/Editorial';
 
-type ProfileData = {
-  wallet: `0x${string}`;
-  username: string;
-  metadataURI: string;
-  profileType: number;
-  createdAt: bigint;
-  exists: boolean;
+type WalletBalance = {
+  address: string;
+  balanceUsdc: string;
+  nativeGasBalanceWei: string;
+  explorer: string;
 };
 
 export default function SendPage() {
   const searchParams = useSearchParams();
   const prefillTo = searchParams.get('to') || '';
 
-  const { address, isConnected, status } = useAccount();
+  const { address, isConnected, status, login, authFetch } = useBardAccount();
   const [recipient, setRecipient] = useState(prefillTo);
+  const [recipientProfile, setRecipientProfile] = useState<StoredProfile | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
   const [amount, setAmount] = useState('');
   const [step, setStep] = useState<'input' | 'confirm' | 'sending' | 'done' | 'error'>('input');
   const [error, setError] = useState('');
+  const [txHash, setTxHash] = useState('');
+  const [explorer, setExplorer] = useState('');
 
-  // Resolve username to wallet
-  const { data: recipientProfile, isLoading: resolving } = useReadContract({
-    address: CONTRACTS.BARD_PROFILE,
-    abi: BARD_PROFILE_ABI,
-    functionName: 'getProfileByUsername',
-    args: [recipient.replace('@', '')],
-    query: { enabled: recipient.length >= 3 },
-  }) as { data: ProfileData | undefined; isLoading: boolean };
-
-  // Get USDC balance
-  const { data: usdcBalance } = useBalance({
-    address,
-    token: CONTRACTS.USDC,
-  });
-
-  // Native balance (gas)
-  const { data: nativeBalance } = useBalance({ address });
-
-  // Send tx
-  const { writeContract, data: txHash, error: txError, isPending } = useWriteContract();
-  const { isLoading: confirming, isSuccess } = useWaitForTransactionReceipt({ hash: txHash });
-
-  // Parse metadata for display name
-  const [recipientMeta, setRecipientMeta] = useState<{ displayName?: string; profileType?: string }>({});
   useEffect(() => {
-    if (recipientProfile?.metadataURI) {
-      try {
-        const uri = recipientProfile.metadataURI;
-        if (uri.startsWith('data:application/json,')) {
-          const json = JSON.parse(decodeURIComponent(uri.replace('data:application/json,', '')));
-          setRecipientMeta({ displayName: json.display_name || json.username, profileType: json.profile_type });
-        }
-      } catch { /* ignore */ }
+    const clean = recipient.replace('@', '');
+    if (clean.length < 3) {
+      setRecipientProfile(null);
+      setResolving(false);
+      return;
     }
-  }, [recipientProfile]);
+    let cancelled = false;
+    setResolving(true);
+    const timer = window.setTimeout(() => {
+      fetchProfileByUsername(clean)
+        .then((profile) => {
+          if (!cancelled) setRecipientProfile(profile);
+        })
+        .finally(() => {
+          if (!cancelled) setResolving(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [recipient]);
 
-  // Track tx state
   useEffect(() => {
-    if (isPending || confirming) setStep('sending');
-    if (isSuccess) {
-      setStep('done');
-      // Look up sender's username
-      const senderProfile = address ? getProfileByWallet(address) : null;
-      const senderName = senderProfile?.username ? `@${senderProfile.username}` : `${address?.slice(0, 6)}...${address?.slice(-4)}`;
-      // Notify recipient
-      if (resolvedWallet) {
-        addNotification({
-          wallet: resolvedWallet,
-          type: 'send',
-          title: 'USDC Received',
-          message: `${amount} USDC from ${senderName}`,
-          from: address || '',
-          amount,
-        });
-      }
-      // Notify sender
-      if (address) {
-        addNotification({
-          wallet: address,
-          type: 'send',
-          title: 'USDC Sent',
-          message: `${amount} USDC to @${cleanUsername}`,
-          from: address,
-          amount,
-        });
-      }
+    if (!isConnected) {
+      setWalletBalance(null);
+      return;
     }
-    if (txError) { setStep('error'); setError(txError.message.slice(0, 120)); }
-  }, [isPending, confirming, isSuccess, txError]);
+    let cancelled = false;
+    authFetch('/api/human/wallet')
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not load wallet balance');
+        if (!cancelled) setWalletBalance(data);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isConnected, authFetch]);
 
-  const resolvedWallet = recipientProfile?.exists ? recipientProfile.wallet : null;
+  const resolvedWallet = recipientProfile?.wallet || null;
   const cleanUsername = recipient.replace('@', '');
   const amountNum = parseFloat(amount) || 0;
-  const balanceNum = usdcBalance ? parseFloat(formatUnits(usdcBalance.value, usdcBalance.decimals)) : 0;
-  const canSend = resolvedWallet && amountNum > 0 && amountNum <= balanceNum && !isPending;
+  const balanceNum = Number(walletBalance?.balanceUsdc || 0);
+  const isSending = step === 'sending';
+  const canSend = Boolean(
+    resolvedWallet &&
+    address &&
+    resolvedWallet.toLowerCase() !== address.toLowerCase() &&
+    amountNum > 0 &&
+    amountNum <= balanceNum &&
+    !isSending
+  );
 
-  function handleSend() {
+  async function handleSend() {
     if (!resolvedWallet || !amount) return;
-    writeContract({
-      address: CONTRACTS.USDC,
-      abi: ERC20_ABI,
-      functionName: 'transfer',
-      args: [resolvedWallet, parseUnits(amount, 6)],
-    });
+    setStep('sending');
+    setError('');
+    try {
+      const response = await authFetch('/api/human/send-usdc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: resolvedWallet, amount }),
+      });
+      const data = await response.json() as {
+        txHash?: string;
+        explorer?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.txHash) {
+        throw new Error(data.error || 'Transfer failed');
+      }
+      setTxHash(data.txHash);
+      setExplorer(data.explorer || '');
+      setStep('done');
+      const balanceResponse = await authFetch('/api/human/wallet');
+      if (balanceResponse.ok) {
+        setWalletBalance(await balanceResponse.json());
+      }
+    } catch (cause) {
+      setStep('error');
+      setError(cause instanceof Error ? cause.message.slice(0, 180) : 'Transfer failed');
+    }
   }
 
   function reset() {
@@ -120,9 +123,11 @@ export default function SendPage() {
     setRecipient('');
     setAmount('');
     setError('');
+    setTxHash('');
+    setExplorer('');
   }
 
-  if (status === 'connecting' || status === 'reconnecting') {
+  if (status === 'connecting') {
     return <div className="min-h-screen" />;
   }
 
@@ -131,7 +136,8 @@ export default function SendPage() {
       <div className="min-h-screen flex items-center justify-center px-6">
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-10 max-w-md w-full text-center">
           <BardLogo size={48} className="mx-auto mb-4" />
-          <p className="text-surface-400 font-mono text-sm">Connect your wallet to send USDC</p>
+          <p className="text-surface-400 font-mono text-sm mb-5">Sign in to send from your BARD-managed wallet</p>
+          <button onClick={login} className="btn-primary w-full text-xs py-3">Continue with email or wallet</button>
         </div>
       </div>
     );
@@ -146,7 +152,7 @@ export default function SendPage() {
           <h2 className="text-2xl font-bold text-white mb-3">Sent!</h2>
           <p className="text-surface-400 text-sm mb-2">{amount} USDC → @{cleanUsername}</p>
           {txHash && (
-            <a href={`https://explorer.testnet.arc.network/tx/${txHash}`} target="_blank" rel="noreferrer"
+            <a href={explorer || `https://testnet.arcscan.app/tx/${txHash}`} target="_blank" rel="noreferrer"
               className="font-mono text-xs text-surface-500 hover:text-[#ff8512] underline mb-8 block">
               View transaction ↗
             </a>
@@ -180,7 +186,7 @@ export default function SendPage() {
             <div className="w-3 h-3 bg-[#ff8512]" />
           </div>
           <h2 className="text-xl font-bold text-white mb-3 font-mono">
-            {confirming ? 'Confirming...' : 'Sending...'}
+            Sending...
           </h2>
           <p className="text-surface-400 text-sm">{amount} USDC → @{cleanUsername}</p>
         </div>
@@ -204,10 +210,10 @@ export default function SendPage() {
               <span className="label-mono">Wallet</span>
               <span className="font-mono text-xs text-surface-400">{resolvedWallet?.slice(0, 8)}...{resolvedWallet?.slice(-6)}</span>
             </div>
-            {recipientMeta.displayName && (
+            {recipientProfile?.displayName && (
               <div className="flex items-center justify-between mb-4">
                 <span className="label-mono">Name</span>
-                <span className="text-sm text-white">{recipientMeta.displayName}</span>
+                <span className="text-sm text-white">{recipientProfile.displayName}</span>
               </div>
             )}
             <div className="h-px bg-[rgba(255,255,255,0.06)] my-4" />
@@ -254,8 +260,8 @@ export default function SendPage() {
             <span className="font-mono text-xs text-emerald-500">
               {resolvedWallet.slice(0, 6)}...{resolvedWallet.slice(-4)}
             </span>
-            {recipientMeta.displayName && (
-              <span className="text-xs text-surface-400">· {recipientMeta.displayName}</span>
+            {recipientProfile?.displayName && (
+              <span className="text-xs text-surface-400">· {recipientProfile.displayName}</span>
             )}
           </div>
         )}
@@ -282,7 +288,7 @@ export default function SendPage() {
           </span>
           {balanceNum > 0 && (
             <button
-              onClick={() => setAmount(balanceNum.toFixed(2))}
+              onClick={() => setAmount(balanceNum.toFixed(6).replace(/\.?0+$/, ''))}
               className="text-xs text-[#ff8512] font-mono hover:underline"
             >
               MAX

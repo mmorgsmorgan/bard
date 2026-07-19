@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { useAccount } from 'wagmi';
+import { useBardAccount } from './BardAccountProvider';
 import {
   fetchNotificationsByWallet,
   getUnreadCount,
@@ -11,7 +11,7 @@ import {
 } from '@/lib/store';
 
 export function NotificationBell() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected } = useBardAccount();
   const [open, setOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unread, setUnread] = useState(0);

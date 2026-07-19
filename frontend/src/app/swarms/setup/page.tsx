@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAccount } from 'wagmi';
+import { useBardAccount } from '@/components/BardAccountProvider';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -17,7 +17,7 @@ const MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo', 'claude-3-opus', 'clau
 
 export default function SwarmSetupPage() {
   const router = useRouter();
-  const { address, isConnected } = useAccount();
+  const { address, isConnected } = useBardAccount();
   const [step, setStep] = useState(1);
   const [ownership, setOwnership] = useState<'platform' | 'byok' | null>(null);
   const [apiKey, setApiKey] = useState('');

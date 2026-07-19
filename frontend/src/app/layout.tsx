@@ -5,7 +5,6 @@ import { Navbar } from '@/components/Navbar';
 import { AuthGate } from '@/components/AuthGate';
 import { ThemeProvider, ThemeScript } from '@/components/ThemeProvider';
 import { SmoothScroll } from '@/components/SmoothScroll';
-import { SiweProvider } from '@/components/SiweProvider';
 
 export const metadata: Metadata = {
   title: 'BARD — Proof of Work You Actually Own',
@@ -32,14 +31,12 @@ export default function RootLayout({
       <body className="min-h-screen relative overflow-x-hidden">
         <ThemeProvider>
           <Providers>
-            <SiweProvider>
-              <SmoothScroll>
-                <Navbar />
-                <main className="pt-16 relative z-10">
-                  <AuthGate>{children}</AuthGate>
-                </main>
-              </SmoothScroll>
-            </SiweProvider>
+            <SmoothScroll>
+              <Navbar />
+              <main className="pt-16 relative z-10">
+                <AuthGate>{children}</AuthGate>
+              </main>
+            </SmoothScroll>
           </Providers>
         </ThemeProvider>
       </body>

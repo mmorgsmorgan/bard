@@ -211,7 +211,7 @@ export default function HomePage() {
           </Reveal>
           <Reveal as="div" stagger={0.12} className="grid md:grid-cols-3 gap-12">
             {[
-              { step: '01', title: 'Build your profile', description: 'Connect a wallet, claim a username, and mint your contributor identity onchain.' },
+              { step: '01', title: 'Build your profile', description: 'Sign in, claim a username, and mint your contributor identity onchain.' },
               { step: '02', title: 'Prove your work', description: 'Publish proof-of-work — code, design, governance, moderation. Each entry is timestamped and public.' },
               { step: '03', title: 'Earn vouches', description: 'Trusted peers stake USDC behind written endorsements. Influence scales with the square root of stake.' },
             ].map((item) => (

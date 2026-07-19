@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import { useAccount } from 'wagmi';
+import { useBardAccount } from '@/components/BardAccountProvider';
 import {
   fetchAllAgents, fetchAgentsByOwner,
   fetchContributionFeed, endorseContribution,
@@ -13,6 +13,7 @@ import { TierBadge } from '@/components/TierBadge';
 import { AgentAuth } from '@/components/AgentAuth';
 import { PageHeader, Em, SectionLabel } from '@/components/Editorial';
 import { Reveal } from '@/components/Reveal';
+import { useAgentToken } from '@/lib/useAgentToken';
 
 const AGENT_TYPES = [
   { value: 'general', label: 'General', icon: '◆' },
@@ -56,7 +57,8 @@ const AVAIL_COLORS: Record<string, string> = {
 };
 
 export default function AgentsPage() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, token } = useBardAccount();
+  const { getToken, busy: tokenBusy, error: tokenError } = useAgentToken();
 
   const [tab, setTab] = useState<'feed' | 'my-agents' | 'auth'>('feed');
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -76,6 +78,7 @@ export default function AgentsPage() {
   // Action state
   const [endorsing, setEndorsing] = useState<string | null>(null);
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
+  const [verificationError, setVerificationError] = useState('');
 
   const hasFilters = searchQuery || specFilter || minRepFilter || availFilter;
 
@@ -127,25 +130,35 @@ export default function AgentsPage() {
   }
 
   async function handleEndorse(contributionId: string) {
-    if (!address) return;
+    if (!address || !token) {
+      setVerificationError('BARD login required to endorse contributions');
+      return;
+    }
     setEndorsing(contributionId);
+    setVerificationError('');
     try {
       const result = await endorseContribution(contributionId, {
-        endorserWallet: address,
-        endorserType: 'human',
         comment: 'Endorsed via BARD UI',
-      });
+      }, token);
       if (result.success) {
         setFeed((prev) =>
           prev.map((c) =>
             c.id === contributionId
-              ? { ...c, endorsementCount: result.endorsementCount, status: result.endorsementCount >= 3 ? 'verified' : c.status }
+              ? {
+                ...c,
+                endorsementCount: result.endorsementCount,
+                approvals: result.agentApprovals,
+                status: result.status || c.status,
+              }
               : c
           )
         );
+      } else {
+        setVerificationError(result.error || 'Endorsement failed');
       }
     } catch (e) {
       console.error('Endorse failed:', e);
+      setVerificationError(e instanceof Error ? e.message : 'Endorsement failed');
     }
     setEndorsing(null);
   }
@@ -155,15 +168,17 @@ export default function AgentsPage() {
   async function handleAgentVerify(contributionId: string, contributionAgentId: string, result: 'approved' | 'rejected') {
     if (!verifierAgent || verifierAgent.id === contributionAgentId) return;
     setVerifyingId(contributionId);
+    setVerificationError('');
     try {
-      const sig = '0x' + Array.from(crypto.getRandomValues(new Uint8Array(32)))
-        .map(b => b.toString(16).padStart(2, '0')).join('');
+      const token = await getToken(verifierAgent.id);
+      if (!token) {
+        setVerificationError(tokenError || 'Could not authenticate the linked verifier agent');
+        return;
+      }
       const res = await agentVerifyContribution(contributionId, {
-        verifierAgentId: verifierAgent.id,
         result,
         reasoning: `${result === 'approved' ? 'Approved' : 'Rejected'} via BARD UI by ${verifierAgent.agentName}`,
-        signature: sig,
-      });
+      }, token);
       if (res.success) {
         setFeed(prev => prev.map(c =>
           c.id === contributionId ? {
@@ -173,11 +188,15 @@ export default function AgentsPage() {
             status: res.autoAction === 'verified' ? 'verified' : res.autoAction === 'rejected' ? 'rejected' : c.status,
           } : c
         ));
+      } else {
+        setVerificationError(res.error || 'Agent verification failed');
       }
     } catch (e) {
       console.error('Verify failed:', e);
+      setVerificationError(e instanceof Error ? e.message : 'Agent verification failed');
+    } finally {
+      setVerifyingId(null);
     }
-    setVerifyingId(null);
   }
 
   const getReputationColor = (score: number) => {
@@ -323,6 +342,11 @@ export default function AgentsPage() {
                   )}
 
                   <div className="mb-4"><SectionLabel>Recent Contributions</SectionLabel></div>
+                  {(verificationError || tokenError) && (
+                    <div className="mb-4 border border-red-900/30 bg-red-900/10 p-3 font-mono text-xs text-red-400">
+                      {verificationError || tokenError}
+                    </div>
+                  )}
                   <Reveal as="div" className="space-y-2" stagger={0.04} y={14}>
                     {feed.length === 0 ? (
                       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-16 text-center">
@@ -381,13 +405,13 @@ export default function AgentsPage() {
                                 <>
                                   <button
                                     onClick={() => handleAgentVerify(c.id, c.agentId, 'approved')}
-                                    disabled={verifyingId === c.id}
+                                    disabled={verifyingId === c.id || tokenBusy}
                                     className="font-mono text-xs px-2.5 py-1.5 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40">
                                     {verifyingId === c.id ? '...' : '⬡ Approve'}
                                   </button>
                                   <button
                                     onClick={() => handleAgentVerify(c.id, c.agentId, 'rejected')}
-                                    disabled={verifyingId === c.id}
+                                    disabled={verifyingId === c.id || tokenBusy}
                                     className="font-mono text-xs px-2.5 py-1.5 border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40">
                                     ✕
                                   </button>

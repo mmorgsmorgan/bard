@@ -8,7 +8,8 @@
 //
 //   getWalletProvider(pool) -> { name, enabled(), createWallet(label),
 //                                getAccount(address), getSigner(address),
-//                                signMessage(address, message) }
+//                                signMessage(address, message),
+//                                exportPrivateKey(address) }
 //
 // Because both providers return a standard viem account, escrow-service.js's signerFor
 // and turnkey-wallet.js's walletClient construction work unchanged against either.
@@ -120,17 +121,29 @@ class LocalWalletProvider {
   }
 
   /** Decrypt the stored key and return a viem LocalAccount (cached). */
-  async getAccount(address) {
-    const key = address.toLowerCase();
-    if (this._cache.has(key)) return this._cache.get(key);
+  async _loadPk(address) {
     await this.init();
     const { rows } = await this.pool.query(
       'SELECT enc_salt, enc_iv, enc_tag, enc_ct FROM local_wallets WHERE address = $1',
-      [key]
+      [address.toLowerCase()]
     );
-    if (!rows[0]) throw new Error(`local-wallet: no key for ${address}`);
-    const pk = decryptSecret({ salt: rows[0].enc_salt, iv: rows[0].enc_iv, tag: rows[0].enc_tag, ct: rows[0].enc_ct });
-    const account = privateKeyToAccount(pk);
+    if (!rows[0]) throw Object.assign(
+      new Error(`local-wallet: no key for ${address}`),
+      { status: 404 }
+    );
+    return decryptSecret({
+      salt: rows[0].enc_salt,
+      iv: rows[0].enc_iv,
+      tag: rows[0].enc_tag,
+      ct: rows[0].enc_ct,
+    });
+  }
+
+  /** Decrypt the stored key and return a viem LocalAccount (cached). */
+  async getAccount(address) {
+    const key = address.toLowerCase();
+    if (this._cache.has(key)) return this._cache.get(key);
+    const account = privateKeyToAccount(await this._loadPk(address));
     this._cache.set(key, account);
     return account;
   }
@@ -144,6 +157,14 @@ class LocalWalletProvider {
   async signMessage(address, message) {
     const account = await this.getAccount(address);
     return account.signMessage({ message });
+  }
+
+  /**
+   * Return the raw private key for an explicitly elevated export flow.
+   * Callers must perform fresh email OTP verification and audit the export.
+   */
+  async exportPrivateKey(address) {
+    return this._loadPk(address);
   }
 }
 
@@ -192,6 +213,13 @@ class TurnkeyWalletProvider {
     const account = await this.getAccount(address);
     return account.signMessage({ message });
   }
+
+  async exportPrivateKey() {
+    throw Object.assign(
+      new Error('Private-key export is unavailable for Turnkey-managed wallets'),
+      { status: 409, code: 'wallet_export_unsupported' }
+    );
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -218,6 +246,16 @@ class HybridWalletProvider {
   async getAccount(address) { return (await this._providerFor(address)).getAccount(address); }
   async getSigner(address) { return (await this._providerFor(address)).getSigner(address); }
   async signMessage(address, message) { return (await this._providerFor(address)).signMessage(address, message); }
+  async exportPrivateKey(address) {
+    const provider = await this._providerFor(address);
+    if (provider !== this.local) {
+      throw Object.assign(
+        new Error('Private-key export is unavailable for this legacy managed wallet'),
+        { status: 409, code: 'wallet_export_unsupported' }
+      );
+    }
+    return provider.exportPrivateKey(address);
+  }
 }
 
 // ──────────────────────────────────────────────

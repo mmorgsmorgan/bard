@@ -1,12 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useAccount } from 'wagmi';
+import { useBardAccount } from '@/components/BardAccountProvider';
 import {
-  fetchBounties, createBounty, acceptBounty, cancelBounty,
+  fetchBounties, createHumanBounty, claimFundedBounty, cancelHumanBounty,
   fetchAgentsByOwner,
   type Bounty, type Agent,
 } from '@/lib/store';
+import { useAgentToken } from '@/lib/useAgentToken';
 import { TierBadge } from '@/components/TierBadge';
 import { PageHeader, Em } from '@/components/Editorial';
 import { Reveal } from '@/components/Reveal';
@@ -32,10 +33,11 @@ const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }
   proposal_selected: { label: 'Awaiting Funding', color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
 };
 
-const USDC_AMOUNTS = ['0.50', '1.00', '2.00', '5.00', '10.00'];
+const USDC_AMOUNTS = ['1.00', '2.00', '5.00', '10.00', '25.00'];
 
 export default function BountiesPage() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, authFetch } = useBardAccount();
+  const { getToken, busy: tokenBusy } = useAgentToken();
   const [bounties, setBounties] = useState<Bounty[]>([]);
   const [myAgents, setMyAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,6 +53,7 @@ export default function BountiesPage() {
     proposalDeadline: '',
   });
   const [creating, setCreating] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => { loadData(); }, [address, filterStatus]);
 
@@ -67,9 +70,9 @@ export default function BountiesPage() {
 
   async function handleCreate() {
     if (!address || !form.title || !form.deadline) return;
+    setActionError(null);
     setCreating(true);
-    const bounty = await createBounty({
-      creatorWallet: address,
+    const result = await createHumanBounty(authFetch, {
       title: form.title,
       description: form.description,
       bountyType: form.bountyType,
@@ -79,6 +82,7 @@ export default function BountiesPage() {
       selectionMode: form.selectionMode,
       proposalDeadline: form.proposalDeadline ? new Date(form.proposalDeadline).toISOString() : undefined,
     });
+    const bounty = result.bounty;
     if (bounty) {
       setBounties(prev => [bounty, ...prev]);
       setShowCreate(false);
@@ -87,26 +91,60 @@ export default function BountiesPage() {
         amountUsdc: '1.00', deadline: '', minReputation: 0,
         selectionMode: 'first_come', proposalDeadline: '',
       });
+    } else {
+      setActionError(
+        result.txHash
+          ? `${result.error || 'Funding confirmation failed'} Transaction: ${result.txHash}`
+          : result.error || 'Bounty creation failed'
+      );
     }
     setCreating(false);
   }
 
   async function handleAccept(bountyId: string, agentId: string) {
+    setActionError(null);
     setAccepting(bountyId);
-    const updated = await acceptBounty(bountyId, agentId);
-    if (updated) setBounties(prev => prev.map(b => b.id === bountyId ? updated : b));
+    const token = await getToken(agentId);
+    if (!token) {
+      setActionError('Could not authenticate the selected agent.');
+      setAccepting(null);
+      return;
+    }
+    const result = await claimFundedBounty(bountyId, token);
+    if (result.bounty) {
+      setBounties(prev => prev.map(b => b.id === bountyId ? result.bounty! : b));
+    } else {
+      setActionError(result.error || 'Bounty claim failed');
+    }
     setAccepting(null);
   }
 
   async function handleCancel(bountyId: string) {
     if (!address) return;
-    const ok = await cancelBounty(bountyId, address);
-    if (ok) setBounties(prev => prev.map(b => b.id === bountyId ? { ...b, status: 'cancelled' } : b));
+    const bounty = bounties.find(item => item.id === bountyId);
+    const willRefund = bounty?.status === 'open' && bounty.escrowStatus === 'funded';
+    const confirmed = confirm(
+      willRefund
+        ? `Cancel this bounty and refund ${bounty.amountUsdc} USDC to the funding wallet?`
+        : 'Cancel this bounty? Any active proposals will be rejected.'
+    );
+    if (!confirmed) return;
+    setActionError(null);
+    const result = await cancelHumanBounty(authFetch, bountyId);
+    if (result.ok) {
+      setBounties(prev => prev.map(b => (
+        b.id === bountyId
+          ? { ...b, status: 'cancelled', escrowStatus: result.refunded ? 'refunded' : b.escrowStatus }
+          : b
+      )));
+    } else {
+      setActionError(result.error || 'Bounty cancellation failed');
+    }
   }
 
   const openCount = bounties.filter(b => b.status === 'open').length;
   const totalUsdc = bounties
-    .filter(b => b.status === 'open')
+    .filter(b => b.status === 'open' && b.escrowStatus === 'funded')
     .reduce((s, b) => s + parseFloat(b.amountUsdc), 0)
     .toFixed(2);
 
@@ -138,6 +176,12 @@ export default function BountiesPage() {
           </div>
         ))}
       </div>
+
+      {actionError && (
+        <div className="mb-6 border border-red-500/30 bg-red-500/5 p-3 font-mono text-xs text-red-400">
+          {actionError}
+        </div>
+      )}
 
       {/* Create Form */}
       {showCreate && (
@@ -221,10 +265,12 @@ export default function BountiesPage() {
           </div>
           <button onClick={handleCreate} disabled={creating || !form.title || !form.deadline}
             className="btn-primary text-xs disabled:opacity-40">
-            {creating ? 'Creating...' : (
+            {creating ? (
+              form.selectionMode === 'first_come' ? 'Funding & Posting...' : 'Opening Proposals...'
+            ) : (
               form.selectionMode === 'proposal'
                 ? `Open Proposals — Budget Hint: $${form.amountUsdc} USDC`
-                : `Post Bounty — $${form.amountUsdc} USDC`
+                : `Fund & Post — $${form.amountUsdc} USDC`
             )}
           </button>
         </div>
@@ -266,6 +312,11 @@ export default function BountiesPage() {
                     <div className="flex items-center gap-2 mb-2 flex-wrap">
                       <span className="font-mono text-xs text-surface-400">{typeInfo?.icon} {typeInfo?.label}</span>
                       <span className={`font-mono text-[9px] px-1.5 py-0.5 border ${st.bg} ${st.color}`}>{st.label}</span>
+                      {bounty.escrowStatus === 'funded' && (
+                        <span className="font-mono text-[9px] px-1.5 py-0.5 border border-emerald-500/30 bg-emerald-500/5 text-emerald-400">
+                          ESCROW FUNDED
+                        </span>
+                      )}
                       {deadlinePast && bounty.status === 'open' && (
                         <span className="font-mono text-[9px] text-red-400">EXPIRED</span>
                       )}
@@ -291,11 +342,14 @@ export default function BountiesPage() {
                     <div className="font-mono text-[9px] text-surface-500">USDC</div>
                     {/* Actions */}
                     <div className="flex flex-col gap-1 mt-2">
-                      {bounty.selectionMode === 'first_come' && bounty.status === 'open' && !isCreator && myAgents.length > 0 && (
+                      {bounty.selectionMode === 'first_come' && bounty.status === 'open' && bounty.escrowStatus === 'funded' && !isCreator && myAgents.length > 0 && (
                         <select onChange={e => e.target.value && handleAccept(bounty.id, e.target.value)}
+                          disabled={accepting === bounty.id || tokenBusy}
                           className="font-mono text-[10px] bg-[#080808] border border-[rgba(255,133,18,0.3)] text-[#ff8512] px-2 py-1 cursor-pointer"
                           defaultValue="">
-                          <option value="" disabled>Accept with…</option>
+                          <option value="" disabled>
+                            {accepting === bounty.id ? 'Claiming...' : 'Claim with...'}
+                          </option>
                           {myAgents.map(a => (
                             <option key={a.id} value={a.id}>{a.agentName}</option>
                           ))}
@@ -319,10 +373,10 @@ export default function BountiesPage() {
                           Open Thread
                         </a>
                       )}
-                      {(bounty.status === 'open' || bounty.status === 'proposal_open') && isCreator && (
+                      {(['open', 'proposal_open', 'proposal_selected'] as const).includes(bounty.status as 'open' | 'proposal_open' | 'proposal_selected') && isCreator && (
                         <button onClick={() => handleCancel(bounty.id)}
                           className="font-mono text-[10px] px-2 py-1 border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors">
-                          Cancel
+                          {bounty.status === 'open' && bounty.escrowStatus === 'funded' ? 'Cancel & Refund' : 'Cancel'}
                         </button>
                       )}
                     </div>

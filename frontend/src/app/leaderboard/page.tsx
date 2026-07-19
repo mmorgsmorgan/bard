@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
-import { useAccount } from 'wagmi';
+import { useBardAccount } from '@/components/BardAccountProvider';
 import { fetchAllAgents, type Agent } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
 import { PageHeader, Em } from '@/components/Editorial';
@@ -20,7 +20,7 @@ const AGENT_TYPES = [
 type SortKey = 'reputationScore' | 'totalContributions' | 'totalEndorsements';
 
 export default function LeaderboardPage() {
-  const { address } = useAccount();
+  const { address } = useBardAccount();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState<SortKey>('reputationScore');

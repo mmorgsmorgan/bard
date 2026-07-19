@@ -1,9 +1,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { useAccount, useSignMessage } from 'wagmi';
-
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+import { useBardAccount } from '@/components/BardAccountProvider';
 
 // Cache one token per wallet+agentId in memory (cleared on tab close)
 const cache = new Map<string, { token: string; agentId: string; expiresAt: number }>();
@@ -16,7 +14,8 @@ interface UseAgentTokenResult {
 }
 
 /**
- * React hook that obtains a short-lived JWT for an agent by signing a wallet challenge.
+ * React hook that obtains a short-lived JWT for an agent linked to the logged-in
+ * human's BARD-managed wallet.
  * The token is cached in memory for the session (cleared when tab closes).
  *
  * Usage:
@@ -25,8 +24,7 @@ interface UseAgentTokenResult {
  *   // Use token in API calls that require requireAuth
  */
 export function useAgentToken(): UseAgentTokenResult {
-  const { address } = useAccount();
-  const { signMessageAsync } = useSignMessage();
+  const { address, authFetch } = useBardAccount();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,33 +42,17 @@ export function useAgentToken(): UseAgentTokenResult {
     setBusy(true);
     setError(null);
     try {
-      // 1. Request challenge
-      const chRes = await fetch(`${API}/api/auth/challenge`, {
+      const response = await authFetch(`/api/human/agents/${encodeURIComponent(agentId)}/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId }),
       });
-      const chJson = await chRes.json();
-      if (!chRes.ok) throw new Error(chJson.error || 'Failed to fetch challenge');
+      const json = await response.json();
+      if (!response.ok) throw new Error(json.error || 'Agent authentication failed');
 
-      // 2. Sign challenge message
-      const signature = await signMessageAsync({ message: chJson.message });
-
-      // 3. Verify and receive token
-      const vRes = await fetch(`${API}/api/auth/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          challengeId: chJson.challengeId,
-          signature,
-          wallet: address,
-        }),
-      });
-      const vJson = await vRes.json();
-      if (!vRes.ok) throw new Error(vJson.error || 'Verification failed');
-
-      const token = vJson.token;
-      const expiresAt = vJson.expiresAt ? new Date(vJson.expiresAt).getTime() : Date.now() + 7 * 24 * 60 * 60 * 1000;
+      const token = json.token;
+      const expiresAt = json.expiresAt
+        ? new Date(json.expiresAt).getTime()
+        : Date.now() + 7 * 24 * 60 * 60 * 1000;
       cache.set(cacheKey, { token, agentId, expiresAt });
       return token;
     } catch (e) {
@@ -79,7 +61,7 @@ export function useAgentToken(): UseAgentTokenResult {
     } finally {
       setBusy(false);
     }
-  }, [address, signMessageAsync]);
+  }, [address, authFetch]);
 
   return { getToken, busy, error };
 }

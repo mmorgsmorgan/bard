@@ -136,8 +136,12 @@ export interface Bounty {
   minReputation: number;
   assignedAgentId?: string;
   contributionId?: string;
-  status: 'open' | 'assigned' | 'submitted' | 'verified' | 'expired' | 'cancelled' | 'proposal_open' | 'proposal_selected';
+  status: 'open' | 'assigned' | 'submitted' | 'verified' | 'completed' | 'expired' | 'cancelled' | 'proposal_open' | 'proposal_selected';
   selectionMode: 'first_come' | 'proposal';
+  escrowStatus: 'none' | 'funding' | 'funded' | 'claimed' | 'submitted' | 'client_approved' | 'released' | 'refunding' | 'refunded' | 'disputed';
+  escrowBudgetUsdc: number;
+  escrowTxHash?: string;
+  refundTxHash?: string;
   selectedProposalId?: string;
   proposalDeadline?: string;
   createdAt: string;
@@ -561,21 +565,52 @@ export async function fetchContributionWithEndorsements(id: string): Promise<{
 // ══════════════════════════════════════════════════════
 
 export async function endorseContribution(contributionId: string, data: {
-  endorserWallet: string;
-  endorserType?: string;
   comment?: string;
+  endorserWallet?: string;
+  endorserType?: string;
   signature?: string;
-}): Promise<{ success: boolean; endorsementCount: number; reputation: ReputationData | null }> {
+}, token?: string): Promise<{
+  success: boolean;
+  endorsementCount: number;
+  agentApprovals: number;
+  status?: Contribution['status'];
+  reputation: ReputationData | null;
+  error?: string;
+}> {
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
     const res = await fetch(`${API}/api/contributions/${contributionId}/endorse`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(data),
     });
     const json = await res.json();
-    if (!res.ok) return { success: false, endorsementCount: 0, reputation: null };
-    return { success: true, endorsementCount: json.endorsementCount || 0, reputation: json.reputation || null };
-  } catch { return { success: false, endorsementCount: 0, reputation: null }; }
+    if (!res.ok) {
+      return {
+        success: false,
+        endorsementCount: 0,
+        agentApprovals: 0,
+        reputation: null,
+        error: json.error || 'Endorsement failed',
+      };
+    }
+    return {
+      success: true,
+      endorsementCount: json.endorsementCount || 0,
+      agentApprovals: json.agentApprovals || 0,
+      status: json.status,
+      reputation: json.reputation || null,
+    };
+  } catch (cause) {
+    return {
+      success: false,
+      endorsementCount: 0,
+      agentApprovals: 0,
+      reputation: null,
+      error: cause instanceof Error ? cause.message : 'Endorsement failed',
+    };
+  }
 }
 
 export async function fetchEndorsementsByWallet(wallet: string): Promise<Endorsement[]> {
@@ -604,6 +639,10 @@ function bountyFromRow(row: Record<string, unknown>): Bounty {
     contributionId: (row.contribution_id || row.contributionId) as string | undefined,
     status: row.status as Bounty['status'],
     selectionMode: ((row.selection_mode || row.selectionMode) as Bounty['selectionMode']) || 'first_come',
+    escrowStatus: ((row.escrow_status || row.escrowStatus) as Bounty['escrowStatus']) || 'none',
+    escrowBudgetUsdc: Number(row.escrow_budget_usdc || row.escrowBudgetUsdc || 0),
+    escrowTxHash: (row.escrow_tx_hash || row.escrowTxHash) as string | undefined,
+    refundTxHash: (row.refund_tx_hash || row.refundTxHash) as string | undefined,
     selectedProposalId: (row.selected_proposal_id || row.selectedProposalId) as string | undefined,
     proposalDeadline: (row.proposal_deadline || row.proposalDeadline) as string | undefined,
     createdAt: (row.created_at || row.createdAt) as string,
@@ -695,6 +734,60 @@ export async function createBounty(data: {
   } catch (e) { console.error('createBounty error:', e); return null; }
 }
 
+type AuthFetch = (path: string, init?: RequestInit) => Promise<Response>;
+
+async function reconcileHumanBountyFunding(
+  authFetch: AuthFetch,
+  bountyId: string,
+  txHash: string
+): Promise<{ bounty: Bounty | null; error?: string }> {
+  try {
+    const res = await authFetch(`/api/human/bounties/${bountyId}/fund/reconcile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ txHash }),
+    });
+    const json = await res.json();
+    if (!res.ok) return { bounty: null, error: json.error || 'Funding reconciliation failed' };
+    return { bounty: json.bounty ? bountyFromRow(json.bounty) : null };
+  } catch (error) {
+    return { bounty: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function createHumanBounty(
+  authFetch: AuthFetch,
+  data: Omit<Parameters<typeof createBounty>[0], 'creatorWallet'>
+): Promise<{ bounty: Bounty | null; txHash?: string; error?: string }> {
+  try {
+    const res = await authFetch('/api/human/bounties', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      if (json.txHash && json.bountyId) {
+        const reconciled = await reconcileHumanBountyFunding(authFetch, json.bountyId, json.txHash);
+        if (reconciled.bounty) {
+          return { bounty: reconciled.bounty, txHash: json.txHash };
+        }
+      }
+      return {
+        bounty: null,
+        txHash: json.txHash || undefined,
+        error: json.error || 'Bounty creation failed',
+      };
+    }
+    return {
+      bounty: json.bounty ? bountyFromRow(json.bounty) : null,
+      txHash: json.txHash || undefined,
+    };
+  } catch (error) {
+    return { bounty: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function acceptBounty(bountyId: string, agentId: string): Promise<Bounty | null> {
   try {
     const res = await fetch(`${API}/api/bounties/${bountyId}/accept`, {
@@ -705,6 +798,27 @@ export async function acceptBounty(bountyId: string, agentId: string): Promise<B
     const json = await res.json();
     return json.bounty ? bountyFromRow(json.bounty) : null;
   } catch { return null; }
+}
+
+export async function claimFundedBounty(
+  bountyId: string,
+  token: string
+): Promise<{ bounty: Bounty | null; error?: string }> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/claim`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    });
+    const json = await res.json();
+    if (!res.ok) return { bounty: null, error: json.error || 'Bounty claim failed' };
+    return { bounty: json.bounty ? bountyFromRow(json.bounty) : null };
+  } catch (error) {
+    return { bounty: null, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function submitBounty(bountyId: string, contributionId: string): Promise<Bounty | null> {
@@ -728,6 +842,38 @@ export async function cancelBounty(bountyId: string, creatorWallet: string): Pro
     });
     return res.ok;
   } catch { return false; }
+}
+
+export async function cancelHumanBounty(
+  authFetch: AuthFetch,
+  bountyId: string,
+  txHash?: string
+): Promise<{ ok: boolean; refunded?: boolean; txHash?: string; error?: string }> {
+  try {
+    const res = await authFetch(`/api/human/bounties/${bountyId}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(txHash ? { txHash } : {}),
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      if (!txHash && json.recoverable && json.txHash) {
+        return cancelHumanBounty(authFetch, bountyId, json.txHash);
+      }
+      return {
+        ok: false,
+        txHash: json.txHash || txHash,
+        error: json.error || 'Bounty cancellation failed',
+      };
+    }
+    return {
+      ok: true,
+      refunded: Boolean(json.refunded),
+      txHash: json.txHash || undefined,
+    };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 // ══════════════════════════════════════════════════════
@@ -815,6 +961,59 @@ export async function acceptBountyProposal(
   } catch (e) { return { bounty: null, error: String(e) }; }
 }
 
+export async function acceptHumanBountyProposal(
+  authFetch: AuthFetch,
+  bountyId: string,
+  proposalId: string
+): Promise<{ bounty: Bounty | null; error?: string }> {
+  try {
+    const res = await authFetch(
+      `/api/human/bounties/${bountyId}/proposals/${proposalId}/accept`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+    const json = await res.json();
+    if (!res.ok) return { bounty: null, error: json.error || 'Proposal acceptance failed' };
+    return { bounty: json.bounty ? bountyFromRow(json.bounty) : null };
+  } catch (error) {
+    return { bounty: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function fundHumanBounty(
+  authFetch: AuthFetch,
+  bountyId: string
+): Promise<{ bounty: Bounty | null; txHash?: string; error?: string }> {
+  try {
+    const res = await authFetch(`/api/human/bounties/${bountyId}/fund`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      if (json.txHash) {
+        const reconciled = await reconcileHumanBountyFunding(authFetch, bountyId, json.txHash);
+        if (reconciled.bounty) {
+          return { bounty: reconciled.bounty, txHash: json.txHash };
+        }
+      }
+      return {
+        bounty: null,
+        txHash: json.txHash || undefined,
+        error: json.error || 'Bounty funding failed',
+      };
+    }
+    return {
+      bounty: json.bounty ? bountyFromRow(json.bounty) : null,
+      txHash: json.txHash || undefined,
+    };
+  } catch (error) {
+    return { bounty: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function rejectBountyProposal(
   bountyId: string,
   proposalId: string,
@@ -829,6 +1028,29 @@ export async function rejectBountyProposal(
     });
     return res.ok;
   } catch { return false; }
+}
+
+export async function rejectHumanBountyProposal(
+  authFetch: AuthFetch,
+  bountyId: string,
+  proposalId: string,
+  reason?: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await authFetch(
+      `/api/human/bounties/${bountyId}/proposals/${proposalId}/reject`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      }
+    );
+    const json = await res.json();
+    if (!res.ok) return { ok: false, error: json.error || 'Proposal rejection failed' };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export async function fetchBountyMessages(
@@ -985,23 +1207,40 @@ export interface VerificationStats {
 
 export async function agentVerifyContribution(
   contributionId: string,
-  data: { verifierAgentId: string; result: string; reasoning?: string; signature: string }
-): Promise<{ success: boolean; approvals: number; rejections: number; autoAction?: string }> {
+  data: { verifierAgentId?: string; result: string; reasoning?: string; signature?: string },
+  token?: string,
+): Promise<{ success: boolean; approvals: number; rejections: number; autoAction?: string; error?: string }> {
   try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers.Authorization = `Bearer ${token}`;
     const res = await fetch(`${API}/api/contributions/${contributionId}/agent-verify`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(data),
     });
     const json = await res.json();
-    if (!res.ok) return { success: false, approvals: 0, rejections: 0 };
+    if (!res.ok) {
+      return {
+        success: false,
+        approvals: 0,
+        rejections: 0,
+        error: json.error || 'Agent verification failed',
+      };
+    }
     return {
       success: true,
       approvals: json.approvals || 0,
       rejections: json.rejections || 0,
-      autoAction: json.autoAction,
+      autoAction: json.verification?.autoAction || json.autoAction,
     };
-  } catch { return { success: false, approvals: 0, rejections: 0 }; }
+  } catch (cause) {
+    return {
+      success: false,
+      approvals: 0,
+      rejections: 0,
+      error: cause instanceof Error ? cause.message : 'Agent verification failed',
+    };
+  }
 }
 
 export async function fetchVerificationStats(agentId: string): Promise<VerificationStats | null> {

@@ -170,6 +170,31 @@ export const TOOLS = [
     },
   },
   {
+    name: 'bard_fund_bounty',
+    description: 'Fund a proposal-selected agent bounty or reconcile a previously broadcast funding transaction. Agent-created first-come bounties are funded automatically at creation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string', description: 'Bounty ID to fund' },
+        budgetUsdc: { type: 'number', description: 'Exact bounty amount; optional when the server already knows it' },
+        txHash: { type: 'string', description: 'Optional confirmed USDC transfer hash for reconciliation' },
+      },
+      required: ['bountyId'],
+    },
+  },
+  {
+    name: 'bard_cancel_bounty',
+    description: 'Cancel your own bounty before an agent starts work. A funded, unclaimed first-come bounty is refunded to the wallet that funded it. Pass txHash only to reconcile a previously broadcast refund.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string', description: 'Bounty ID to cancel' },
+        txHash: { type: 'string', description: 'Optional refund transaction hash returned by a recoverable prior cancellation attempt' },
+      },
+      required: ['bountyId'],
+    },
+  },
+  {
     name: 'bard_accept_bounty',
     description: 'Accept an open bounty. Your agent must meet the minimum reputation requirement.',
     inputSchema: {
@@ -761,13 +786,13 @@ async function handleTool(name, args, token) {
       case 'bard_accept_bounty': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
-        const res = await apiFetch(`/api/bounties/${args.bountyId}/accept`, {
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/claim`, {
           method: 'POST',
-          body: JSON.stringify({ agentId: auth.agentId }),
+          body: JSON.stringify({}),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
-        return { bounty: data.bounty, message: 'Bounty accepted! Submit your work when complete.' };
+        return { bounty: data.bounty, message: 'Funded bounty claimed. Submit your work when complete.' };
       }
 
       case 'bard_list_agents': {
@@ -1277,8 +1302,71 @@ async function handleTool(name, args, token) {
         if (!res.ok) return { error: data.error };
         const nextStep = (args.selectionMode === 'proposal')
           ? 'Agents can now submit proposals via bard_submit_proposal. Use bard_list_bounty_proposals to see them.'
-          : 'Bounty live. Fund it via the /fund endpoint (or marketplace UI) so agents can claim it.';
-        return { success: true, bounty: data.bounty, nextStep };
+          : 'Bounty funded automatically and live. Agents can claim it with bard_claim_bounty.';
+        return { success: true, funded: Boolean(data.funded), txHash: data.txHash, bounty: data.bounty, nextStep };
+      }
+
+      case 'bard_fund_bounty': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const body = {};
+        if (args.budgetUsdc !== undefined) body.budgetUsdc = args.budgetUsdc;
+        if (args.txHash) body.txHash = args.txHash;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/fund`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) {
+          return {
+            error: data.error,
+            txHash: data.txHash,
+            onchainJobId: data.onchainJobId,
+            recoverable: data.recoverable,
+            hint: data.recoverable
+              ? 'Retry bard_fund_bounty with the returned txHash after the transaction confirms.'
+              : undefined,
+          };
+        }
+        return {
+          success: true,
+          bounty: data.bounty,
+          txHash: data.txHash,
+          escrowMode: data.escrow_mode,
+          onchainJobId: data.onchain_job_id,
+          message: 'Bounty funded and the selected agent can start work.',
+        };
+      }
+
+      case 'bard_cancel_bounty': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/cancel`, {
+          method: 'POST',
+          body: JSON.stringify(args.txHash ? { txHash: args.txHash } : {}),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) {
+          return {
+            error: data.error,
+            txHash: data.txHash,
+            recoverable: Boolean(data.recoverable),
+            hint: data.recoverable && data.txHash
+              ? 'Retry bard_cancel_bounty with this txHash to reconcile the refund. Do not start a new transfer.'
+              : undefined,
+          };
+        }
+        return {
+          success: true,
+          refunded: Boolean(data.refunded),
+          reconciled: Boolean(data.reconciled),
+          refundWallet: data.refundWallet,
+          txHash: data.txHash,
+          bounty: data.bounty,
+          message: data.refunded
+            ? 'Bounty cancelled and the funding wallet was refunded.'
+            : 'Bounty cancelled before work started.',
+        };
       }
 
       case 'bard_submit_proposal': {
@@ -1350,15 +1438,37 @@ async function handleTool(name, args, token) {
         if (auth.error) return auth;
         const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals/${args.proposalId}/accept`, {
           method: 'POST',
-          body: JSON.stringify({ callerWallet: auth.me?.wallet }),
+          body: JSON.stringify({}),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
+        const fundRes = await apiFetch(`/api/bounties/${args.bountyId}/fund`, {
+          method: 'POST',
+          body: JSON.stringify({ budgetUsdc: Number(data.bounty?.amount_usdc) }),
+        }, token);
+        const fundData = await fundRes.json();
+        if (!fundRes.ok) {
+          return {
+            success: false,
+            selected: true,
+            bounty: data.bounty,
+            acceptedProposalId: data.acceptedProposalId,
+            error: fundData.error || 'Proposal selected but funding failed',
+            txHash: fundData.txHash,
+            onchainJobId: fundData.onchainJobId,
+            recoverable: fundData.recoverable,
+            retryTool: 'bard_fund_bounty',
+          };
+        }
         return {
           success: true,
-          bounty: data.bounty,
+          funded: true,
+          bounty: fundData.bounty,
+          txHash: fundData.txHash,
+          escrowMode: fundData.escrow_mode,
+          onchainJobId: fundData.onchain_job_id,
           rejectedProposalCount: data.rejectedProposalCount,
-          message: `Proposal accepted at ${data.bounty?.amount_usdc} USDC. Now fund the bounty for that exact amount so the agent can start work.`,
+          message: `Proposal accepted and funded at ${fundData.bounty?.amount_usdc} USDC. The selected agent can start work.`,
         };
       }
 
@@ -1367,7 +1477,7 @@ async function handleTool(name, args, token) {
         if (auth.error) return auth;
         const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals/${args.proposalId}/reject`, {
           method: 'POST',
-          body: JSON.stringify({ callerWallet: auth.me?.wallet, reason: args.reason || '' }),
+          body: JSON.stringify({ reason: args.reason || '' }),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };

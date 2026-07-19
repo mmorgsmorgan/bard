@@ -16,11 +16,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { useAccount, useReadContract } from 'wagmi';
-import { CONTRACTS } from '@/lib/config';
-import { BARD_PROFILE_ABI } from '@/lib/abi';
-import { fetchProfileByWallet, getProfileByWallet } from '@/lib/store';
+import { useBardAccount } from './BardAccountProvider';
+import { useHasProfile } from '@/lib/useHasProfile';
 
 export function EnterButton({
   children,
@@ -32,71 +29,41 @@ export function EnterButton({
   style?: React.CSSProperties;
 }) {
   const router = useRouter();
-  const { address, isConnected } = useAccount();
+  const { isConnected, status, login } = useBardAccount();
+  const { hasProfile, resolved } = useHasProfile();
   // Set when the user clicks while disconnected — we then route once connected.
   const [awaitingConnect, setAwaitingConnect] = useState(false);
-  const [backendHasProfile, setBackendHasProfile] = useState<boolean | null>(null);
   const routedRef = useRef(false);
 
-  const { data: onChainProfile, isLoading: chainLoading } = useReadContract({
-    address: CONTRACTS.BARD_PROFILE,
-    abi: BARD_PROFILE_ABI,
-    functionName: 'getProfile',
-    args: address ? [address] : undefined,
-    query: { enabled: !!address && isConnected },
-  });
-  const hasOnChain =
-    onChainProfile && Array.isArray(onChainProfile) && onChainProfile[5] === true;
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!isConnected || !address) {
-      setBackendHasProfile(null);
-      return;
-    }
-    fetchProfileByWallet(address)
-      .then((p) => !cancelled && setBackendHasProfile(!!p))
-      .catch(() => !cancelled && setBackendHasProfile(!!getProfileByWallet(address)));
-    return () => {
-      cancelled = true;
-    };
-  }, [isConnected, address]);
-
   const branch = () => {
-    const hasProfile = hasOnChain || backendHasProfile === true;
     router.push(hasProfile ? '/explore' : '/profile');
   };
 
   // After a click-to-connect, route as soon as the profile signals resolve.
   useEffect(() => {
     if (!awaitingConnect || !isConnected || routedRef.current) return;
-    // Wait for both checks to settle so we branch correctly.
-    if (chainLoading || backendHasProfile === null) return;
+    if (!resolved) return;
     routedRef.current = true;
     branch();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [awaitingConnect, isConnected, chainLoading, backendHasProfile]);
+  }, [awaitingConnect, isConnected, resolved, hasProfile]);
 
   return (
-    <ConnectButton.Custom>
-      {({ openConnectModal, mounted }) => (
-        <button
-          className={className}
-          style={style}
-          disabled={!mounted}
-          onClick={() => {
-            if (!isConnected) {
-              routedRef.current = false;
-              setAwaitingConnect(true);
-              openConnectModal();
-            } else {
-              branch();
-            }
-          }}
-        >
-          {children}
-        </button>
-      )}
-    </ConnectButton.Custom>
+    <button
+      className={className}
+      style={style}
+      disabled={status === 'connecting'}
+      onClick={() => {
+        if (!isConnected) {
+          routedRef.current = false;
+          setAwaitingConnect(true);
+          login();
+        } else {
+          branch();
+        }
+      }}
+    >
+      {children}
+    </button>
   );
 }
