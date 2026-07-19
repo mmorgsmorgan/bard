@@ -3,21 +3,38 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { GitHubIcon, DiscordIcon, FarcasterIcon, XIcon } from '@/components/SocialIcons';
-import { useAccount, useReadContract, useBalance } from 'wagmi';
+import { useReadContract } from 'wagmi';
 import { formatUnits } from 'viem';
 import { CONTRACTS } from '@/lib/config';
 import { BARD_PROFILE_ABI } from '@/lib/abi';
 import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, fetchNotificationsByWallet } from '@/lib/store';
 import { PageHeader, Em } from '@/components/Editorial';
+import { useBardAccount } from '@/components/BardAccountProvider';
 import type { StoredProfile, StoredProof, PortfolioItem, Notification } from '@/lib/store';
 
+type ManagedWalletBalance = {
+  address: string;
+  balanceUsdc: string;
+  nativeGasBalanceWei: string;
+  explorer: string;
+};
+
 export default function DashboardPage() {
-  const { address, isConnected, status } = useAccount();
+  const { account, address, isConnected, status, login, authFetch } = useBardAccount();
   const [profile, setProfile] = useState<StoredProfile | null>(null);
   const [proofs, setProofs] = useState<StoredProof[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [walletBalance, setWalletBalance] = useState<ManagedWalletBalance | null>(null);
+  const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [showKeyExport, setShowKeyExport] = useState(false);
+  const [exportStage, setExportStage] = useState<'request' | 'code' | 'revealed'>('request');
+  const [exportCode, setExportCode] = useState('');
+  const [privateKey, setPrivateKey] = useState('');
+  const [exportError, setExportError] = useState('');
+  const [exportBusy, setExportBusy] = useState(false);
+  const [keyCopied, setKeyCopied] = useState(false);
 
   // On-chain data
   const { data: onChainProfile } = useReadContract({
@@ -28,38 +45,159 @@ export default function DashboardPage() {
     query: { enabled: !!address },
   });
 
-  const { data: usdcBalance } = useBalance({
-    address,
-    token: CONTRACTS.USDC,
-  });
-
-  const { data: nativeBalance } = useBalance({ address });
-
   const hasOnChain = onChainProfile && Array.isArray(onChainProfile) &&
     onChainProfile[0] !== '0x0000000000000000000000000000000000000000';
 
   useEffect(() => {
-    if (!address) return;
+    if (!address || !isConnected) {
+      setLoading(false);
+      setWalletBalance(null);
+      return;
+    }
+    let cancelled = false;
     setLoading(true);
+    setLoadError('');
     Promise.all([
       fetchProfileByWallet(address),
       fetchProofsByWallet(address),
       fetchPortfolioByWallet(address),
       fetchNotificationsByWallet(address),
-    ]).then(([p, pr, po, n]) => {
-      setProfile(p);
-      setProofs(pr);
-      setPortfolio(po);
-      setNotifications(n);
-      setLoading(false);
-    });
+      authFetch('/api/human/wallet').then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not load managed wallet');
+        return data as ManagedWalletBalance;
+      }),
+    ])
+      .then(([p, pr, po, n, wallet]) => {
+        if (cancelled) return;
+        setProfile(p);
+        setProofs(pr);
+        setPortfolio(po);
+        setNotifications(n);
+        setWalletBalance(wallet);
+      })
+      .catch((cause) => {
+        if (!cancelled) setLoadError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [address, isConnected, authFetch]);
+
+  useEffect(() => {
+    if (!showKeyExport) return;
+    const root = document.documentElement;
+    const body = document.body;
+    const rootOverflow = root.style.overflow;
+    const bodyOverflow = body.style.overflow;
+    root.style.overflow = 'hidden';
+    body.style.overflow = 'hidden';
+    return () => {
+      root.style.overflow = rootOverflow;
+      body.style.overflow = bodyOverflow;
+    };
+  }, [showKeyExport]);
+
+  useEffect(() => {
+    setShowKeyExport(false);
+    setExportStage('request');
+    setExportCode('');
+    setPrivateKey('');
+    setExportError('');
+    setExportBusy(false);
+    setKeyCopied(false);
   }, [address]);
+
+  function closeKeyExport() {
+    setShowKeyExport(false);
+    setExportStage('request');
+    setExportCode('');
+    setPrivateKey('');
+    setExportError('');
+    setExportBusy(false);
+    setKeyCopied(false);
+  }
+
+  async function requestKeyExport() {
+    setExportBusy(true);
+    setExportError('');
+    try {
+      const response = await authFetch('/api/human/wallet/export-key/request', {
+        method: 'POST',
+      });
+      const data = await response.json() as { sent?: boolean; devCode?: string; error?: string };
+      if (!response.ok || !data.sent) {
+        throw new Error(data.error || 'Could not send security code');
+      }
+      setExportCode(data.devCode || '');
+      setExportStage('code');
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : 'Could not send security code');
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function verifyAndExportKey() {
+    if (!/^\d{6}$/.test(exportCode)) {
+      setExportError('Enter the 6-digit security code');
+      return;
+    }
+    setExportBusy(true);
+    setExportError('');
+    try {
+      const verifyResponse = await authFetch('/api/human/wallet/export-key/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: exportCode }),
+      });
+      const verifyData = await verifyResponse.json() as {
+        elevatedToken?: string;
+        error?: string;
+      };
+      if (!verifyResponse.ok || !verifyData.elevatedToken) {
+        throw new Error(verifyData.error || 'Security-code verification failed');
+      }
+
+      const exportResponse = await authFetch('/api/human/wallet/export-key', {
+        method: 'POST',
+        headers: { 'X-Elevated-Token': verifyData.elevatedToken },
+      });
+      const exportData = await exportResponse.json() as {
+        privateKey?: string;
+        error?: string;
+      };
+      if (!exportResponse.ok || !exportData.privateKey) {
+        throw new Error(exportData.error || 'Private-key export failed');
+      }
+      setPrivateKey(exportData.privateKey);
+      setExportStage('revealed');
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : 'Private-key export failed');
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function copyPrivateKey() {
+    if (!privateKey) return;
+    try {
+      await navigator.clipboard.writeText(privateKey);
+      setKeyCopied(true);
+      window.setTimeout(() => setKeyCopied(false), 2000);
+    } catch {
+      setExportError('Clipboard access was blocked. Select the key and copy it manually.');
+    }
+  }
 
   const validatedProofs = proofs.filter((p) => p.status === 'validated').length;
   const trustScore = Math.min(100, validatedProofs * 15 + proofs.length * 5 + portfolio.length * 3);
   const unread = notifications.filter((n) => !n.read).length;
 
-  if (status === 'connecting' || status === 'reconnecting') {
+  if (status === 'connecting') {
     return <div className="min-h-[80vh]" />;
   }
 
@@ -68,8 +206,9 @@ export default function DashboardPage() {
       <div className="max-w-4xl mx-auto px-6 py-24 text-center">
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-16 animate-fade-in">
           <div className="font-mono text-2xl text-surface-600 mb-6">⬡</div>
-          <h1 className="text-xl font-bold text-white mb-3">Connect Wallet</h1>
-          <p className="text-surface-400 text-sm">Connect your wallet to view your dashboard.</p>
+          <h1 className="text-xl font-bold text-white mb-3">Sign in to BARD</h1>
+          <p className="text-surface-400 text-sm mb-5">Access your profile and BARD-managed wallet.</p>
+          <button onClick={login} className="btn-primary text-xs px-6 py-3">Continue with email or wallet</button>
         </div>
       </div>
     );
@@ -90,6 +229,12 @@ export default function DashboardPage() {
         title={profile ? <>Welcome, <Em>{profile.displayName || profile.username}</Em></> : <>Your <Em>dashboard</Em></>}
         lede="Overview of your BARD profile, contributions, and trust metrics."
       />
+
+      {loadError && (
+        <div className="border border-red-900/30 bg-red-900/10 p-4 mb-6 font-mono text-xs text-red-400">
+          {loadError}
+        </div>
+      )}
 
       {/* Status Banner */}
       {!hasOnChain && !profile && (
@@ -127,15 +272,30 @@ export default function DashboardPage() {
             <div>
               <span className="font-mono text-[10px] text-surface-500">USDC</span>
               <span className="font-mono text-sm text-white ml-2">
-                {usdcBalance ? Number(formatUnits(usdcBalance.value, usdcBalance.decimals)).toFixed(2) : '0.00'}
+                {Number(walletBalance?.balanceUsdc || 0).toFixed(2)}
               </span>
             </div>
             <div>
-              <span className="font-mono text-[10px] text-surface-500">ETH</span>
+              <span className="font-mono text-[10px] text-surface-500">GAS USDC</span>
               <span className="font-mono text-sm text-white ml-2">
-                {nativeBalance ? Number(formatUnits(nativeBalance.value, 18)).toFixed(4) : '0.0000'}
+                {walletBalance ? Number(formatUnits(BigInt(walletBalance.nativeGasBalanceWei), 6)).toFixed(4) : '0.0000'}
               </span>
             </div>
+          </div>
+          <div className="mt-4 pt-4 border-t border-[rgba(255,255,255,0.04)]">
+            {account?.wallet.canExportPrivateKey ? (
+              <button
+                type="button"
+                onClick={() => setShowKeyExport(true)}
+                className="btn-secondary text-xs px-4 py-2"
+              >
+                Export private key
+              </button>
+            ) : (
+              <p className="font-mono text-[10px] text-surface-600">
+                Private-key export requires a verified email and a local BARD wallet.
+              </p>
+            )}
           </div>
         </div>
         <div className="bg-[#0c0c0c] border border-[rgba(255,255,255,0.04)] p-5">
@@ -202,6 +362,112 @@ export default function DashboardPage() {
           </div>
         )}
       </div>
+
+      {showKeyExport && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center p-4"
+          role="presentation"
+          onMouseDown={closeKeyExport}
+        >
+          <div className="absolute inset-0 bg-black/75" aria-hidden />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="key-export-title"
+            data-lenis-prevent
+            className="relative z-10 w-full max-w-lg max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain border p-6 sm:p-8"
+            style={{ background: 'var(--bg-card)', borderColor: 'var(--rule)', boxShadow: 'var(--shadow)' }}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-6 mb-6">
+              <div>
+                <h2 id="key-export-title" className="text-xl font-semibold text-white">
+                  Export private key
+                </h2>
+                <p className="font-mono text-[10px] text-surface-500 mt-1">
+                  BARD wallet {address?.slice(0, 8)}...{address?.slice(-6)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeKeyExport}
+                aria-label="Close private-key export"
+                className="w-8 h-8 border border-[rgba(255,255,255,0.08)] text-surface-500 hover:text-white"
+              >
+                ×
+              </button>
+            </div>
+
+            {exportStage === 'request' && (
+              <>
+                <div className="border border-red-900/30 bg-red-900/10 p-4 mb-6">
+                  <p className="text-sm text-red-300 leading-relaxed">
+                    Anyone with this key can control the wallet and move its funds. BARD cannot revoke or recover an exported key.
+                  </p>
+                </div>
+                <p className="text-sm text-surface-400 mb-6">
+                  A one-time security code will be sent to <span className="font-mono text-surface-200">{account?.email}</span>.
+                </p>
+                {exportError && <p className="font-mono text-xs text-red-400 mb-4">{exportError}</p>}
+                <div className="flex gap-3">
+                  <button type="button" onClick={closeKeyExport} className="btn-secondary flex-1 text-xs">Cancel</button>
+                  <button type="button" onClick={requestKeyExport} disabled={exportBusy} className="btn-primary flex-1 text-xs">
+                    {exportBusy ? 'Sending...' : 'Send security code'}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {exportStage === 'code' && (
+              <>
+                <p className="text-sm text-surface-400 mb-5">
+                  Enter the six-digit code sent to <span className="font-mono text-surface-200">{account?.email}</span>.
+                </p>
+                <input
+                  value={exportCode}
+                  onChange={(event) => setExportCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="000000"
+                  aria-label="Security code"
+                  className="input-field font-mono text-center text-xl mb-4"
+                />
+                {exportError && <p className="font-mono text-xs text-red-400 mb-4">{exportError}</p>}
+                <div className="flex gap-3">
+                  <button type="button" onClick={closeKeyExport} className="btn-secondary flex-1 text-xs">Cancel</button>
+                  <button
+                    type="button"
+                    onClick={verifyAndExportKey}
+                    disabled={exportBusy || exportCode.length !== 6}
+                    className="btn-primary flex-1 text-xs"
+                  >
+                    {exportBusy ? 'Verifying...' : 'Verify and reveal'}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {exportStage === 'revealed' && (
+              <>
+                <div className="border border-red-900/30 bg-red-900/10 p-4 mb-5">
+                  <p className="text-sm text-red-300">
+                    Store this key securely. Close this dialog when finished; BARD will not show it again without a new email verification.
+                  </p>
+                </div>
+                <div className="border border-[rgba(255,255,255,0.08)] bg-[#050505] p-4 mb-5">
+                  <div className="font-mono text-xs text-white break-all select-all">{privateKey}</div>
+                </div>
+                <div className="flex gap-3">
+                  <button type="button" onClick={copyPrivateKey} className="btn-secondary flex-1 text-xs">
+                    {keyCopied ? 'Copied' : 'Copy key'}
+                  </button>
+                  <button type="button" onClick={closeKeyExport} className="btn-primary flex-1 text-xs">Done</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

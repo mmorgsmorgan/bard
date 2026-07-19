@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useAccount } from 'wagmi';
+import { useBardAccount } from '@/components/BardAccountProvider';
 import { PageHeader, Em } from '@/components/Editorial';
 import { Reveal } from '@/components/Reveal';
 
@@ -52,7 +52,7 @@ const CATEGORIES = [
 ];
 
 export default function MarketplacePage() {
-  const { address } = useAccount();
+  const { address } = useBardAccount();
   const [skills, setSkills] = useState<Skill[]>([]);
   const [bounties, setBounties] = useState<OpenBounty[]>([]);
   const [category, setCategory] = useState('all');

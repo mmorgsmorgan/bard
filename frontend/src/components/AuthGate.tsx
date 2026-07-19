@@ -1,10 +1,10 @@
 'use client';
 
-import { useAccount, useReadContract } from 'wagmi';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { useReadContract } from 'wagmi';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { BardLogo } from './BardLogo';
+import { useBardAccount } from './BardAccountProvider';
 import { CONTRACTS } from '@/lib/config';
 import { BARD_PROFILE_ABI } from '@/lib/abi';
 import { fetchProfileByWallet, getProfileByWallet } from '@/lib/store';
@@ -32,7 +32,7 @@ function isFullyPublic(pathname: string): boolean {
 }
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
-  const { isConnected, address } = useAccount();
+  const { isConnected, address, status, login, error } = useBardAccount();
   const pathname = usePathname();
   const router = useRouter();
   const [profileResolved, setProfileResolved] = useState(false);
@@ -109,19 +109,16 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             Connect to continue
           </h2>
           <p className="text-sm mb-8" style={{ color: 'var(--muted)' }}>
-            Connect your wallet to access BARD. New here? You&apos;ll set up your profile next.
+            Sign in to access your BARD-managed wallet. New here? Your wallet is created automatically.
           </p>
-          <ConnectButton.Custom>
-            {({ openConnectModal, mounted }) => (
-              <button
-                onClick={openConnectModal}
-                disabled={!mounted}
-                className="btn-primary w-full text-xs py-3.5"
-              >
-                Connect Wallet
-              </button>
-            )}
-          </ConnectButton.Custom>
+          {error && <p className="text-xs mb-4" style={{ color: 'var(--danger)' }}>{error}</p>}
+          <button
+            onClick={login}
+            disabled={status === 'connecting'}
+            className="btn-primary w-full text-xs py-3.5"
+          >
+            {status === 'connecting' ? 'Creating account...' : 'Continue with email or wallet'}
+          </button>
         </div>
       </div>
     );

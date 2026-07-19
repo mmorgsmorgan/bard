@@ -2,18 +2,19 @@
 
 import { useParams } from 'next/navigation';
 import { useState, useEffect } from 'react';
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { useReadContract } from 'wagmi';
 import { CONTRACTS, VOUCH_TIERS } from '@/lib/config';
-import { BARD_PROFILE_ABI, BARD_VOUCH_ABI, BARD_PFP_ABI, BARD_AGENT_ABI, ERC20_ABI } from '@/lib/abi';
-import { fetchProfileByUsername, fetchProofsByWallet, fetchPortfolioByWallet, fetchAgentsByOwner, addNotification, getProfileByWallet, type StoredProfile, type StoredProof, type PortfolioItem, type Agent } from '@/lib/store';
+import { BARD_PROFILE_ABI, BARD_VOUCH_ABI, BARD_AGENT_ABI } from '@/lib/abi';
+import { fetchProfileByUsername, fetchProofsByWallet, fetchPortfolioByWallet, fetchAgentsByOwner, type StoredProfile, type StoredProof, type PortfolioItem, type Agent } from '@/lib/store';
 import Link from 'next/link';
 import { GitHubIcon, DiscordIcon, FarcasterIcon, XIcon, LinkedInIcon } from '@/components/SocialIcons';
 import { Headline } from '@/components/Editorial';
+import { useBardAccount } from '@/components/BardAccountProvider';
 
 export default function PublicProfilePage() {
   const params = useParams();
   const username = params.username as string;
-  const { address: viewerAddress, isConnected } = useAccount();
+  const { address: viewerAddress, isConnected, status, login, authFetch } = useBardAccount();
 
   const [localProfile, setLocalProfile] = useState<StoredProfile | null>(null);
   const [proofs, setProofs] = useState<StoredProof[]>([]);
@@ -29,8 +30,9 @@ export default function PublicProfilePage() {
   const [vouchStatement, setVouchStatement] = useState('');
   const [vouchEcosystem, setVouchEcosystem] = useState('');
   const [vouchScore, setVouchScore] = useState('80');
-  const [vouchStep, setVouchStep] = useState<'form' | 'approving' | 'vouching' | 'done' | 'error'>('form');
+  const [vouchStep, setVouchStep] = useState<'form' | 'vouching' | 'done' | 'error'>('form');
   const [vouchError, setVouchError] = useState('');
+  const [vouchExplorer, setVouchExplorer] = useState('');
 
   const { data: onChainProfile, isError: profileReadError, isLoading: profileLoading } = useReadContract({
     address: CONTRACTS.BARD_PROFILE, abi: BARD_PROFILE_ABI, functionName: 'getProfileByUsername', args: [username],
@@ -50,23 +52,18 @@ export default function PublicProfilePage() {
 
   // Read vouch stats
   const profileContributorId = profileWalletForPFP ? BigInt(profileWalletForPFP) : undefined;
-  const { data: vouchCountData } = useReadContract({
+  const { data: vouchCountData, refetch: refetchVouchCount } = useReadContract({
     address: CONTRACTS.BARD_VOUCH, abi: BARD_VOUCH_ABI, functionName: 'getVouchCount',
     args: profileContributorId !== undefined ? [profileContributorId] : undefined,
     query: { enabled: profileContributorId !== undefined },
   });
-  const { data: totalStakedData } = useReadContract({
+  const { data: totalStakedData, refetch: refetchTotalStaked } = useReadContract({
     address: CONTRACTS.BARD_VOUCH, abi: BARD_VOUCH_ABI, functionName: 'totalStakedForContributor',
     args: profileContributorId !== undefined ? [profileContributorId] : undefined,
     query: { enabled: profileContributorId !== undefined },
   });
   const vouchCount = vouchCountData ? Number(vouchCountData) : 0;
   const totalStaked = totalStakedData ? Number(totalStakedData) / 1_000_000 : 0;
-
-  const { writeContract: writeApprove, data: approveTxHash } = useWriteContract();
-  const { writeContract: writeVouch, data: vouchTxHash } = useWriteContract();
-  const { isSuccess: approveConfirmed } = useWaitForTransactionReceipt({ hash: approveTxHash });
-  const { isSuccess: vouchConfirmed } = useWaitForTransactionReceipt({ hash: vouchTxHash });
 
   useEffect(() => {
     fetchProfileByUsername(username).then(p => {
@@ -98,52 +95,44 @@ export default function PublicProfilePage() {
     }
   }, [onChainProfile, localProfile]);
 
-  useEffect(() => {
-    if (approveConfirmed && vouchStep === 'approving') {
-      setVouchStep('vouching');
-      const contributorId = profileWallet ? BigInt(profileWallet) : BigInt(0);
-      writeVouch({
-        address: CONTRACTS.BARD_VOUCH, abi: BARD_VOUCH_ABI, functionName: 'vouch',
-        args: [contributorId, BigInt(Number(vouchAmount) * 1_000_000), vouchTier, vouchStatement, vouchEcosystem, '', BigInt(Number(vouchScore))],
-      }, { onError: (err: Error) => { setVouchStep('error'); setVouchError(err.message?.slice(0, 100) || 'Vouch failed'); } });
+  const handleVouch = async () => {
+    if (!isConnected || !profileWallet) return;
+    const amountNumber = Number(vouchAmount);
+    const scoreNumber = Number(vouchScore);
+    if (!Number.isFinite(amountNumber) || amountNumber < VOUCH_TIERS[vouchTier].minUSDC) {
+      setVouchStep('error');
+      setVouchError(`Tier minimum is ${VOUCH_TIERS[vouchTier].minUSDC} USDC`);
+      return;
     }
-  }, [approveConfirmed, vouchStep]);
-
-  useEffect(() => {
-    if (vouchConfirmed && vouchStep === 'vouching') {
+    if (!Number.isFinite(scoreNumber) || scoreNumber < 0 || scoreNumber > 100) {
+      setVouchStep('error');
+      setVouchError('Score must be between 0 and 100');
+      return;
+    }
+    setVouchStep('vouching');
+    setVouchError('');
+    try {
+      const response = await authFetch('/api/human/vouches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contributorWallet: profileWallet,
+          amount: vouchAmount,
+          tier: vouchTier,
+          statement: vouchStatement,
+          ecosystem: vouchEcosystem,
+          score: scoreNumber,
+        }),
+      });
+      const data = await response.json() as { explorer?: string; error?: string };
+      if (!response.ok) throw new Error(data.error || 'Vouch failed');
+      setVouchExplorer(data.explorer || '');
       setVouchStep('done');
-      const voucherProfile = viewerAddress ? getProfileByWallet(viewerAddress) : null;
-      const voucherName = voucherProfile?.username ? `@${voucherProfile.username}` : `${viewerAddress?.slice(0, 6)}...${viewerAddress?.slice(-4)}`;
-      if (profileWallet) {
-        addNotification({
-          wallet: profileWallet,
-          type: 'vouch',
-          title: 'New Vouch Received',
-          message: `${voucherName} vouched for you (${vouchAmount} USDC)`,
-          from: viewerAddress || '',
-          amount: vouchAmount,
-        });
-      }
-      if (viewerAddress) {
-        addNotification({
-          wallet: viewerAddress,
-          type: 'vouch',
-          title: 'Vouch Sent',
-          message: `You vouched for @${username} (${vouchAmount} USDC)`,
-          from: viewerAddress,
-          amount: vouchAmount,
-        });
-      }
+      await Promise.all([refetchVouchCount(), refetchTotalStaked()]);
+    } catch (cause) {
+      setVouchStep('error');
+      setVouchError(cause instanceof Error ? cause.message.slice(0, 180) : 'Vouch failed');
     }
-  }, [vouchConfirmed, vouchStep]);
-
-  const handleVouch = () => {
-    if (!isConnected) return;
-    setVouchStep('approving'); setVouchError('');
-    writeApprove({
-      address: CONTRACTS.USDC, abi: ERC20_ABI, functionName: 'approve',
-      args: [CONTRACTS.BARD_VOUCH, BigInt(Number(vouchAmount) * 1_000_000)],
-    }, { onError: (err: Error) => { setVouchStep('error'); setVouchError(err.message?.slice(0, 100) || 'Approval failed'); } });
   };
 
   const profileWallet = onChainProfile && !profileReadError
@@ -295,6 +284,14 @@ export default function PublicProfilePage() {
           <Link href={`/send?to=${username}`} className="btn-secondary flex-1 py-3.5 text-xs text-center">
             Send USDC
           </Link>
+        </div>
+      )}
+      {!isConnected && (
+        <div className="flex items-center justify-between gap-4 border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-px">
+          <span className="text-sm text-surface-400">Sign in to vouch or send USDC.</span>
+          <button onClick={login} disabled={status === 'connecting'} className="btn-primary shrink-0 text-xs px-5 py-2.5">
+            {status === 'connecting' ? 'Signing in...' : 'Sign in'}
+          </button>
         </div>
       )}
 
@@ -521,6 +518,11 @@ export default function PublicProfilePage() {
                 <div className="w-12 h-12 bg-[#ff8512] flex items-center justify-center mx-auto mb-6 text-[#050505] font-mono font-bold">&#10003;</div>
                 <h2 className="text-xl font-bold text-white mb-3">Vouch Confirmed</h2>
                 <p className="text-sm text-surface-400 mb-6">{vouchAmount} USDC vouch for {profileName} is live on Arc.</p>
+                {vouchExplorer && (
+                  <a href={vouchExplorer} target="_blank" rel="noreferrer" className="font-mono text-xs text-surface-500 hover:text-[#ff8512] underline mb-6 block">
+                    View transaction ↗
+                  </a>
+                )}
                 <button onClick={() => { setShowVouchModal(false); setVouchStep('form'); }} className="btn-primary text-xs">Close</button>
               </div>
             ) : (
@@ -563,8 +565,8 @@ export default function PublicProfilePage() {
 
                 <div className="flex gap-3 mt-8">
                   <button onClick={() => { setShowVouchModal(false); setVouchStep('form'); }} className="btn-secondary flex-1 text-xs">Cancel</button>
-                  <button onClick={handleVouch} disabled={!vouchStatement || !vouchEcosystem || vouchStep === 'approving' || vouchStep === 'vouching'} className="btn-primary flex-1 text-xs">
-                    {vouchStep === 'approving' ? 'Approve USDC...' : vouchStep === 'vouching' ? 'Vouching...' : `Vouch ${vouchAmount} USDC`}
+                  <button onClick={handleVouch} disabled={!vouchStatement || !vouchEcosystem || vouchStep === 'vouching'} className="btn-primary flex-1 text-xs">
+                    {vouchStep === 'vouching' ? 'Vouching...' : `Vouch ${vouchAmount} USDC`}
                   </button>
                 </div>
               </>

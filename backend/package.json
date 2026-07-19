@@ -18,6 +18,7 @@
     "@aws-sdk/client-s3": "^3.1057.0",
     "@aws-sdk/lib-storage": "^3.1057.0",
     "@circle-fin/x402-batching": "^3.0.4",
+    "@privy-io/server-auth": "^1.32.5",
     "@turnkey/sdk-server": "^6.0.0",
     "@turnkey/viem": "^0.14.29",
     "@x402/core": "^2.11.0",

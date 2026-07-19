@@ -82,6 +82,48 @@ export async function initSchema() {
       created_at TEXT DEFAULT (NOW()::text)
     )`,
 
+    // ── human accounts ──
+    // Privy proves identity only. BARD provisions and signs with its own
+    // encrypted managed wallet through wallet-provider.js.
+    `CREATE TABLE IF NOT EXISTS human_accounts (
+      id TEXT PRIMARY KEY,
+      privy_did TEXT UNIQUE NOT NULL,
+      email TEXT DEFAULT NULL,
+      email_verified_at TEXT DEFAULT NULL,
+      login_wallet TEXT DEFAULT NULL,
+      wallet_id TEXT UNIQUE DEFAULT NULL,
+      wallet_address TEXT UNIQUE DEFAULT NULL,
+      created_at TEXT DEFAULT (NOW()::text),
+      updated_at TEXT DEFAULT (NOW()::text)
+    )`,
+    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS email_verified_at TEXT DEFAULT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_human_accounts_wallet
+       ON human_accounts (LOWER(wallet_address))
+       WHERE wallet_address IS NOT NULL`,
+    `CREATE TABLE IF NOT EXISTS human_otp_codes (
+      id BIGSERIAL PRIMARY KEY,
+      human_id TEXT NOT NULL REFERENCES human_accounts(id),
+      code_hash TEXT NOT NULL,
+      purpose TEXT NOT NULL DEFAULT 'key_export',
+      attempts INTEGER DEFAULT 0,
+      consumed INTEGER DEFAULT 0,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_human_otp_active
+       ON human_otp_codes(human_id, purpose, consumed, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS human_security_events (
+      id TEXT PRIMARY KEY,
+      human_id TEXT NOT NULL REFERENCES human_accounts(id),
+      wallet_address TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      ip_address TEXT DEFAULT '',
+      user_agent TEXT DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_human_security_events
+       ON human_security_events(human_id, created_at DESC)`,
+
     // ── proofs ──
     // Note: file_url and submitted_by are included in initial schema so we no
     // longer need the runtime ALTER TABLE migrations that existed in the old code.
@@ -247,6 +289,10 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS escrow_status TEXT DEFAULT 'none'`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS escrow_budget_usdc DOUBLE PRECISION DEFAULT 0`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS escrow_tx_hash TEXT`,
+    // refund_tx_hash is recorded before the bounty leaves `refunding`. This
+    // prevents a successfully broadcast refund from being sent twice if a
+    // later database write or HTTP response fails.
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS refund_tx_hash TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS provider_agent_id TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS provider_wallet TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS deliverable_hash TEXT`,
@@ -274,6 +320,20 @@ export async function initSchema() {
     // onchain_job_id holds the ERC-8183 jobId (stored as text; it's a uint256). ──
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS escrow_mode TEXT DEFAULT 'custodial'`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS onchain_job_id TEXT`,
+    `CREATE TABLE IF NOT EXISTS bounty_funding_transactions (
+      tx_hash TEXT PRIMARY KEY,
+      bounty_id TEXT NOT NULL UNIQUE REFERENCES bounties(id) ON DELETE CASCADE,
+      funder_wallet TEXT NOT NULL,
+      amount_usdc DOUBLE PRECISION NOT NULL,
+      created_at TEXT DEFAULT (NOW()::text)
+    )`,
+    `CREATE TABLE IF NOT EXISTS bounty_refund_transactions (
+      tx_hash TEXT PRIMARY KEY,
+      bounty_id TEXT NOT NULL UNIQUE REFERENCES bounties(id) ON DELETE CASCADE,
+      recipient_wallet TEXT NOT NULL,
+      amount_usdc DOUBLE PRECISION NOT NULL,
+      created_at TEXT DEFAULT (NOW()::text)
+    )`,
 
     // ── Real-signature auditability: the address recovered from (or that
     // produced) the stored signature over the canonical message. ──
@@ -557,6 +617,44 @@ export async function initSchema() {
 // .run()-shaped queries return { changes, rowCount }.
 
 export const stmts = {
+  // ── Human accounts ──
+  getHumanAccountById: async (id) => one(
+    'SELECT * FROM human_accounts WHERE id = $1',
+    [id]
+  ),
+  getHumanAccountByPrivyDid: async (privyDid) => one(
+    'SELECT * FROM human_accounts WHERE privy_did = $1',
+    [privyDid]
+  ),
+  getHumanAccountByWallet: async (wallet) => one(
+    'SELECT * FROM human_accounts WHERE LOWER(wallet_address) = LOWER($1)',
+    [wallet]
+  ),
+  insertHumanAccount: async (p) => run(
+    `INSERT INTO human_accounts
+       (id, privy_did, email, email_verified_at, login_wallet, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $6)
+     ON CONFLICT (privy_did) DO UPDATE SET
+       email = COALESCE(EXCLUDED.email, human_accounts.email),
+       email_verified_at = COALESCE(EXCLUDED.email_verified_at, human_accounts.email_verified_at),
+       login_wallet = COALESCE(EXCLUDED.login_wallet, human_accounts.login_wallet),
+       updated_at = EXCLUDED.updated_at`,
+    [
+      p.id,
+      p.privy_did,
+      p.email || null,
+      p.email_verified_at || null,
+      p.login_wallet || null,
+      p.created_at,
+    ]
+  ),
+  attachHumanWallet: async (p) => run(
+    `UPDATE human_accounts
+        SET wallet_id = $1, wallet_address = LOWER($2), updated_at = $3
+      WHERE id = $4 AND wallet_address IS NULL`,
+    [p.wallet_id, p.wallet_address, p.updated_at, p.id]
+  ),
+
   // ── Profiles ──
   upsertProfile: async (p) => run(
     `INSERT INTO profiles (wallet, username, display_name, bio, profile_type, ecosystems, farcaster, github, x, discord, linkedin, pfp, created_at)
@@ -586,6 +684,7 @@ export const stmts = {
      ON CONFLICT (id) DO NOTHING`,
     [p.id, p.title, p.ecosystem, p.contribution_type, p.description, p.external_links, p.contributor, p.status, p.timestamp]
   ),
+  getProofById: async (id) => one('SELECT * FROM proofs WHERE id = $1', [id]),
   getProofsByWallet: async (wallet) => many('SELECT * FROM proofs WHERE contributor = $1 ORDER BY timestamp DESC', [wallet]),
 
   // ── Portfolio ──
@@ -743,6 +842,7 @@ export const stmts = {
   // non-ISO junk in the TEXT deadline column.
   getOpenBounties: async (status, limit) => many(
     `SELECT * FROM bounties WHERE status = $1
+       AND (status <> 'open' OR escrow_status = 'funded')
        AND (status NOT IN ('open','proposal_open')
             OR deadline IS NULL OR deadline = ''
             OR CASE WHEN deadline ~ '^\\d{4}-\\d{2}-\\d{2}' THEN deadline::timestamptz > NOW() ELSE TRUE END)
@@ -751,13 +851,19 @@ export const stmts = {
   ),
   getOpenBountiesIn: async (statuses, limit) => many(
     `SELECT * FROM bounties WHERE status = ANY($1)
+       AND (status <> 'open' OR escrow_status = 'funded')
        AND (status NOT IN ('open','proposal_open')
             OR deadline IS NULL OR deadline = ''
             OR CASE WHEN deadline ~ '^\\d{4}-\\d{2}-\\d{2}' THEN deadline::timestamptz > NOW() ELSE TRUE END)
      ORDER BY created_at DESC LIMIT $2`,
     [statuses, limit]
   ),
-  getAllBounties: async () => many('SELECT * FROM bounties ORDER BY created_at DESC LIMIT 50'),
+  getAllBounties: async () => many(
+    `SELECT * FROM bounties
+      WHERE status <> 'funding'
+        AND NOT (status = 'open' AND escrow_status <> 'funded')
+      ORDER BY created_at DESC LIMIT 50`
+  ),
   getBountiesByCreator: async (wallet) => many(
     'SELECT * FROM bounties WHERE creator_wallet = $1 ORDER BY created_at DESC',
     [wallet]
@@ -805,8 +911,13 @@ export const stmts = {
     [p.release_tx_hash, p.released_at, p.updated_at, p.id]
   ),
   refundBountyEscrow: async (p) => run(
-    `UPDATE bounties SET escrow_status = 'refunded', status = 'cancelled', updated_at = $1 WHERE id = $2`,
-    [p.updated_at, p.id]
+    `UPDATE bounties
+        SET refund_tx_hash = $1,
+            escrow_status = 'refunded',
+            status = 'cancelled',
+            updated_at = $2
+      WHERE id = $3`,
+    [p.refund_tx_hash, p.updated_at, p.id]
   ),
   incrementBountyRevision: async (p) => run(
     `UPDATE bounties SET revision_count = revision_count + 1, escrow_status = 'claimed', deliverable_hash = NULL, deliverable_content = NULL, client_decision = NULL, client_decision_at = NULL, updated_at = $1 WHERE id = $2`,
@@ -817,7 +928,12 @@ export const stmts = {
     [limit]
   ),
   getMarketplaceBounties: async (limit) => many(
-    `SELECT * FROM bounties WHERE escrow_status IN ('funded', 'none') AND status IN ('open', 'proposal_open')
+    `SELECT * FROM bounties
+      WHERE (
+        (status = 'open' AND escrow_status = 'funded')
+        OR
+        (status = 'proposal_open' AND escrow_status = 'none')
+      )
        AND (deadline IS NULL OR deadline = ''
             OR CASE WHEN deadline ~ '^\\d{4}-\\d{2}-\\d{2}' THEN deadline::timestamptz > NOW() ELSE TRUE END)
      ORDER BY escrow_budget_usdc DESC, created_at DESC LIMIT $1`,

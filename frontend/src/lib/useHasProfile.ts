@@ -11,13 +11,14 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useAccount, useReadContract } from 'wagmi';
+import { useReadContract } from 'wagmi';
+import { useBardAccount } from '@/components/BardAccountProvider';
 import { CONTRACTS } from './config';
 import { BARD_PROFILE_ABI } from './abi';
 import { fetchProfileByWallet, getProfileByWallet } from './store';
 
 export function useHasProfile() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected } = useBardAccount();
   const [backendHasProfile, setBackendHasProfile] = useState<boolean | null>(null);
   const [backendResolved, setBackendResolved] = useState(false);
 

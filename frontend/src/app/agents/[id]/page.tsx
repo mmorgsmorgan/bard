@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { useAccount } from 'wagmi';
 import {
   fetchAgentById, fetchContributionsByAgent, endorseContribution,
   fetchAgentsByOwner, agentVerifyContribution, fetchVerificationStats,
@@ -11,6 +10,8 @@ import {
 } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
 import { Headline } from '@/components/Editorial';
+import { useBardAccount } from '@/components/BardAccountProvider';
+import { useAgentToken } from '@/lib/useAgentToken';
 
 const CONTRIBUTION_TYPES: Record<string, { label: string; color: string }> = {
   research: { label: 'Research', color: 'text-purple-400 border-purple-500/20' },
@@ -39,15 +40,16 @@ const AVAIL_COLORS: Record<string, string> = {
 export default function AgentDetailPage() {
   const params = useParams();
   const agentId = params.id as string;
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, token } = useBardAccount();
+  const { getToken, busy: tokenBusy, error: tokenError } = useAgentToken();
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [reputation, setReputation] = useState<ReputationData | null>(null);
   const [contributions, setContributions] = useState<Contribution[]>([]);
   const [loading, setLoading] = useState(true);
   const [endorsing, setEndorsing] = useState<string | null>(null);
-  const [verifying, setVerifying] = useState<string | null>(null);
   const [agentVerifying, setAgentVerifying] = useState<string | null>(null);
+  const [verificationError, setVerificationError] = useState('');
   const [skills, setSkills] = useState<any[]>([]);
   const [workHistory, setWorkHistory] = useState<any[]>([]);
   const [workStats, setWorkStats] = useState<any>(null);
@@ -88,51 +90,33 @@ export default function AgentDetailPage() {
   }, [agentId, address]);
 
   async function handleEndorse(contributionId: string) {
-    if (!address) return;
+    if (!address || !token) {
+      setVerificationError('BARD login required to endorse contributions');
+      return;
+    }
     setEndorsing(contributionId);
+    setVerificationError('');
     const result = await endorseContribution(contributionId, {
-      endorserWallet: address,
-      endorserType: 'human',
       comment: 'Endorsed via BARD UI',
-    });
+    }, token);
     if (result.success) {
       setContributions((prev) =>
         prev.map((c) =>
           c.id === contributionId
-            ? { ...c, endorsementCount: result.endorsementCount, status: result.endorsementCount >= 3 ? 'verified' : c.status }
+            ? {
+              ...c,
+              endorsementCount: result.endorsementCount,
+              approvals: result.agentApprovals,
+              status: result.status || c.status,
+            }
             : c
         )
       );
       setReputation(result.reputation);
+    } else {
+      setVerificationError(result.error || 'Endorsement failed');
     }
     setEndorsing(null);
-  }
-
-  async function handleVerify(contributionId: string) {
-    if (!address) return;
-    setVerifying(contributionId);
-    try {
-      const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
-      const res = await fetch(`${API}/api/contributions/${contributionId}/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wallet: address }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setContributions((prev) =>
-          prev.map((c) =>
-            c.id === contributionId
-              ? { ...c, status: data.status === 'verified' ? 'verified' as const : c.status, endorsementCount: c.endorsementCount + 1 }
-              : c
-          )
-        );
-        if (data.reputation) setReputation(data.reputation);
-      }
-    } catch (e) {
-      console.error('Verify error:', e);
-    }
-    setVerifying(null);
   }
 
   const verifierAgent = myAgents.find(a => a.reputationScore >= 30);
@@ -140,15 +124,17 @@ export default function AgentDetailPage() {
   async function handleAgentVerify(contributionId: string, result: 'approved' | 'rejected') {
     if (!verifierAgent || verifierAgent.id === agentId) return;
     setAgentVerifying(contributionId);
+    setVerificationError('');
     try {
-      const sig = '0x' + Array.from(crypto.getRandomValues(new Uint8Array(32)))
-        .map(b => b.toString(16).padStart(2, '0')).join('');
+      const token = await getToken(verifierAgent.id);
+      if (!token) {
+        setVerificationError(tokenError || 'Could not authenticate the linked verifier agent');
+        return;
+      }
       const res = await agentVerifyContribution(contributionId, {
-        verifierAgentId: verifierAgent.id,
         result,
         reasoning: `${result === 'approved' ? 'Approved' : 'Rejected'} via BARD UI by ${verifierAgent.agentName}`,
-        signature: sig,
-      });
+      }, token);
       if (res.success) {
         setContributions(prev => prev.map(c =>
           c.id === contributionId ? {
@@ -158,11 +144,15 @@ export default function AgentDetailPage() {
             status: res.autoAction === 'verified' ? 'verified' : res.autoAction === 'rejected' ? 'rejected' : c.status,
           } : c
         ));
+      } else {
+        setVerificationError(res.error || 'Agent verification failed');
       }
     } catch (e) {
       console.error('Agent verify error:', e);
+      setVerificationError(e instanceof Error ? e.message : 'Agent verification failed');
+    } finally {
+      setAgentVerifying(null);
     }
-    setAgentVerifying(null);
   }
 
   const getReputationColor = (score: number) => {
@@ -457,6 +447,11 @@ export default function AgentDetailPage() {
         <div className="font-mono text-xs text-surface-500 tracking-wider uppercase mb-4">
           Contribution Timeline ({contributions.length})
         </div>
+        {(verificationError || tokenError) && (
+          <div className="mb-4 border border-red-900/30 bg-red-900/10 p-3 font-mono text-xs text-red-400">
+            {verificationError || tokenError}
+          </div>
+        )}
         {contributions.length === 0 ? (
           <div className="font-mono text-xs text-surface-500 text-center py-8">No contributions yet</div>
         ) : (
@@ -497,13 +492,7 @@ export default function AgentDetailPage() {
                   </div>
                   {/* Action buttons */}
                   <div className="flex gap-1.5 shrink-0">
-                    {isConnected && c.status === 'pending' && isOwner && (
-                      <button onClick={() => handleVerify(c.id)} disabled={verifying === c.id}
-                        className="font-mono text-[10px] px-3 py-1.5 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.1)] transition-colors disabled:opacity-40">
-                        {verifying === c.id ? '...' : '✓ Endorse'}
-                      </button>
-                    )}
-                    {isConnected && c.status === 'pending' && !isOwner && (
+                    {isConnected && c.status === 'pending' && (
                       <button onClick={() => handleEndorse(c.id)} disabled={endorsing === c.id}
                         className="font-mono text-[10px] px-2 py-1 border border-[rgba(255,133,18,0.3)] text-[#ff8512] hover:bg-[rgba(255,133,18,0.1)] transition-colors disabled:opacity-40">
                         {endorsing === c.id ? '...' : '✓ Endorse'}
@@ -511,11 +500,11 @@ export default function AgentDetailPage() {
                     )}
                     {isConnected && c.status === 'pending' && canAgentVerify && (
                       <>
-                        <button onClick={() => handleAgentVerify(c.id, 'approved')} disabled={agentVerifying === c.id}
+                        <button onClick={() => handleAgentVerify(c.id, 'approved')} disabled={agentVerifying === c.id || tokenBusy}
                           className="font-mono text-[10px] px-2 py-1 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10 transition-colors disabled:opacity-40">
                           {agentVerifying === c.id ? '...' : '⬡ Approve'}
                         </button>
-                        <button onClick={() => handleAgentVerify(c.id, 'rejected')} disabled={agentVerifying === c.id}
+                        <button onClick={() => handleAgentVerify(c.id, 'rejected')} disabled={agentVerifying === c.id || tokenBusy}
                           className="font-mono text-[10px] px-2 py-1 border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40">
                           ✕
                         </button>
