@@ -7,7 +7,7 @@
  * can refresh the live /bounties page and watch the status pill change:
  *
  *   open  →  proposal_open  →  proposal_selected  →  assigned
- *         →  submitted  →  client_approved  →  completed (Verified)
+ *         →  submitted  →  completed (Paid)
  *
  * Usage:
  *   node test-hybrid-mcp-live.mjs
@@ -15,7 +15,6 @@
  * Env (optional overrides):
  *   BARD_API     = https://bard-production-e88b.up.railway.app
  *   BARD_MCP_URL = https://mcp-production-8d2e.up.railway.app
- *   PLATFORM_OWNER_WALLET = the prod owner wallet (defaults to live health value)
  */
 
 import 'dotenv/config';
@@ -24,10 +23,6 @@ import readline from 'readline';
 const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
 const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app').replace(/\/$/, '');
 const FRONTEND = (process.env.BARD_FRONTEND || 'https://bard-six.vercel.app').replace(/\/$/, '');
-// PLATFORM_OWNER_WALLET passed in /platform-verify body. No signature is required
-// — only that this string matches a wallet in the platform_verifiers table on the
-// deployed backend. The live owner is configured in Railway env.
-const PLATFORM_OWNER = (process.env.PLATFORM_OWNER_WALLET || '0xA1a16e5eE45A999845eF6c7CF99b16666b2Ba3c8');
 
 const c = {
   reset: '\x1b[0m', green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m',
@@ -140,7 +135,7 @@ async function run() {
   console.log(`${c.dim}API:       ${API}`);
   console.log(`MCP:       ${MCP}`);
   console.log(`Frontend:  ${FRONTEND}`);
-  console.log(`Verifier:  ${PLATFORM_OWNER}${c.reset}\n`);
+  console.log(`${c.reset}`);
 
   // ── 0. Health
   console.log(`${c.cyan}▸ 0. Probing live services${c.reset}`);
@@ -295,43 +290,22 @@ async function run() {
 
   await pause(`Frontend pill should now read ${c.bold}"Submitted"${c.reset}${c.yellow} (yellow)`);
 
-  // ── 7. Creator reviews → approves
-  console.log(`\n${c.cyan}▸ 7. Creator approves the deliverable${c.reset}`);
-  const review = await apiFetch(`/api/bounties/${bounty.id}/review`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${creator.token}` },
-    body: JSON.stringify({
-      clientWallet: creator.wallet,
-      decision: 'approved',
-      reason: 'Excellent work, all requirements met.',
-    }),
+  // ── 7. Creator approves through MCP → automatic payout
+  console.log(`\n${c.cyan}▸ 7. Creator approves via MCP (REAL USDC TRANSFER)${c.reset}`);
+  const review = await mcpTool(creator.token, 'bard_review_bounty', {
+    bountyId: bounty.id,
+    decision: 'approved',
+    reason: 'Excellent work, all requirements met.',
   });
-  if (!review.ok) throw new Error(`review: ${review.data.error || review.status}`);
-  console.log(`  ${c.green}✓${c.reset} reviewed — escrow=${review.data.bounty?.escrow_status} (client_approved; awaiting platform verifier)`);
-
-  // ── 8. Platform verifier releases escrow → real USDC payout
-  console.log(`\n${c.cyan}▸ 8. Platform verifier releases escrow (REAL USDC TRANSFER)${c.reset}`);
-  console.log(`  ${c.dim}verifierWallet = ${PLATFORM_OWNER}${c.reset}`);
-  const verify = await apiFetch(`/api/bounties/${bounty.id}/platform-verify`, {
-    method: 'POST',
-    body: JSON.stringify({
-      verifierWallet: PLATFORM_OWNER,
-      decision: 'approved',
-      reasoning: 'All quality checks passed. Released.',
-    }),
-  });
-  if (!verify.ok) {
-    console.log(`  ${c.red}✗${c.reset} platform-verify failed: ${verify.data.error}`);
-    console.log(`  ${c.dim}If 403 "not a platform verifier", set PLATFORM_OWNER_WALLET env to a real verifier.${c.reset}`);
-    throw new Error(`platform-verify: ${verify.data.error}`);
-  }
-  console.log(`  ${c.green}✓${c.reset} released — status=${verify.data.bounty?.status}  escrow=${verify.data.bounty?.escrow_status}`);
-  if (verify.data.bounty?.release_tx_hash) {
-    console.log(`  ${c.green}→${c.reset} on-chain tx: ${c.bold}${verify.data.bounty.release_tx_hash}${c.reset}`);
-    console.log(`  ${c.dim}   https://testnet.arcscan.app/tx/${verify.data.bounty.release_tx_hash}${c.reset}`);
+  if (review?.error) throw new Error(`review: ${review.error}`);
+  if (review.pending) throw new Error(`review payout pending: ${review.txHash}`);
+  console.log(`  ${c.green}✓${c.reset} released — status=${review.bounty?.status}  escrow=${review.bounty?.escrow_status}`);
+  if (review.txHash) {
+    console.log(`  ${c.green}→${c.reset} on-chain tx: ${c.bold}${review.txHash}${c.reset}`);
+    console.log(`  ${c.dim}   https://testnet.arcscan.app/tx/${review.txHash}${c.reset}`);
   }
 
-  await pause(`Final pill: ${c.bold}"Verified"${c.reset}${c.yellow} (orange) — bounty card is complete`);
+  await pause(`Final pill: ${c.bold}"Paid"${c.reset}${c.yellow} (orange) — bounty card is complete`);
 
   // ── Summary
   console.log(`\n${c.bold}${c.green}════ Walkthrough Complete ════${c.reset}`);

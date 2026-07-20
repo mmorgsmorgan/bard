@@ -9,11 +9,10 @@
  *   3. Agent A races to bard_claim_bounty (wins)     → status=assigned
  *   4. Agent B tries to claim too late → 409          (no transition)
  *   5. A delivers                                    → status=submitted
- *   6. Creator approves                              → escrow=client_approved
- *   7. Platform verifier releases                    → status=completed + real USDC tx
+ *   6. Creator approves through MCP                  → status=completed + real USDC tx
  *
  * Usage:
- *   PLATFORM_OWNER_WALLET=0x… BARD_AUTO_PACE=20 node test-firstcome-mcp-live.mjs
+ *   BARD_AUTO_PACE=20 node test-firstcome-mcp-live.mjs
  */
 
 import 'dotenv/config';
@@ -22,7 +21,6 @@ import readline from 'readline';
 const API = (process.env.BARD_API || 'https://bard-production-e88b.up.railway.app').replace(/\/$/, '');
 const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app').replace(/\/$/, '');
 const FRONTEND = (process.env.BARD_FRONTEND || 'https://bard-six.vercel.app').replace(/\/$/, '');
-const PLATFORM_OWNER = (process.env.PLATFORM_OWNER_WALLET || '0x93d8E072b983b3119ffffc9F826fd14Ef03513Cd');
 
 const c = {
   reset: '\x1b[0m', green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m',
@@ -108,7 +106,7 @@ const bountyUrl = (id) => `${FRONTEND}/bounties/${id}`;
 
 async function run() {
   console.log(`${c.bold}${c.cyan}\n════ BARD Live MCP First-Come Walkthrough ════${c.reset}`);
-  console.log(`${c.dim}API: ${API}  |  MCP: ${MCP}  |  Verifier: ${PLATFORM_OWNER}${c.reset}\n`);
+  console.log(`${c.dim}API: ${API}  |  MCP: ${MCP}${c.reset}\n`);
 
   // ── 0. Health
   console.log(`${c.cyan}▸ 0. Probing live services${c.reset}`);
@@ -189,39 +187,27 @@ async function run() {
 
   await pause(`Pill: ${c.bold}"Submitted"${c.reset} ${c.yellow}(yellow)`);
 
-  // ── 6. Creator approves
-  console.log(`\n${c.cyan}▸ 6. Creator approves${c.reset}`);
-  const review = await apiFetch(`/api/bounties/${bounty.id}/review`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${creator.token}` },
-    body: JSON.stringify({
-      clientWallet: creator.wallet, decision: 'approved', reason: 'Meets brief, ship it.',
-    }),
+  // ── 6. Creator approves through MCP → automatic payout
+  console.log(`\n${c.cyan}▸ 6. Creator approves via MCP (REAL USDC TRANSFER)${c.reset}`);
+  const review = await mcpTool(creator.token, 'bard_review_bounty', {
+    bountyId: bounty.id,
+    decision: 'approved',
+    reason: 'Meets brief, ship it.',
   });
-  if (!review.ok) throw new Error(`review: ${review.data.error}`);
-  console.log(`  ${c.green}✓${c.reset} escrow=${review.data.bounty?.escrow_status} (client_approved)`);
-
-  // ── 7. Platform verifier releases
-  console.log(`\n${c.cyan}▸ 7. Platform verifier releases (REAL USDC TRANSFER)${c.reset}`);
-  const verify = await apiFetch(`/api/bounties/${bounty.id}/platform-verify`, {
-    method: 'POST',
-    body: JSON.stringify({
-      verifierWallet: PLATFORM_OWNER, decision: 'approved', reasoning: 'Quality verified, releasing.',
-    }),
-  });
-  if (!verify.ok) throw new Error(`verify: ${verify.data.error}`);
-  console.log(`  ${c.green}✓${c.reset} status=${verify.data.bounty?.status}  escrow=${verify.data.bounty?.escrow_status}`);
-  if (verify.data.bounty?.release_tx_hash) {
-    console.log(`  ${c.green}→${c.reset} tx: ${c.bold}${verify.data.bounty.release_tx_hash}${c.reset}`);
-    console.log(`  ${c.dim}   https://testnet.arcscan.app/tx/${verify.data.bounty.release_tx_hash}${c.reset}`);
+  if (review?.error) throw new Error(`review: ${review.error}`);
+  if (review.pending) throw new Error(`review payout pending: ${review.txHash}`);
+  console.log(`  ${c.green}✓${c.reset} status=${review.bounty?.status}  escrow=${review.bounty?.escrow_status}`);
+  if (review.txHash) {
+    console.log(`  ${c.green}→${c.reset} tx: ${c.bold}${review.txHash}${c.reset}`);
+    console.log(`  ${c.dim}   https://testnet.arcscan.app/tx/${review.txHash}${c.reset}`);
   }
 
-  await pause(`Final pill: ${c.bold}"Verified"${c.reset} ${c.yellow}(orange)`);
+  await pause(`Final pill: ${c.bold}"Paid"${c.reset} ${c.yellow}(orange)`);
 
   console.log(`\n${c.bold}${c.green}════ First-Come Walkthrough Complete ════${c.reset}`);
   console.log(`  bounty:     ${bounty.id}`);
   console.log(`  url:        ${bountyUrl(bounty.id)}`);
-  console.log(`  release tx: ${verify.data.bounty?.release_tx_hash || '(none)'}`);
+  console.log(`  release tx: ${review.txHash || review.bounty?.release_tx_hash || '(none)'}`);
   console.log(`  winner:     A (${A.wallet}) — B locked out by first-come\n`);
 
   if (rl) rl.close();
