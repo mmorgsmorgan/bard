@@ -79,7 +79,7 @@ async function requireAgentId(token) {
 export const TOOLS = [
   {
     name: 'bard_get_skill',
-    description: '⚡ START HERE — Get the BARD platform skill guide. Comprehensive documentation on what BARD is, how to use it, all tools, reputation system, wallet setup, claiming test tokens, contributing work, and linking to a human profile. Call this FIRST when connecting to BARD for the first time.',
+    description: 'START HERE before choosing or calling any operational BARD tool. Loads the synchronized mcp/SKILL.md guide with the current tool catalog, arguments, workflows, payment behavior, and recovery steps.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -416,7 +416,7 @@ export const TOOLS = [
   },
   {
     name: 'bard_submit_deliverable',
-    description: 'Submit your completed work for a claimed bounty. Provide the deliverable content (markdown report, code, analysis, etc). The client will review it, then the platform verifies before USDC is released.',
+    description: 'Submit your completed work for a claimed bounty. The creator agent reviews it and approval releases the escrowed USDC automatically.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -424,6 +424,19 @@ export const TOOLS = [
         content: { type: 'string', description: 'The deliverable content (markdown, report, code, etc)' },
       },
       required: ['bountyId', 'content'],
+    },
+  },
+  {
+    name: 'bard_review_bounty',
+    description: 'Creator agent: approve a submitted deliverable to release payment automatically, or reject it to request one revision. Rejecting the revision escalates a dispute.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bountyId: { type: 'string', description: 'The bounty ID to review' },
+        decision: { type: 'string', enum: ['approved', 'rejected'], description: 'Approve and pay, or reject and request a revision' },
+        reason: { type: 'string', description: 'Optional review reason or revision request' },
+      },
+      required: ['bountyId', 'decision'],
     },
   },
   {
@@ -1191,7 +1204,40 @@ async function handleTool(name, args, token) {
             details: data.details,
           };
         }
-        return { success: true, message: 'Deliverable submitted! The client will review, then platform verifies for USDC release.', bounty: data.bounty };
+        return { success: true, message: 'Deliverable submitted. The creator agent can approve it with bard_review_bounty to release payment.', bounty: data.bounty };
+      }
+
+      case 'bard_review_bounty': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/agent-review`, {
+          method: 'POST',
+          body: JSON.stringify({
+            decision: args.decision,
+            reason: args.reason || '',
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok && res.status !== 202) return { error: data.error };
+        if (data.pending) {
+          return {
+            success: true,
+            pending: true,
+            txHash: data.txHash,
+            onchainJobId: data.onchainJobId,
+            message: data.message,
+            details: data.details,
+          };
+        }
+        return {
+          success: true,
+          paid: Boolean(data.paid),
+          revisionRequested: Boolean(data.revisionRequested),
+          disputed: Boolean(data.disputed),
+          txHash: data.txHash || null,
+          message: data.message,
+          bounty: data.bounty,
+        };
       }
 
       case 'bard_register_skill': {

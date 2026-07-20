@@ -5981,6 +5981,343 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
   res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
 });
 
+async function releaseAgentBountyOnCreatorApproval({
+  bountyId,
+  creatorAgent,
+  reason,
+}) {
+  const creatorWallet = creatorAgent.turnkey_address || creatorAgent.owner_wallet;
+  const now = new Date().toISOString();
+  const client = await pool.connect();
+  let bounty;
+  let releaseTx = '';
+
+  try {
+    await client.query('BEGIN');
+    bounty = (await client.query(
+      'SELECT * FROM bounties WHERE id = $1 FOR UPDATE',
+      [bountyId]
+    )).rows[0];
+
+    if (!bounty) {
+      throw Object.assign(new Error('Bounty not found'), { status: 404 });
+    }
+    if (!agentControlsBounty(creatorAgent, bounty)) {
+      throw Object.assign(
+        new Error('Only the authenticated creator agent can review this bounty'),
+        { status: 403 }
+      );
+    }
+    if (bounty.escrow_status === 'released' && bounty.status === 'completed') {
+      await client.query('COMMIT');
+      return { bounty, reconciled: true };
+    }
+    if (!['submitted', 'client_approved'].includes(bounty.escrow_status)) {
+      throw Object.assign(
+        new Error(`No deliverable can be approved in state: ${bounty.escrow_status}`),
+        { status: 409 }
+      );
+    }
+    if (!bounty.provider_agent_id) {
+      throw Object.assign(new Error('No provider agent for this bounty'), { status: 409 });
+    }
+
+    const agent = (await client.query(
+      'SELECT turnkey_address, owner_wallet, agent_name FROM agents WHERE id = $1',
+      [bounty.provider_agent_id]
+    )).rows[0];
+    if (!agent) {
+      throw Object.assign(new Error('Provider agent not found'), { status: 404 });
+    }
+    const recipientWallet = agent.turnkey_address || agent.owner_wallet;
+    if (!recipientWallet) {
+      throw Object.assign(new Error('Provider agent has no payment wallet'), { status: 409 });
+    }
+
+    let agentEarnings = Number(bounty.escrow_budget_usdc || 0);
+    let platformFee = 0;
+    if (bounty.swarm_execution_id) {
+      const execution = (await client.query(
+        'SELECT platform_markup_usd FROM swarm_executions WHERE id = $1',
+        [bounty.swarm_execution_id]
+      )).rows[0];
+      platformFee = Number(execution?.platform_markup_usd || 0);
+      agentEarnings -= platformFee;
+    }
+
+    const pendingSettlement = (await client.query(
+      `SELECT tx_hash FROM escrow_events
+       WHERE bounty_id = $1 AND event_type = 'settlement_pending' AND tx_hash <> ''
+       ORDER BY created_at DESC LIMIT 1`,
+      [bountyId]
+    )).rows[0]?.tx_hash || '';
+
+    if (bounty.escrow_mode === 'onchain' && bounty.onchain_job_id) {
+      const job = await onchainEscrow.getJob(bounty.onchain_job_id);
+      if (Number(job.status) === 2 /* Submitted */) {
+        if (pendingSettlement) {
+          const pendingError = new Error(
+            `Settlement transaction ${pendingSettlement} is awaiting on-chain confirmation.`
+          );
+          pendingError.txHash = pendingSettlement;
+          throw pendingError;
+        }
+        const release = await onchainEscrow.release({
+          jobId: bounty.onchain_job_id,
+          reasonLabel: `creator-approved:${reason || 'approved'}`,
+          // The platform key is the contract evaluator and executes the
+          // authenticated creator's decision; no operator approval is involved.
+          evaluator: SELLER_ADDRESS,
+        });
+        releaseTx = release.txHash;
+        try {
+          const settled = await onchainEscrow.decodeSettlement(release.receipt);
+          if (settled.paidToProvider > 0) agentEarnings = settled.paidToProvider;
+          if (settled.feePaid > 0) platformFee = settled.feePaid;
+        } catch (error) {
+          console.warn(`[Agent Bounty Release] settlement decode failed: ${error.message}`);
+        }
+      } else if (Number(job.status) === 3 /* Completed */) {
+        releaseTx = bounty.release_tx_hash || pendingSettlement;
+        if (!releaseTx) {
+          throw Object.assign(
+            new Error('On-chain bounty is completed but its release transaction is not recorded'),
+            { status: 409 }
+          );
+        }
+      } else {
+        throw Object.assign(
+          new Error(
+            `On-chain job ${bounty.onchain_job_id} cannot be released from status ${Number(job.status)}`
+          ),
+          { status: 409 }
+        );
+      }
+    } else if (pendingSettlement) {
+      const verification = await verifyTransaction(
+        pendingSettlement,
+        SELLER_ADDRESS,
+        recipientWallet,
+        agentEarnings,
+        { allowWrappedCall: true }
+      );
+      if (!verification.valid) {
+        const pendingError = new Error(
+          `Settlement transaction ${pendingSettlement} is not confirmed yet: ${verification.error}`
+        );
+        pendingError.txHash = pendingSettlement;
+        throw pendingError;
+      }
+      releaseTx = pendingSettlement;
+    } else {
+      releaseTx = await transferUSDCFromPlatform(recipientWallet, agentEarnings, {
+        memoId: MemoIds.PayoutAgent,
+        memoData: {
+          bountyId,
+          agentId: bounty.provider_agent_id,
+          agentName: agent.agent_name,
+          agentWallet: recipientWallet,
+          amountUsd: agentEarnings,
+          platformFeeUsd: platformFee,
+          approvedByAgentId: creatorAgent.id,
+        },
+      });
+    }
+
+    const decisionId = `vd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const reasoning = reason || 'Creator agent approved the deliverable';
+    const reasoningHash = '0x' + createHash('sha256').update(reasoning).digest('hex');
+    await client.query(
+      `INSERT INTO verification_decisions
+         (id, bounty_id, verifier_wallet, verifier_type, decision, reasoning, reasoning_hash, stage, tx_hash, created_at)
+       VALUES ($1, $2, $3, 'creator_agent', 'approved', $4, $5, 1, $6, $7)`,
+      [decisionId, bountyId, creatorWallet, reasoning, reasoningHash, releaseTx, now]
+    );
+    await client.query(
+      `UPDATE bounties
+          SET client_decision = 'approved',
+              client_decision_at = COALESCE(client_decision_at, $1),
+              release_tx_hash = $2,
+              escrow_status = 'released',
+              status = 'completed',
+              released_at = $1,
+              updated_at = $1
+        WHERE id = $3`,
+      [now, releaseTx, bountyId]
+    );
+    await client.query(
+      `INSERT INTO escrow_events
+         (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
+       VALUES
+         ($1, $2, 'client_approved', $3, 'agent', $4, '', $5),
+         ($6, $2, 'released', $3, 'agent', $7, $8, $5)`,
+      [
+        `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        bountyId,
+        creatorWallet,
+        reasoning,
+        now,
+        `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-r`,
+        `${agentEarnings.toFixed(2)} USDC released after creator-agent approval (platform fee: ${platformFee.toFixed(2)} USDC)`,
+        releaseTx,
+      ]
+    );
+    await client.query(
+      `UPDATE agents
+          SET reputation_score = LEAST(100, reputation_score + 15),
+              total_earned_usdc = total_earned_usdc + $1
+        WHERE id = $2`,
+      [agentEarnings, bounty.provider_agent_id]
+    );
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (releaseTx && !error.txHash) error.txHash = releaseTx;
+    if (error.txHash) {
+      error.recoverable = true;
+      const existing = await pool.query(
+        `SELECT 1 FROM escrow_events
+         WHERE bounty_id = $1 AND event_type = 'settlement_pending' AND tx_hash = $2
+         LIMIT 1`,
+        [bountyId, error.txHash]
+      );
+      if (!existing.rows[0]) {
+        await logEscrowEvent(
+          bountyId,
+          'settlement_pending',
+          creatorWallet,
+          'agent',
+          'Creator-approved settlement was broadcast and is awaiting confirmation',
+          error.txHash
+        );
+      }
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  await runBestEffort(
+    `agent payout notification for bounty ${bountyId}`,
+    () => createNotification({
+      agentId: bounty.provider_agent_id,
+      type: 'send',
+      title: 'Bounty Paid',
+      message: `${bounty.escrow_budget_usdc} USDC released for "${bounty.title}". Rep +15.`,
+      from: creatorWallet,
+      amount: String(bounty.escrow_budget_usdc),
+    })
+  );
+  emitFeedEvent('escrow:released', {
+    bountyId,
+    approvedByAgentId: creatorAgent.id,
+    releaseTxHash: releaseTx,
+  });
+  return { bounty: await stmts.getBountyById(bountyId), txHash: releaseTx };
+}
+
+// Authenticated agent creators approve work and trigger payment directly.
+// A second rejection still escalates to the existing platform dispute route.
+app.post('/api/bounties/:id/agent-review', requireAuth, async (req, res) => {
+  const decision = String(req.body?.decision || '');
+  const reason = String(req.body?.reason || '').trim().slice(0, 2000);
+  if (!['approved', 'rejected'].includes(decision)) {
+    return res.status(400).json({ error: 'decision must be approved or rejected' });
+  }
+  if (!(await checkRateLimit(req.auth.agentId, 'escrow_review'))) {
+    return res.status(429).json({ error: 'Rate limit exceeded' });
+  }
+
+  const creatorAgent = await stmts.getAgentById(req.auth.agentId);
+  if (!creatorAgent) return res.status(404).json({ error: 'Creator agent not found' });
+  const bounty = await stmts.getBountyById(req.params.id);
+  if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+  if (!agentControlsBounty(creatorAgent, bounty)) {
+    return res.status(403).json({ error: 'Only the authenticated creator agent can review' });
+  }
+
+  if (decision === 'rejected') {
+    if (bounty.escrow_status !== 'submitted') {
+      return res.status(409).json({ error: 'No deliverable to reject' });
+    }
+    const now = new Date().toISOString();
+    if ((bounty.revision_count || 0) >= 1) {
+      await stmts.clientReviewBounty({
+        client_decision: 'rejected',
+        client_decision_at: now,
+        escrow_status: 'disputed',
+        updated_at: now,
+        id: bounty.id,
+      });
+      await logEscrowEvent(
+        bounty.id,
+        'disputed',
+        creatorAgent.turnkey_address || creatorAgent.owner_wallet,
+        'agent',
+        `Creator agent rejected the revision: ${reason || 'No reason'}`,
+        ''
+      );
+      return res.json({
+        success: true,
+        disputed: true,
+        message: 'Revision rejected and escalated for dispute resolution.',
+        bounty: await stmts.getBountyById(bounty.id),
+      });
+    }
+    await stmts.incrementBountyRevision({ updated_at: now, id: bounty.id });
+    await logEscrowEvent(
+      bounty.id,
+      'client_rejected',
+      creatorAgent.turnkey_address || creatorAgent.owner_wallet,
+      'agent',
+      `Creator agent requested a revision: ${reason || 'No reason'}`,
+      ''
+    );
+    await createNotification({
+      agentId: bounty.provider_agent_id,
+      type: 'system',
+      title: 'Revision Requested',
+      message: `Revision requested for "${bounty.title}": ${reason || 'No details'}`,
+      from: creatorAgent.turnkey_address || creatorAgent.owner_wallet,
+    });
+    return res.json({
+      success: true,
+      revisionRequested: true,
+      message: 'Revision requested from the provider agent.',
+      bounty: await stmts.getBountyById(bounty.id),
+    });
+  }
+
+  try {
+    const result = await releaseAgentBountyOnCreatorApproval({
+      bountyId: bounty.id,
+      creatorAgent,
+      reason,
+    });
+    return res.json({
+      success: true,
+      paid: true,
+      txHash: result.txHash || result.bounty?.release_tx_hash || null,
+      message: result.reconciled
+        ? 'Bounty payment was already completed.'
+        : 'Deliverable approved and payment released to the provider agent.',
+      bounty: result.bounty,
+    });
+  } catch (error) {
+    if (error.txHash) {
+      return res.status(202).json({
+        success: true,
+        pending: true,
+        txHash: error.txHash,
+        onchainJobId: bounty.onchain_job_id ? String(bounty.onchain_job_id) : null,
+        message: 'Payment was broadcast and is awaiting confirmation. Retry this approval to reconcile it.',
+        details: error.message,
+      });
+    }
+    return res.status(error.status || 409).json({ error: error.message });
+  }
+});
+
 // POST /api/bounties/:id/review — Client approves or rejects deliverable
 app.post('/api/bounties/:id/review', async (req, res) => {
   const { clientWallet, decision, reason } = req.body;
