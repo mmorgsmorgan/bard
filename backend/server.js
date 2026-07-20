@@ -5234,8 +5234,20 @@ async function onchainEscrowEligible(bounty, selectedAgent) {
   return { eligible: true, creatorWallet: creatorTk, providerWallet: selectedAgent.turnkey_address };
 }
 
-async function fundSelectedProposalOnchain(bounty, selectedAgent, eligibility) {
-  await reserveBountyFunding(bounty.id);
+async function fundSelectedProposalOnchain(
+  bounty,
+  selectedAgent,
+  eligibility,
+  { resumeJobId = null, fundTxHash = null } = {}
+) {
+  if (bounty.escrow_status === 'none') {
+    await reserveBountyFunding(bounty.id);
+  } else if (bounty.escrow_status !== 'funding') {
+    throw Object.assign(
+      new Error(`Bounty cannot resume funding in escrow state: ${bounty.escrow_status}`),
+      { status: 409 }
+    );
+  }
 
   const amountUsdc = Number(bounty.amount_usdc);
   const platformFeeBps = Math.max(
@@ -5249,7 +5261,7 @@ async function fundSelectedProposalOnchain(bounty, selectedAgent, eligibility) {
   let jobId;
   let txs;
   try {
-    ({ jobId, txs } = await onchainEscrow.openAndFund({
+    const fundingInput = {
       creatorWallet: eligibility.creatorWallet,
       providerWallet: eligibility.providerWallet,
       earningsUsdc: amountUsdc,
@@ -5258,14 +5270,47 @@ async function fundSelectedProposalOnchain(bounty, selectedAgent, eligibility) {
       evaluator: SELLER_ADDRESS,
       expirySeconds: 72 * 3600,
       description: bounty.title || 'BARD bounty',
-    }));
+    };
+    ({ jobId, txs } = resumeJobId
+      ? await onchainEscrow.resumeAndFund({
+          ...fundingInput,
+          jobId: resumeJobId,
+          fundTxHash,
+        })
+      : await onchainEscrow.openAndFund(fundingInput));
   } catch (error) {
     const fundedTx = error.completedTransactions?.fund;
-    if (fundedTx) {
-      error.txHash = fundedTx;
+    const partialJobId = error.jobId || resumeJobId;
+    if (partialJobId) {
+      if (fundedTx) error.txHash = fundedTx;
+      error.recoverable = true;
+      await pool.query(
+        `UPDATE bounties
+            SET escrow_mode = 'onchain',
+                onchain_job_id = $1,
+                escrow_status = 'funding',
+                updated_at = $2
+          WHERE id = $3 AND status = 'proposal_selected'`,
+        [String(partialJobId), new Date().toISOString(), bounty.id]
+      ).catch(() => {});
+      await runBestEffort(
+        `partial on-chain funding event for bounty ${bounty.id}`,
+        () => logEscrowEvent(
+          bounty.id,
+          'funding_partial',
+          eligibility.creatorWallet,
+          'agent',
+          `On-chain job ${partialJobId} partially configured; retry funding with this job ID. Completed: ${Object.keys(error.completedTransactions || {}).join(', ') || 'createJob only'}`,
+          fundedTx || ''
+        )
+      );
     } else {
       await pool.query(
-        `UPDATE bounties SET escrow_status = 'none', updated_at = $1
+        `UPDATE bounties
+            SET escrow_status = 'none',
+                escrow_mode = 'custodial',
+                onchain_job_id = NULL,
+                updated_at = $1
           WHERE id = $2 AND escrow_status = 'funding'`,
         [new Date().toISOString(), bounty.id]
       ).catch(() => {});
@@ -5287,7 +5332,8 @@ async function fundSelectedProposalOnchain(bounty, selectedAgent, eligibility) {
       !fresh ||
       fresh.status !== 'proposal_selected' ||
       fresh.selected_proposal_id !== bounty.selected_proposal_id ||
-      fresh.escrow_status !== 'funding'
+      fresh.escrow_status !== 'funding' ||
+      (fresh.onchain_job_id && String(fresh.onchain_job_id) !== jobId.toString())
     ) {
       throw Object.assign(
         new Error(
@@ -5353,6 +5399,16 @@ async function fundSelectedProposalOnchain(bounty, selectedAgent, eligibility) {
     error.txHash = txs.fund;
     error.jobId = jobId.toString();
     error.status = error.status || 409;
+    error.recoverable = true;
+    await pool.query(
+      `UPDATE bounties
+          SET escrow_mode = 'onchain',
+              onchain_job_id = $1,
+              escrow_status = 'funding',
+              updated_at = $2
+        WHERE id = $3 AND status = 'proposal_selected'`,
+      [jobId.toString(), new Date().toISOString(), bounty.id]
+    ).catch(() => {});
     throw error;
   } finally {
     client.release();
@@ -5588,12 +5644,34 @@ app.post('/api/bounties/:id/fund', requireAuth, async (req, res) => {
 
       const selectedAgent = await getSelectedProposalAgent(bounty);
       const suppliedTxHash = String(req.body?.txHash || '');
+      const suppliedOnchainJobId = String(
+        req.body?.onchainJobId || bounty.onchain_job_id || ''
+      );
       const creatorWallet = creator.turnkey_address;
 
-      if (bounty.escrow_status === 'funding') {
+      let result;
+      if (bounty.escrow_status === 'funding' && suppliedOnchainJobId) {
+        const eligibility = selectedAgent
+          ? await onchainEscrowEligible(bounty, selectedAgent)
+          : { eligible: false };
+        if (!eligibility.eligible) {
+          return res.status(409).json({
+            error: `Partial on-chain funding cannot resume: ${eligibility.reason || 'wallet signing unavailable'}`,
+          });
+        }
+        result = await fundSelectedProposalOnchain(
+          bounty,
+          selectedAgent,
+          eligibility,
+          {
+            resumeJobId: suppliedOnchainJobId,
+            fundTxHash: suppliedTxHash || null,
+          }
+        );
+      } else if (bounty.escrow_status === 'funding') {
         if (!suppliedTxHash) {
           return res.status(409).json({
-            error: 'Funding is awaiting transaction reconciliation. Retry with the original txHash.',
+            error: 'Funding is awaiting reconciliation. Retry with the original txHash or onchainJobId.',
             recoverable: true,
           });
         }
@@ -5624,52 +5702,65 @@ app.post('/api/bounties/:id/fund', requireAuth, async (req, res) => {
           txHash: suppliedTxHash,
           bounty: fundedBounty,
         });
-      }
-      if (bounty.escrow_status !== 'none') {
+      } else if (bounty.escrow_status !== 'none') {
         return res.status(409).json({
           error: `Bounty is already in escrow state: ${bounty.escrow_status}`,
         });
-      }
-
-      let result;
-      const eligibility = selectedAgent
-        ? await onchainEscrowEligible(bounty, selectedAgent)
-        : { eligible: false };
-      if (!suppliedTxHash && eligibility.eligible) {
-        result = await fundSelectedProposalOnchain(
-          bounty,
-          selectedAgent,
-          eligibility
-        );
-      } else if (suppliedTxHash) {
-        const verification = await verifyTransaction(
-          suppliedTxHash,
-          creatorWallet,
-          SELLER_ADDRESS,
-          amountUsdc
-        );
-        if (!verification.valid) {
-          return res.status(400).json({
-            error: 'Funding transaction verification failed',
-            details: verification.error,
-          });
-        }
-        await reserveBountyFunding(bounty.id);
-        const fundedBounty = await finalizeCustodialBountyFunding({
-          bounty,
-          creatorWallet,
-          amountUsdc,
-          txHash: suppliedTxHash,
-          selectedAgent,
-          actorType: 'agent',
-        });
-        result = { bounty: fundedBounty, txHash: suppliedTxHash, selectedAgent };
       } else {
-        result = await transferAndFundCustodialBounty(
-          bounty,
-          creatorWallet,
-          'agent'
-        );
+        const eligibility = selectedAgent
+          ? await onchainEscrowEligible(bounty, selectedAgent)
+          : { eligible: false };
+        if (suppliedOnchainJobId) {
+          if (!eligibility.eligible) {
+            return res.status(409).json({
+              error: `Partial on-chain funding cannot resume: ${eligibility.reason || 'wallet signing unavailable'}`,
+            });
+          }
+          result = await fundSelectedProposalOnchain(
+            bounty,
+            selectedAgent,
+            eligibility,
+            {
+              resumeJobId: suppliedOnchainJobId,
+              fundTxHash: suppliedTxHash || null,
+            }
+          );
+        } else if (!suppliedTxHash && eligibility.eligible) {
+          result = await fundSelectedProposalOnchain(
+            bounty,
+            selectedAgent,
+            eligibility
+          );
+        } else if (suppliedTxHash) {
+          const verification = await verifyTransaction(
+            suppliedTxHash,
+            creatorWallet,
+            SELLER_ADDRESS,
+            amountUsdc
+          );
+          if (!verification.valid) {
+            return res.status(400).json({
+              error: 'Funding transaction verification failed',
+              details: verification.error,
+            });
+          }
+          await reserveBountyFunding(bounty.id);
+          const fundedBounty = await finalizeCustodialBountyFunding({
+            bounty,
+            creatorWallet,
+            amountUsdc,
+            txHash: suppliedTxHash,
+            selectedAgent,
+            actorType: 'agent',
+          });
+          result = { bounty: fundedBounty, txHash: suppliedTxHash, selectedAgent };
+        } else {
+          result = await transferAndFundCustodialBounty(
+            bounty,
+            creatorWallet,
+            'agent'
+          );
+        }
       }
 
       emitFeedEvent('escrow:funded', {
