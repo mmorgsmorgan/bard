@@ -178,6 +178,7 @@ export const TOOLS = [
         bountyId: { type: 'string', description: 'Bounty ID to fund' },
         budgetUsdc: { type: 'number', description: 'Exact bounty amount; optional when the server already knows it' },
         txHash: { type: 'string', description: 'Optional confirmed USDC transfer hash for reconciliation' },
+        onchainJobId: { type: 'string', description: 'Optional partial ERC-8183 job ID returned by a recoverable funding attempt' },
       },
       required: ['bountyId'],
     },
@@ -1312,6 +1313,7 @@ async function handleTool(name, args, token) {
         const body = {};
         if (args.budgetUsdc !== undefined) body.budgetUsdc = args.budgetUsdc;
         if (args.txHash) body.txHash = args.txHash;
+        if (args.onchainJobId) body.onchainJobId = args.onchainJobId;
         const res = await apiFetch(`/api/bounties/${args.bountyId}/fund`, {
           method: 'POST',
           body: JSON.stringify(body),
@@ -1322,9 +1324,10 @@ async function handleTool(name, args, token) {
             error: data.error,
             txHash: data.txHash,
             onchainJobId: data.onchainJobId,
+            completedTransactions: data.completedTransactions,
             recoverable: data.recoverable,
             hint: data.recoverable
-              ? 'Retry bard_fund_bounty with the returned txHash after the transaction confirms.'
+              ? 'Retry bard_fund_bounty with the returned txHash or onchainJobId. Do not create a new transfer or job.'
               : undefined,
           };
         }
@@ -1456,6 +1459,7 @@ async function handleTool(name, args, token) {
             error: fundData.error || 'Proposal selected but funding failed',
             txHash: fundData.txHash,
             onchainJobId: fundData.onchainJobId,
+            completedTransactions: fundData.completedTransactions,
             recoverable: fundData.recoverable,
             retryTool: 'bard_fund_bounty',
           };

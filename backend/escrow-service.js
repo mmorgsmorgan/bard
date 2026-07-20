@@ -498,6 +498,118 @@ export async function openAndFund(p) {
   }
 }
 
+/**
+ * Resume a partially configured ERC-8183 job without creating a replacement job.
+ * Every completed leg is detected from chain state before the missing legs run.
+ */
+export async function resumeAndFund(p) {
+  const jobId = BigInt(p.jobId);
+  const earningsWei = toUsdcWei(p.earningsUsdc);
+  const feeWei = toUsdcWei(p.platformFeeUsdc || 0);
+  const evaluator = p.evaluator || SELLER_ADDRESS;
+  const feeRecipient = p.feeRecipient || SELLER_ADDRESS;
+  const zeroAddress = '0x0000000000000000000000000000000000000000';
+  const sameAddress = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
+  const txs = {};
+
+  try {
+    let job = await getJob(jobId);
+    if (!sameAddress(job.client, p.creatorWallet)) {
+      throw new Error(`escrow-service: job ${jobId} belongs to a different creator`);
+    }
+    if (!sameAddress(job.evaluator, evaluator)) {
+      throw new Error(`escrow-service: job ${jobId} has a different evaluator`);
+    }
+    if (!sameAddress(job.hook, BARD_JOB_HOOK_ADDRESS)) {
+      throw new Error(`escrow-service: job ${jobId} uses a different hook`);
+    }
+    if (![0, 1].includes(Number(job.status))) {
+      throw new Error(`escrow-service: job ${jobId} cannot resume from status ${Number(job.status)}`);
+    }
+
+    const feeMeta = await getFeeMeta(jobId);
+    if (feeMeta.configured) {
+      if (
+        BigInt(feeMeta.platformFee) !== feeWei ||
+        !sameAddress(feeMeta.feeRecipient, feeRecipient)
+      ) {
+        throw new Error(`escrow-service: job ${jobId} fee configuration does not match the bounty`);
+      }
+    } else {
+      const cd = buildConfigureBardJobCalldata({
+        jobId,
+        platformFee: feeWei,
+        feeRecipient,
+        maxFeeBps: p.maxFeeBps || 0,
+        minRepScore: p.minRepScore || 0,
+      });
+      txs.configure = (await sendAs(p.creatorWallet, cd, 'configureBardJob(resume)')).txHash;
+    }
+
+    if (sameAddress(job.provider, zeroAddress)) {
+      const cd = buildSetProviderCalldata({
+        jobId,
+        provider: p.providerWallet,
+        agentId: p.providerAgentId || 0n,
+      });
+      txs.setProvider = (await sendAs(p.creatorWallet, cd, 'setProvider(resume)')).txHash;
+    } else if (!sameAddress(job.provider, p.providerWallet)) {
+      throw new Error(`escrow-service: job ${jobId} is assigned to a different provider`);
+    }
+
+    job = await getJob(jobId);
+    if (BigInt(job.budget) === 0n) {
+      const cd = buildSetBudgetCalldata({ jobId, amount: earningsWei });
+      txs.setBudget = (await sendAs(p.providerWallet, cd, 'setBudget(resume)')).txHash;
+    } else if (
+      BigInt(job.budget) !== earningsWei ||
+      !sameAddress(job.paymentToken, USDC_ADDRESS)
+    ) {
+      throw new Error(`escrow-service: job ${jobId} budget does not match the bounty`);
+    }
+
+    const refreshedFeeMeta = await getFeeMeta(jobId);
+    if (feeWei > 0n && !refreshedFeeMeta.feeDeposited) {
+      const approve = buildApproveCalldata({
+        spender: BARD_JOB_HOOK_ADDRESS,
+        amount: feeWei,
+      });
+      txs.approveFee = (
+        await sendAs(p.creatorWallet, approve, 'approve(hook,fee,resume)')
+      ).txHash;
+      const deposit = buildDepositFeeCalldata({ jobId });
+      txs.depositFee = (
+        await sendAs(p.creatorWallet, deposit, 'depositFee(resume)')
+      ).txHash;
+    }
+
+    job = await getJob(jobId);
+    if (Number(job.status) === 0) {
+      const approve = buildApproveCalldata({
+        spender: AGENTIC_COMMERCE_ADDRESS,
+        amount: earningsWei,
+      });
+      txs.approveBudget = (
+        await sendAs(p.creatorWallet, approve, 'approve(ac,budget,resume)')
+      ).txHash;
+      const fund = buildFundCalldata({ jobId, expectedBudget: earningsWei });
+      txs.fund = (await sendAs(p.creatorWallet, fund, 'fund(resume)')).txHash;
+    } else if (p.fundTxHash) {
+      txs.fund = p.fundTxHash;
+    } else {
+      throw new Error(
+        `escrow-service: job ${jobId} is already funded; retry with its original funding transaction hash`,
+      );
+    }
+
+    return { jobId, txs };
+  } catch (error) {
+    error.jobId = jobId.toString();
+    error.completedTransactions = { ...txs };
+    throw error;
+  }
+}
+
 /** Provider submits a deliverable (Funded -> Submitted). */
 export async function submit({ providerWallet, jobId, deliverableLabel = 'deliverable' }) {
   const cd = buildSubmitCalldata({ jobId, deliverable: hashTag(deliverableLabel) });
