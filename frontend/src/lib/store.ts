@@ -7,6 +7,29 @@
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 type AuthFetch = (path: string, init?: RequestInit) => Promise<Response>;
+type WalletTransaction = {
+  to: `0x${string}`;
+  data?: `0x${string}`;
+  value?: `0x${string}`;
+  chainId?: number;
+};
+type SendTransaction = (transaction: WalletTransaction) => Promise<`0x${string}`>;
+
+function isUserRejectedTransaction(error: unknown): boolean {
+  const value = error as {
+    code?: number | string;
+    message?: string;
+    cause?: { code?: number | string; message?: string };
+  };
+  const code = value?.code ?? value?.cause?.code;
+  const message = `${value?.message || ''} ${value?.cause?.message || ''}`.toLowerCase();
+  return (
+    code === 4001 ||
+    code === 'ACTION_REJECTED' ||
+    message.includes('user rejected') ||
+    message.includes('user denied')
+  );
+}
 
 // ── Types ──
 
@@ -783,15 +806,46 @@ async function reconcileHumanBountyFunding(
 
 export async function createHumanBounty(
   authFetch: AuthFetch,
+  sendTransaction: SendTransaction,
   data: Omit<Parameters<typeof createBounty>[0], 'creatorWallet'>
 ): Promise<{ bounty: Bounty | null; txHash?: string; error?: string }> {
+  let reservedBountyId = '';
+  let broadcastTxHash = '';
   try {
-    const res = await authFetch('/api/human/bounties', {
+    let res = await authFetch('/api/human/bounties', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    const json = await res.json();
+    let json = await res.json();
+    if (res.status === 202 && json.signatureRequired && json.transaction) {
+      reservedBountyId = String(json.bountyId || '');
+      if (!reservedBountyId) {
+        return { bounty: null, error: 'BARD did not return a bounty funding reservation' };
+      }
+      try {
+        broadcastTxHash = await sendTransaction(json.transaction);
+      } catch (error) {
+        if (isUserRejectedTransaction(error)) {
+          await authFetch(`/api/human/bounties/${reservedBountyId}/fund/abort`, {
+            method: 'POST',
+          }).catch(() => {});
+        }
+        throw error;
+      }
+      const reconciled = await reconcileHumanBountyFunding(
+        authFetch,
+        reservedBountyId,
+        broadcastTxHash
+      );
+      return reconciled.bounty
+        ? { bounty: reconciled.bounty, txHash: broadcastTxHash }
+        : {
+            bounty: null,
+            txHash: broadcastTxHash,
+            error: reconciled.error || 'Funding reconciliation failed',
+          };
+    }
     if (!res.ok) {
       if (json.txHash && json.bountyId) {
         const reconciled = await reconcileHumanBountyFunding(authFetch, json.bountyId, json.txHash);
@@ -810,7 +864,11 @@ export async function createHumanBounty(
       txHash: json.txHash || undefined,
     };
   } catch (error) {
-    return { bounty: null, error: error instanceof Error ? error.message : String(error) };
+    return {
+      bounty: null,
+      txHash: broadcastTxHash || undefined,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -1009,14 +1067,37 @@ export async function acceptHumanBountyProposal(
 
 export async function fundHumanBounty(
   authFetch: AuthFetch,
+  sendTransaction: SendTransaction,
   bountyId: string
 ): Promise<{ bounty: Bounty | null; txHash?: string; error?: string }> {
   try {
-    const res = await authFetch(`/api/human/bounties/${bountyId}/fund`, {
+    let res = await authFetch(`/api/human/bounties/${bountyId}/fund`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     });
-    const json = await res.json();
+    let json = await res.json();
+    if (res.status === 202 && json.signatureRequired && json.transaction) {
+      let txHash: string;
+      try {
+        txHash = await sendTransaction(json.transaction);
+      } catch (error) {
+        if (isUserRejectedTransaction(error)) {
+          await authFetch(`/api/human/bounties/${bountyId}/fund/abort`, {
+            method: 'POST',
+          }).catch(() => {});
+        }
+        throw error;
+      }
+      const reconciled = await reconcileHumanBountyFunding(authFetch, bountyId, txHash);
+      if (reconciled.bounty) {
+        return { bounty: reconciled.bounty, txHash };
+      }
+      return {
+        bounty: null,
+        txHash,
+        error: reconciled.error || 'Funding reconciliation failed',
+      };
+    }
     if (!res.ok) {
       if (json.txHash) {
         const reconciled = await reconcileHumanBountyFunding(authFetch, bountyId, json.txHash);

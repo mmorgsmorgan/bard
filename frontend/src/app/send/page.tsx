@@ -18,7 +18,14 @@ export default function SendPage() {
   const searchParams = useSearchParams();
   const prefillTo = searchParams.get('to') || '';
 
-  const { address, isConnected, status, login, authFetch } = useBardAccount();
+  const {
+    address,
+    isConnected,
+    status,
+    login,
+    authFetch,
+    sendTransaction,
+  } = useBardAccount();
   const [recipient, setRecipient] = useState(prefillTo);
   const [recipientProfile, setRecipientProfile] = useState<StoredProfile | null>(null);
   const [resolving, setResolving] = useState(false);
@@ -28,6 +35,7 @@ export default function SendPage() {
   const [error, setError] = useState('');
   const [txHash, setTxHash] = useState('');
   const [explorer, setExplorer] = useState('');
+  const [pendingTxHash, setPendingTxHash] = useState('');
 
   useEffect(() => {
     const clean = recipient.replace('@', '');
@@ -92,21 +100,42 @@ export default function SendPage() {
     setStep('sending');
     setError('');
     try {
-      const response = await authFetch('/api/human/send-usdc', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: resolvedWallet, amount }),
-      });
-      const data = await response.json() as {
+      const transferInput = { to: resolvedWallet, amount };
+      let response = await authFetch(
+        '/api/human/send-usdc',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            pendingTxHash
+              ? { ...transferInput, txHash: pendingTxHash }
+              : transferInput
+          ),
+        }
+      );
+      let data = await response.json() as {
         txHash?: string;
         explorer?: string;
+        signatureRequired?: boolean;
+        transaction?: Parameters<typeof sendTransaction>[0];
         error?: string;
       };
+      if (response.status === 202 && data.signatureRequired && data.transaction) {
+        const txHash = await sendTransaction(data.transaction);
+        setPendingTxHash(txHash);
+        response = await authFetch('/api/human/send-usdc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...transferInput, txHash }),
+        });
+        data = await response.json();
+      }
       if (!response.ok || !data.txHash) {
         throw new Error(data.error || 'Transfer failed');
       }
       setTxHash(data.txHash);
       setExplorer(data.explorer || '');
+      setPendingTxHash('');
       setStep('done');
       const balanceResponse = await authFetch('/api/human/wallet');
       if (balanceResponse.ok) {
@@ -125,6 +154,7 @@ export default function SendPage() {
     setError('');
     setTxHash('');
     setExplorer('');
+    setPendingTxHash('');
   }
 
   if (status === 'connecting') {
@@ -136,7 +166,9 @@ export default function SendPage() {
       <div className="min-h-screen flex items-center justify-center px-6">
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-10 max-w-md w-full text-center">
           <BardLogo size={48} className="mx-auto mb-4" />
-          <p className="text-surface-400 font-mono text-sm mb-5">Sign in to send from your BARD-managed wallet</p>
+          <p className="text-surface-400 font-mono text-sm mb-5">
+            Sign in to send from your email wallet or connected external wallet
+          </p>
           <button onClick={login} className="btn-primary w-full text-xs py-3">Continue with email or wallet</button>
         </div>
       </div>
@@ -171,7 +203,14 @@ export default function SendPage() {
           <div className="w-12 h-12 bg-red-500/20 border border-red-500/30 flex items-center justify-center mx-auto mb-6 text-red-400 font-mono font-bold text-lg">✗</div>
           <h2 className="text-xl font-bold text-white mb-3">Transfer Failed</h2>
           <p className="text-surface-400 text-xs mb-6 font-mono break-all">{error}</p>
-          <button onClick={() => setStep('input')} className="btn-primary w-full text-xs py-3">Try Again</button>
+          {pendingTxHash ? (
+            <div className="flex gap-3">
+              <button onClick={reset} className="btn-secondary flex-1 text-xs py-3">Start Over</button>
+              <button onClick={handleSend} className="btn-primary flex-1 text-xs py-3">Confirm Transaction</button>
+            </div>
+          ) : (
+            <button onClick={() => setStep('input')} className="btn-primary w-full text-xs py-3">Try Again</button>
+          )}
         </div>
       </div>
     );

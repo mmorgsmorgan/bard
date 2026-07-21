@@ -14,7 +14,14 @@ import { useBardAccount } from '@/components/BardAccountProvider';
 export default function PublicProfilePage() {
   const params = useParams();
   const username = params.username as string;
-  const { address: viewerAddress, isConnected, status, login, authFetch } = useBardAccount();
+  const {
+    address: viewerAddress,
+    isConnected,
+    status,
+    login,
+    authFetch,
+    sendTransaction,
+  } = useBardAccount();
 
   const [localProfile, setLocalProfile] = useState<StoredProfile | null>(null);
   const [proofs, setProofs] = useState<StoredProof[]>([]);
@@ -33,6 +40,8 @@ export default function PublicProfilePage() {
   const [vouchStep, setVouchStep] = useState<'form' | 'vouching' | 'done' | 'error'>('form');
   const [vouchError, setVouchError] = useState('');
   const [vouchExplorer, setVouchExplorer] = useState('');
+  const [pendingApproveTxHash, setPendingApproveTxHash] = useState('');
+  const [pendingVouchTxHash, setPendingVouchTxHash] = useState('');
 
   const { data: onChainProfile, isError: profileReadError, isLoading: profileLoading } = useReadContract({
     address: CONTRACTS.BARD_PROFILE, abi: BARD_PROFILE_ABI, functionName: 'getProfileByUsername', args: [username],
@@ -112,21 +121,67 @@ export default function PublicProfilePage() {
     setVouchStep('vouching');
     setVouchError('');
     try {
-      const response = await authFetch('/api/human/vouches', {
+      const vouchInput = {
+        contributorWallet: profileWallet,
+        amount: vouchAmount,
+        tier: vouchTier,
+        statement: vouchStatement,
+        ecosystem: vouchEcosystem,
+        score: scoreNumber,
+      };
+      let response = await authFetch('/api/human/vouches', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contributorWallet: profileWallet,
-          amount: vouchAmount,
-          tier: vouchTier,
-          statement: vouchStatement,
-          ecosystem: vouchEcosystem,
-          score: scoreNumber,
+          ...vouchInput,
+          ...(pendingApproveTxHash ? { approveTxHash: pendingApproveTxHash } : {}),
+          ...(pendingVouchTxHash ? { vouchTxHash: pendingVouchTxHash } : {}),
         }),
       });
-      const data = await response.json() as { explorer?: string; error?: string };
+      let data = await response.json() as {
+        explorer?: string;
+        error?: string;
+        signatureRequired?: boolean;
+        stage?: 'approve' | 'vouch';
+        approveTxHash?: string;
+        transaction?: Parameters<typeof sendTransaction>[0];
+      };
+      let approveTxHash = pendingApproveTxHash;
+      if (
+        response.status === 202 &&
+        data.signatureRequired &&
+        data.stage === 'approve' &&
+        data.transaction
+      ) {
+        approveTxHash = await sendTransaction(data.transaction);
+        setPendingApproveTxHash(approveTxHash);
+        response = await authFetch('/api/human/vouches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...vouchInput, approveTxHash }),
+        });
+        data = await response.json();
+      }
+      if (
+        response.status === 202 &&
+        data.signatureRequired &&
+        data.stage === 'vouch' &&
+        data.transaction
+      ) {
+        approveTxHash = data.approveTxHash || approveTxHash;
+        const vouchTxHash = await sendTransaction(data.transaction);
+        setPendingVouchTxHash(vouchTxHash);
+        response = await authFetch('/api/human/vouches', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...vouchInput, approveTxHash, vouchTxHash }),
+        });
+        data = await response.json();
+      }
       if (!response.ok) throw new Error(data.error || 'Vouch failed');
       setVouchExplorer(data.explorer || '');
+      setPendingApproveTxHash('');
+      setPendingVouchTxHash('');
       setVouchStep('done');
       await Promise.all([refetchVouchCount(), refetchTotalStaked()]);
     } catch (cause) {
@@ -151,6 +206,7 @@ export default function PublicProfilePage() {
 
   // Get PFP URL from local profile storage
   const pfpUrl = localProfile?.pfp || '';
+  const hasPendingVouch = Boolean(pendingApproveTxHash || pendingVouchTxHash);
 
   const socialLinks = [
     profileFarcaster && { label: 'Farcaster', value: profileFarcaster, url: `https://warpcast.com/${profileFarcaster}`, icon: <FarcasterIcon /> },
@@ -523,7 +579,17 @@ export default function PublicProfilePage() {
                     View transaction ↗
                   </a>
                 )}
-                <button onClick={() => { setShowVouchModal(false); setVouchStep('form'); }} className="btn-primary text-xs">Close</button>
+                <button
+                  onClick={() => {
+                    setShowVouchModal(false);
+                    setVouchStep('form');
+                    setPendingApproveTxHash('');
+                    setPendingVouchTxHash('');
+                  }}
+                  className="btn-primary text-xs"
+                >
+                  Close
+                </button>
               </div>
             ) : (
               <>
@@ -531,7 +597,10 @@ export default function PublicProfilePage() {
                 <span className="label-mono block mb-3">Tier</span>
                 <div className="grid grid-cols-4 gap-px bg-[rgba(255,255,255,0.06)] mb-6">
                   {VOUCH_TIERS.map((tier) => (
-                    <button key={tier.id} onClick={() => { setVouchTier(tier.id); setVouchAmount(String(tier.minUSDC)); }}
+                    <button
+                      key={tier.id}
+                      disabled={hasPendingVouch}
+                      onClick={() => { setVouchTier(tier.id); setVouchAmount(String(tier.minUSDC)); }}
                       className={`p-3 text-center transition-all ${vouchTier === tier.id ? 'bg-[rgba(255,133,18,0.1)] border-b-2 border-[#ff8512]' : 'bg-[#050505] hover:bg-[#0c0c0c]'}`}>
                       <div className="font-mono text-xs font-bold text-white">{tier.name}</div>
                       <div className="font-mono text-[10px] text-surface-500">{tier.multiplier}</div>
@@ -542,31 +611,40 @@ export default function PublicProfilePage() {
                 <div className="space-y-5">
                   <div>
                     <span className="label-mono block mb-2">Stake (USDC)</span>
-                    <input type="number" value={vouchAmount} onChange={(e) => setVouchAmount(e.target.value)} min={VOUCH_TIERS[vouchTier].minUSDC} className="input-field font-mono" />
+                    <input disabled={hasPendingVouch} type="number" value={vouchAmount} onChange={(e) => setVouchAmount(e.target.value)} min={VOUCH_TIERS[vouchTier].minUSDC} className="input-field font-mono" />
                     <p className="font-mono text-[10px] text-surface-600 mt-1">Min: {VOUCH_TIERS[vouchTier].minUSDC} USDC -- 30-day lock</p>
                   </div>
                   <div>
                     <span className="label-mono block mb-2">Statement</span>
-                    <textarea value={vouchStatement} onChange={(e) => setVouchStatement(e.target.value)} placeholder="Why do you vouch for this contributor?" className="input-field" rows={2} />
+                    <textarea disabled={hasPendingVouch} value={vouchStatement} onChange={(e) => setVouchStatement(e.target.value)} placeholder="Why do you vouch for this contributor?" className="input-field" rows={2} />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <span className="label-mono block mb-2">Ecosystem</span>
-                      <input value={vouchEcosystem} onChange={(e) => setVouchEcosystem(e.target.value)} placeholder="Arc, Monad..." className="input-field" />
+                      <input disabled={hasPendingVouch} value={vouchEcosystem} onChange={(e) => setVouchEcosystem(e.target.value)} placeholder="Arc, Monad..." className="input-field" />
                     </div>
                     <div>
                       <span className="label-mono block mb-2">Score (0-100)</span>
-                      <input type="number" value={vouchScore} onChange={(e) => setVouchScore(e.target.value)} min="0" max="100" className="input-field font-mono" />
+                      <input disabled={hasPendingVouch} type="number" value={vouchScore} onChange={(e) => setVouchScore(e.target.value)} min="0" max="100" className="input-field font-mono" />
                     </div>
                   </div>
                 </div>
 
                 {vouchError && <div className="mt-4 p-3 bg-red-900/20 border border-red-900/30 text-red-400 text-sm font-mono">{vouchError}</div>}
+                {hasPendingVouch && (
+                  <div className="mt-4 p-3 border border-[rgba(255,133,18,0.25)] bg-[rgba(255,133,18,0.05)] text-surface-400 text-xs font-mono">
+                    BARD will reuse the pending transaction hash instead of creating another stake.
+                  </div>
+                )}
 
                 <div className="flex gap-3 mt-8">
                   <button onClick={() => { setShowVouchModal(false); setVouchStep('form'); }} className="btn-secondary flex-1 text-xs">Cancel</button>
                   <button onClick={handleVouch} disabled={!vouchStatement || !vouchEcosystem || vouchStep === 'vouching'} className="btn-primary flex-1 text-xs">
-                    {vouchStep === 'vouching' ? 'Vouching...' : `Vouch ${vouchAmount} USDC`}
+                    {vouchStep === 'vouching'
+                      ? 'Confirming...'
+                      : hasPendingVouch
+                        ? 'Resume vouch'
+                        : `Vouch ${vouchAmount} USDC`}
                   </button>
                 </div>
               </>

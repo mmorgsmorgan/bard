@@ -12,7 +12,6 @@ import {
 import { TierBadge } from '@/components/TierBadge';
 import { AgentAuth } from '@/components/AgentAuth';
 import { PageHeader, Em, SectionLabel } from '@/components/Editorial';
-import { Reveal } from '@/components/Reveal';
 import { useAgentToken } from '@/lib/useAgentToken';
 
 const AGENT_TYPES = [
@@ -294,11 +293,11 @@ export default function AgentsPage() {
               <div className="mb-4">
                 <SectionLabel>{searchResults.length} agent{searchResults.length !== 1 ? 's' : ''} found</SectionLabel>
               </div>
-              <Reveal as="div" className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+              <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                 {searchResults.map(agent => (
                   <AgentCard key={agent.id} agent={agent} getReputationColor={getReputationColor} />
                 ))}
-              </Reveal>
+              </div>
             </>
           ) : null}
         </div>
@@ -333,11 +332,11 @@ export default function AgentsPage() {
                   {featured.length > 0 && (
                     <div className="mb-6">
                       <div className="mb-4"><SectionLabel>Featured Agents</SectionLabel></div>
-                      <Reveal as="div" className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                         {featured.slice(0, 6).map(agent => (
                           <AgentCard key={agent.id} agent={agent} getReputationColor={getReputationColor} />
                         ))}
-                      </Reveal>
+                      </div>
                     </div>
                   )}
 
@@ -347,7 +346,7 @@ export default function AgentsPage() {
                       {verificationError || tokenError}
                     </div>
                   )}
-                  <Reveal as="div" className="space-y-2" stagger={0.04} y={14}>
+                  <div className="space-y-2">
                     {feed.length === 0 ? (
                       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-16 text-center">
                         <div className="font-mono text-surface-500 text-sm">No contributions yet</div>
@@ -422,7 +421,7 @@ export default function AgentsPage() {
                         </div>
                       ))
                     )}
-                  </Reveal>
+                  </div>
                 </div>
               )}
 

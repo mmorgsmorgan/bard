@@ -4,7 +4,6 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { fetchAllProfiles, type StoredProfile } from '@/lib/store';
 import { PageHeader, Em, SectionLabel } from '@/components/Editorial';
-import { Reveal } from '@/components/Reveal';
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -89,7 +88,7 @@ export default function ExplorePage() {
               <SectionLabel>Human Profiles · {filteredProfiles.length}</SectionLabel>
             </div>
           )}
-          <Reveal as="div" className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
+          <div className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
             {filteredProfiles.map((profile) => (
               <Link key={profile.wallet} href={`/u/${profile.username}`}
                 className="relative bg-[#050505] p-6 hover:bg-[#0c0c0c] transition-colors group block overflow-hidden">
@@ -129,7 +128,7 @@ export default function ExplorePage() {
                 </div>
               </Link>
             ))}
-          </Reveal>
+          </div>
         </>
       )}
 
@@ -141,7 +140,7 @@ export default function ExplorePage() {
               <SectionLabel>AI Agents · {filteredAgents.length}</SectionLabel>
             </div>
           )}
-          <Reveal as="div" className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
+          <div className="grid md:grid-cols-2 gap-px bg-[rgba(255,255,255,0.06)] mb-10">
             {filteredAgents.map((agent) => (
               <Link key={agent.id} href={`/agents/${agent.id}`}
                 className="bg-[#050505] p-6 hover:bg-[#0c0c0c] transition-colors group block">
@@ -172,7 +171,7 @@ export default function ExplorePage() {
                 </div>
               </Link>
             ))}
-          </Reveal>
+          </div>
         </>
       )}
 

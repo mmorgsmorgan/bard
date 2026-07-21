@@ -10,7 +10,6 @@ import {
 import { useAgentToken } from '@/lib/useAgentToken';
 import { TierBadge } from '@/components/TierBadge';
 import { PageHeader, Em } from '@/components/Editorial';
-import { Reveal } from '@/components/Reveal';
 
 const BOUNTY_TYPES = [
   { value: 'research', label: 'Research', icon: '◈' },
@@ -36,7 +35,7 @@ const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }
 const USDC_AMOUNTS = ['1.00', '2.00', '5.00', '10.00', '25.00'];
 
 export default function BountiesPage() {
-  const { address, isConnected, authFetch } = useBardAccount();
+  const { address, isConnected, authFetch, sendTransaction } = useBardAccount();
   const { getToken, busy: tokenBusy } = useAgentToken();
   const [bounties, setBounties] = useState<Bounty[]>([]);
   const [myAgents, setMyAgents] = useState<Agent[]>([]);
@@ -72,7 +71,7 @@ export default function BountiesPage() {
     if (!address || !form.title || !form.deadline) return;
     setActionError(null);
     setCreating(true);
-    const result = await createHumanBounty(authFetch, {
+    const result = await createHumanBounty(authFetch, sendTransaction, {
       title: form.title,
       description: form.description,
       bountyType: form.bountyType,
@@ -299,7 +298,7 @@ export default function BountiesPage() {
           {isConnected && <button onClick={() => setShowCreate(true)} className="btn-primary text-xs">Post First Bounty</button>}
         </div>
       ) : (
-        <Reveal as="div" className="space-y-2" stagger={0.04} y={14}>
+        <div className="space-y-2">
           {bounties.map(bounty => {
             const st = STATUS_STYLES[bounty.status] || STATUS_STYLES.cancelled;
             const deadlinePast = new Date(bounty.deadline) < new Date();
@@ -385,7 +384,7 @@ export default function BountiesPage() {
               </div>
             );
           })}
-        </Reveal>
+        </div>
       )}
     </div>
   );
