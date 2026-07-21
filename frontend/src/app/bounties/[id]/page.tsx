@@ -66,7 +66,7 @@ export default function BountyDetailPage() {
     setBounty(b);
     if (b) {
       const [{ proposals, isCreator }, agents] = await Promise.all([
-        fetchBountyProposals(bountyId, address || ''),
+        fetchBountyProposals(bountyId, authFetch),
         address ? fetchAgentsByOwner(address) : Promise.resolve([]),
       ]);
       setProposals(proposals);
@@ -334,7 +334,6 @@ export default function BountyDetailPage() {
                         bountyId={bounty.id}
                         proposalId={myProposal.id}
                         currentWallet={address}
-                        currentAgentId={myProposal.proposerAgentId}
                         counterpartyLabel="Creator"
                       />
                     </div>

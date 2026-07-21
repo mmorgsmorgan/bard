@@ -6,6 +6,7 @@
  */
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+type AuthFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
 // ── Types ──
 
@@ -215,12 +216,24 @@ let _notifCache: Record<string, Notification[]> = {};
 // ── Profiles ──
 // ══════════════════════════════════════════════════════
 
-export async function saveProfileAsync(profile: StoredProfile): Promise<void> {
+export async function saveProfileAsync(authFetch: AuthFetch, profile: StoredProfile): Promise<void> {
   try {
-    await fetch(`${API}/api/profiles`, {
+    await authFetch('/api/human/profile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(profile),
+      body: JSON.stringify({
+        username: profile.username,
+        displayName: profile.displayName,
+        bio: profile.bio,
+        profileType: profile.profileType,
+        ecosystems: profile.ecosystems,
+        farcaster: profile.farcaster,
+        github: profile.github,
+        x: profile.x,
+        discord: profile.discord,
+        linkedin: profile.linkedin,
+        pfp: profile.pfp,
+      }),
     });
     _profileCache[profile.wallet.toLowerCase()] = profile;
     _profileCache[`u:${profile.username}`] = profile;
@@ -228,10 +241,10 @@ export async function saveProfileAsync(profile: StoredProfile): Promise<void> {
 }
 
 // Synchronous wrapper — saves in background, updates cache immediately
-export function saveProfile(profile: StoredProfile): void {
+export function saveProfile(authFetch: AuthFetch, profile: StoredProfile): void {
   _profileCache[profile.wallet.toLowerCase()] = profile;
   _profileCache[`u:${profile.username}`] = profile;
-  saveProfileAsync(profile);
+  saveProfileAsync(authFetch, profile);
 }
 
 export async function fetchProfileByWallet(wallet: string): Promise<StoredProfile | null> {
@@ -285,12 +298,19 @@ export function getAllProfilesList(): StoredProfile[] {
 // ── Proofs ──
 // ══════════════════════════════════════════════════════
 
-export async function saveProofAsync(proof: StoredProof): Promise<void> {
+export async function saveProofAsync(authFetch: AuthFetch, proof: StoredProof): Promise<void> {
   try {
-    await fetch(`${API}/api/proofs`, {
+    await authFetch('/api/human/proofs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(proof),
+      body: JSON.stringify({
+        id: proof.id,
+        title: proof.title,
+        description: proof.description,
+        ecosystem: proof.ecosystem,
+        contributionType: proof.contributionType,
+        externalLinks: proof.externalLinks,
+      }),
     });
     const key = proof.contributor.toLowerCase();
     if (!_proofCache[key]) _proofCache[key] = [];
@@ -298,11 +318,11 @@ export async function saveProofAsync(proof: StoredProof): Promise<void> {
   } catch (e) { console.error('saveProof error:', e); }
 }
 
-export function saveProof(proof: StoredProof): void {
+export function saveProof(authFetch: AuthFetch, proof: StoredProof): void {
   const key = proof.contributor.toLowerCase();
   if (!_proofCache[key]) _proofCache[key] = [];
   _proofCache[key].push(proof);
-  saveProofAsync(proof);
+  saveProofAsync(authFetch, proof);
 }
 
 export async function fetchProofsByWallet(wallet: string): Promise<StoredProof[]> {
@@ -322,9 +342,9 @@ export function getProofsByWallet(wallet: string): StoredProof[] {
 // ── Portfolio ──
 // ══════════════════════════════════════════════════════
 
-export async function savePortfolioItemAsync(item: PortfolioItem): Promise<void> {
+export async function savePortfolioItemAsync(authFetch: AuthFetch, item: PortfolioItem): Promise<void> {
   try {
-    await fetch(`${API}/api/portfolio`, {
+    await authFetch('/api/human/portfolio', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(item),
@@ -335,11 +355,11 @@ export async function savePortfolioItemAsync(item: PortfolioItem): Promise<void>
   } catch (e) { console.error('savePortfolioItem error:', e); }
 }
 
-export function savePortfolioItem(item: PortfolioItem): void {
+export function savePortfolioItem(authFetch: AuthFetch, item: PortfolioItem): void {
   const key = item.wallet.toLowerCase();
   if (!_portfolioCache[key]) _portfolioCache[key] = [];
   _portfolioCache[key].push(item);
-  savePortfolioItemAsync(item);
+  savePortfolioItemAsync(authFetch, item);
 }
 
 export async function fetchPortfolioByWallet(wallet: string): Promise<PortfolioItem[]> {
@@ -355,9 +375,9 @@ export function getPortfolioByWallet(wallet: string): PortfolioItem[] {
   return _portfolioCache[wallet.toLowerCase()] || [];
 }
 
-export async function deletePortfolioItemAsync(id: string): Promise<void> {
+export async function deletePortfolioItemAsync(authFetch: AuthFetch, id: string): Promise<void> {
   try {
-    await fetch(`${API}/api/portfolio/${id}`, { method: 'DELETE' });
+    await authFetch(`/api/human/portfolio/${id}`, { method: 'DELETE' });
     // Remove from all caches
     for (const key of Object.keys(_portfolioCache)) {
       _portfolioCache[key] = _portfolioCache[key].filter(p => p.id !== id);
@@ -365,16 +385,20 @@ export async function deletePortfolioItemAsync(id: string): Promise<void> {
   } catch (e) { console.error('deletePortfolioItem error:', e); }
 }
 
-export function deletePortfolioItem(id: string): void {
+export function deletePortfolioItem(authFetch: AuthFetch, id: string): void {
   for (const key of Object.keys(_portfolioCache)) {
     _portfolioCache[key] = _portfolioCache[key].filter(p => p.id !== id);
   }
-  deletePortfolioItemAsync(id);
+  deletePortfolioItemAsync(authFetch, id);
 }
 
-export async function reorderPortfolioItems(wallet: string, orderedIds: string[]): Promise<void> {
+export async function reorderPortfolioItems(
+  authFetch: AuthFetch,
+  wallet: string,
+  orderedIds: string[]
+): Promise<void> {
   try {
-    await fetch(`${API}/api/portfolio/reorder`, {
+    await authFetch('/api/human/portfolio/reorder', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ wallet, orderedIds }),
@@ -386,14 +410,10 @@ export async function reorderPortfolioItems(wallet: string, orderedIds: string[]
 // ── Notifications ──
 // ══════════════════════════════════════════════════════
 
-export async function addNotificationAsync(notif: Omit<Notification, 'id' | 'read' | 'createdAt'>): Promise<void> {
-  try {
-    await fetch(`${API}/api/notifications`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(notif),
-    });
-  } catch (e) { console.error('addNotification error:', e); }
+export async function addNotificationAsync(
+  _notif: Omit<Notification, 'id' | 'read' | 'createdAt'>
+): Promise<void> {
+  throw new Error('Notifications are created by authenticated BARD workflows');
 }
 
 export function addNotification(notif: Omit<Notification, 'id' | 'read' | 'createdAt'>): void {
@@ -406,12 +426,17 @@ export function addNotification(notif: Omit<Notification, 'id' | 'read' | 'creat
     createdAt: new Date().toISOString(),
   });
   _notifCache[notif.wallet.toLowerCase()] = cached;
-  addNotificationAsync(notif);
+  void addNotificationAsync(notif).catch((error) => {
+    console.error('addNotification error:', error);
+  });
 }
 
-export async function fetchNotificationsByWallet(wallet: string): Promise<Notification[]> {
+export async function fetchNotificationsByWallet(
+  wallet: string,
+  authFetch: AuthFetch
+): Promise<Notification[]> {
   try {
-    const res = await fetch(`${API}/api/notifications/${wallet}`);
+    const res = await authFetch('/api/human/notifications');
     const data = await res.json();
     _notifCache[wallet.toLowerCase()] = data.notifications || [];
     return data.notifications || [];
@@ -426,34 +451,37 @@ export function getUnreadCount(wallet: string): number {
   return getNotificationsByWallet(wallet).filter(n => !n.read).length;
 }
 
-export async function markNotificationReadAsync(id: string): Promise<void> {
+export async function markNotificationReadAsync(authFetch: AuthFetch, id: string): Promise<void> {
   try {
-    await fetch(`${API}/api/notifications/${id}/read`, { method: 'PUT' });
+    await authFetch(`/api/human/notifications/${id}/read`, { method: 'PUT' });
   } catch (e) { console.error('markNotificationRead error:', e); }
 }
 
-export function markNotificationRead(id: string): void {
+export function markNotificationRead(authFetch: AuthFetch, id: string): void {
   // Update all caches
   for (const key of Object.keys(_notifCache)) {
     _notifCache[key] = _notifCache[key].map(n => n.id === id ? { ...n, read: true } : n);
   }
-  markNotificationReadAsync(id);
+  markNotificationReadAsync(authFetch, id);
 }
 
-export async function markAllNotificationsReadAsync(wallet: string): Promise<void> {
+export async function markAllNotificationsReadAsync(
+  authFetch: AuthFetch,
+  wallet: string
+): Promise<void> {
   try {
-    await fetch(`${API}/api/notifications/${wallet}/read-all`, { method: 'PUT' });
+    await authFetch('/api/human/notifications/read-all', { method: 'PUT' });
     if (_notifCache[wallet.toLowerCase()]) {
       _notifCache[wallet.toLowerCase()] = _notifCache[wallet.toLowerCase()].map(n => ({ ...n, read: true }));
     }
   } catch (e) { console.error('markAllNotificationsRead error:', e); }
 }
 
-export function markAllNotificationsRead(wallet: string): void {
+export function markAllNotificationsRead(authFetch: AuthFetch, wallet: string): void {
   if (_notifCache[wallet.toLowerCase()]) {
     _notifCache[wallet.toLowerCase()] = _notifCache[wallet.toLowerCase()].map(n => ({ ...n, read: true }));
   }
-  markAllNotificationsReadAsync(wallet);
+  markAllNotificationsReadAsync(authFetch, wallet);
 }
 
 // ══════════════════════════════════════════════════════
@@ -734,8 +762,6 @@ export async function createBounty(data: {
   } catch (e) { console.error('createBounty error:', e); return null; }
 }
 
-type AuthFetch = (path: string, init?: RequestInit) => Promise<Response>;
-
 async function reconcileHumanBountyFunding(
   authFetch: AuthFetch,
   bountyId: string,
@@ -882,11 +908,10 @@ export async function cancelHumanBounty(
 
 export async function fetchBountyProposals(
   bountyId: string,
-  callerWallet: string
+  authFetch: AuthFetch
 ): Promise<{ proposals: BountyProposal[]; isCreator: boolean }> {
   try {
-    const url = `${API}/api/bounties/${bountyId}/proposals?callerWallet=${encodeURIComponent(callerWallet)}`;
-    const res = await fetch(url);
+    const res = await authFetch(`/api/human/bounties/${bountyId}/proposals`);
     const json = await res.json();
     return {
       proposals: (json.proposals || []).map(proposalFromRow),
@@ -1056,11 +1081,11 @@ export async function rejectHumanBountyProposal(
 export async function fetchBountyMessages(
   bountyId: string,
   proposalId: string,
-  callerWallet: string
+  authFetch: AuthFetch
 ): Promise<{ messages: BountyMessage[]; isCreator: boolean; isProposer: boolean }> {
   try {
-    const url = `${API}/api/bounties/${bountyId}/messages?proposalId=${encodeURIComponent(proposalId)}&callerWallet=${encodeURIComponent(callerWallet)}`;
-    const res = await fetch(url);
+    const url = `/api/human/bounties/${bountyId}/messages?proposalId=${encodeURIComponent(proposalId)}`;
+    const res = await authFetch(url);
     const json = await res.json();
     return {
       messages: (json.messages || []).map(messageFromRow),
@@ -1071,11 +1096,12 @@ export async function fetchBountyMessages(
 }
 
 export async function sendBountyMessage(
+  authFetch: AuthFetch,
   bountyId: string,
-  data: { proposalId: string; message: string; callerWallet: string; callerAgentId?: string }
+  data: { proposalId: string; message: string }
 ): Promise<boolean> {
   try {
-    const res = await fetch(`${API}/api/bounties/${bountyId}/messages`, {
+    const res = await authFetch(`/api/human/bounties/${bountyId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),

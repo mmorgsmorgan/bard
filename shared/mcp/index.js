@@ -10,7 +10,7 @@
  * share a single hosted instance.
  */
 
-import { createHash, randomBytes } from 'crypto';
+import { createHash, createHmac, randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -35,6 +35,23 @@ function apiBase() {
 async function apiFetch(path, opts = {}, token = '') {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  const mcpSecret = process.env.MCP_INTERNAL_SECRET;
+  if (mcpSecret && token) {
+    const timestamp = Date.now().toString();
+    const nonce = randomBytes(16).toString('hex');
+    const method = String(opts.method || 'GET').toUpperCase();
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const bodyHash = createHash('sha256').update(
+      typeof opts.body === 'string' ? opts.body : ''
+    ).digest('hex');
+    const payload = `${timestamp}\n${nonce}\n${method}\n${path}\n${tokenHash}\n${bodyHash}`;
+    headers['X-Bard-MCP-Timestamp'] = timestamp;
+    headers['X-Bard-MCP-Nonce'] = nonce;
+    headers['X-Bard-MCP-Body-SHA256'] = bodyHash;
+    headers['X-Bard-MCP-Signature'] = createHmac('sha256', mcpSecret)
+      .update(payload)
+      .digest('hex');
+  }
   return fetch(`${apiBase()}${path}`, { ...opts, headers });
 }
 
@@ -88,6 +105,11 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
+    name: 'bard_revoke_token',
+    description: 'Revoke the current BARD agent token. The token stops working immediately and must be replaced by authenticating again.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
     name: 'bard_get_wallet_balance',
     description: 'Get your authenticated managed-wallet balance on Arc Testnet. Returns ERC-20 USDC balance, native gas balance, wallet address, and ArcScan link. The wallet is resolved from your token; no address or private key is accepted.',
     inputSchema: { type: 'object', properties: {}, required: [] },
@@ -130,6 +152,11 @@ export const TOOLS = [
     },
   },
   {
+    name: 'bard_list_my_contributions',
+    description: 'List contributions submitted by the authenticated agent.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
     name: 'bard_submit_contribution',
     description: 'Submit a work contribution to BARD. The work will be hashed and stored as proof. Types: research, code_review, data_analysis, content, verification, other.',
     inputSchema: {
@@ -149,6 +176,19 @@ export const TOOLS = [
       type: 'object',
       properties: { reasoning: { type: 'string', description: 'Your planned reasoning/approach (will be hashed)' } },
       required: ['reasoning'],
+    },
+  },
+  {
+    name: 'bard_reveal_reasoning',
+    description: 'Reveal a prior reasoning commitment using the commitment ID, original reasoning, and salt returned by bard_commit_reasoning.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        commitmentId: { type: 'string', description: 'Commitment ID returned by bard_commit_reasoning' },
+        reasoning: { type: 'string', description: 'The exact original reasoning text' },
+        salt: { type: 'string', description: 'The salt returned by bard_commit_reasoning' },
+      },
+      required: ['commitmentId', 'reasoning', 'salt'],
     },
   },
   {
@@ -239,6 +279,43 @@ export const TOOLS = [
     name: 'bard_create_wallet',
     description: 'Provision a Turnkey-managed wallet for this agent. The wallet is used to sign on-chain transactions (ERC-8004 minting, etc.) autonomously. Returns the wallet address if Turnkey is configured.',
     inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'bard_update_agent_profile',
+    description: 'Update the authenticated agent specializations and/or availability.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        specializations: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['research', 'code_review', 'data_analysis', 'content', 'verification', 'moderation', 'trading', 'other'],
+          },
+        },
+        availability: {
+          type: 'string',
+          enum: ['available', 'busy', 'offline', 'dormant'],
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'bard_get_agent_state',
+    description: 'Load the authenticated agent private persisted state.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'bard_save_agent_state',
+    description: 'Persist private JSON state for the authenticated agent between runs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        context: { type: 'object', description: 'JSON object to persist' },
+      },
+      required: ['context'],
+    },
   },
   {
     name: 'bard_upload_proof',
@@ -455,6 +532,33 @@ export const TOOLS = [
     },
   },
   {
+    name: 'bard_update_skill',
+    description: 'Update one of the authenticated agent skills.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        skillId: { type: 'string' },
+        skillName: { type: 'string' },
+        category: { type: 'string' },
+        description: { type: 'string' },
+        keywords: { type: 'array', items: { type: 'string' } },
+        hourlyRateUsdc: { type: 'number' },
+        fixedRateUsdc: { type: 'number' },
+        status: { type: 'string', enum: ['active', 'inactive'] },
+      },
+      required: ['skillId'],
+    },
+  },
+  {
+    name: 'bard_delete_skill',
+    description: 'Delete one of the authenticated agent skills.',
+    inputSchema: {
+      type: 'object',
+      properties: { skillId: { type: 'string' } },
+      required: ['skillId'],
+    },
+  },
+  {
     name: 'bard_check_escrow',
     description: 'Check the escrow status for a bounty. Shows the full escrow lifecycle: funded → claimed → submitted → reviewed → verified → released, with event audit trail. For on-chain (ERC-8183) escrow, also returns an `onchain` block: contract job id, platform fee, and ArcScan explorer links for the fund/release transactions (verifiable proof of custody + payout).',
     inputSchema: {
@@ -627,6 +731,21 @@ async function handleTool(name, args, token) {
         return await res.json();
       }
 
+      case 'bard_revoke_token': {
+        if (!token) return { error: 'Bearer token required' };
+        const res = await apiFetch('/api/auth/revoke', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || 'Token revocation failed' };
+        return {
+          success: true,
+          revoked: data.revoked,
+          message: 'Token revoked. Authenticate again before calling another BARD tool.',
+        };
+      }
+
       case 'bard_get_wallet_balance': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
@@ -740,6 +859,18 @@ async function handleTool(name, args, token) {
         return await res.json();
       }
 
+      case 'bard_list_my_contributions': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/contributions/agent/${auth.agentId}`, {}, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || 'Could not list contributions' };
+        return {
+          contributions: data.contributions || [],
+          count: data.contributions?.length || 0,
+        };
+      }
+
       case 'bard_submit_contribution': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
@@ -767,11 +898,35 @@ async function handleTool(name, args, token) {
         const hash = '0x' + createHash('sha256').update(args.reasoning + salt).digest('hex');
         const res = await apiFetch('/api/commitments', {
           method: 'POST',
-          body: JSON.stringify({ agentId: auth.agentId, commitmentHash: hash, salt }),
+          body: JSON.stringify({ commitmentHash: hash, salt }),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
-        return { commitmentId: data.commitmentId, hash, message: 'Reasoning committed. Link this commitment when submitting your contribution.' };
+        return {
+          commitmentId: data.commitmentId,
+          hash,
+          salt,
+          message: 'Reasoning committed. Keep the returned salt and use bard_reveal_reasoning when ready.',
+        };
+      }
+
+      case 'bard_reveal_reasoning': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/commitments/${encodeURIComponent(args.commitmentId)}/reveal`, {
+          method: 'POST',
+          body: JSON.stringify({
+            reasoning: args.reasoning,
+            salt: args.salt,
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || 'Commitment reveal failed' };
+        return {
+          success: true,
+          commitmentId: data.commitmentId,
+          verified: Boolean(data.verified),
+        };
       }
 
       case 'bard_list_bounties': {
@@ -916,6 +1071,55 @@ async function handleTool(name, args, token) {
           error: 'Turnkey is not configured on this backend. The platform operator must set TURNKEY_ORGANIZATION_ID, TURNKEY_API_PRIVATE_KEY, TURNKEY_API_PUBLIC_KEY env vars and redeploy.',
           hint: 'turnkey_not_configured',
         };
+      }
+
+      case 'bard_update_agent_profile': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        if (args.specializations === undefined && args.availability === undefined) {
+          return { error: 'Provide specializations and/or availability' };
+        }
+        const result = {};
+        if (args.specializations !== undefined) {
+          const res = await apiFetch(`/api/agents/${auth.agentId}/specializations`, {
+            method: 'PATCH',
+            body: JSON.stringify({ specializations: args.specializations }),
+          }, token);
+          const data = await res.json();
+          if (!res.ok) return { error: data.error || 'Specialization update failed' };
+          result.specializations = data.specializations;
+        }
+        if (args.availability !== undefined) {
+          const res = await apiFetch(`/api/agents/${auth.agentId}/availability`, {
+            method: 'PATCH',
+            body: JSON.stringify({ availability: args.availability }),
+          }, token);
+          const data = await res.json();
+          if (!res.ok) return { error: data.error || 'Availability update failed' };
+          result.availability = data.availability;
+        }
+        return { success: true, ...result };
+      }
+
+      case 'bard_get_agent_state': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/agents/${auth.agentId}/state`, {}, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || 'Could not load agent state' };
+        return data;
+      }
+
+      case 'bard_save_agent_state': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/agents/${auth.agentId}/state`, {
+          method: 'PUT',
+          body: JSON.stringify({ context: args.context }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || 'Could not save agent state' };
+        return { success: true };
       }
 
       case 'bard_upload_proof': {
@@ -1258,6 +1462,44 @@ async function handleTool(name, args, token) {
         return { success: true, message: `Skill "${args.skillName}" registered on marketplace!`, skill: data.skill };
       }
 
+      case 'bard_update_skill': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const body = {};
+        for (const field of [
+          'skillName',
+          'category',
+          'description',
+          'keywords',
+          'hourlyRateUsdc',
+          'fixedRateUsdc',
+          'status',
+        ]) {
+          if (args[field] !== undefined) body[field] = args[field];
+        }
+        const res = await apiFetch(
+          `/api/agents/${auth.agentId}/skills/${encodeURIComponent(args.skillId)}`,
+          { method: 'PUT', body: JSON.stringify(body) },
+          token
+        );
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || 'Skill update failed' };
+        return { success: true, skill: data.skill };
+      }
+
+      case 'bard_delete_skill': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(
+          `/api/agents/${auth.agentId}/skills/${encodeURIComponent(args.skillId)}`,
+          { method: 'DELETE' },
+          token
+        );
+        const data = await res.json();
+        if (!res.ok) return { error: data.error || 'Skill deletion failed' };
+        return { success: true };
+      }
+
       case 'bard_check_escrow': {
         const res = await apiFetch(`/api/bounties/${args.bountyId}/escrow`, {}, token);
         const data = await res.json();
@@ -1475,8 +1717,7 @@ async function handleTool(name, args, token) {
       case 'bard_list_bounty_proposals': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
-        const url = `/api/bounties/${args.bountyId}/proposals?callerWallet=${encodeURIComponent(auth.me?.wallet || '')}`;
-        const res = await apiFetch(url, {}, token);
+        const res = await apiFetch(`/api/bounties/${args.bountyId}/proposals`, {}, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
         return data;
@@ -1542,8 +1783,6 @@ async function handleTool(name, args, token) {
           body: JSON.stringify({
             proposalId: args.proposalId,
             message: args.message,
-            callerWallet: auth.me?.wallet,
-            callerAgentId: auth.agentId,
           }),
         }, token);
         const data = await res.json();
@@ -1554,7 +1793,7 @@ async function handleTool(name, args, token) {
       case 'bard_get_bounty_messages': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
-        const url = `/api/bounties/${args.bountyId}/messages?proposalId=${encodeURIComponent(args.proposalId)}&callerWallet=${encodeURIComponent(auth.me?.wallet || '')}`;
+        const url = `/api/bounties/${args.bountyId}/messages?proposalId=${encodeURIComponent(args.proposalId)}`;
         const res = await apiFetch(url, {}, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };

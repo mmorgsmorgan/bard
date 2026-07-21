@@ -150,9 +150,9 @@ async function cmdSign(keyArg) {
     console.log(`  # CLI (auto-uses saved token):`);
     console.log(`  bard me`);
     console.log(`  bard reputation\n`);
-    console.log(`  # API:`);
-    console.log(`  curl -H "Authorization: Bearer $TOKEN" ${getApiUrl()}/api/auth/me\n`);
-    console.log(`  # Export:`);
+    console.log(`  # MCP clients:`);
+    console.log(`  bard mcp-config --client generic\n`);
+    console.log(`  # Export for an MCP client:`);
     console.log(`  export BARD_TOKEN="${data.token}"\n`);
 
   } catch (err) {
@@ -163,6 +163,33 @@ async function cmdSign(keyArg) {
 
 function getMcpUrl() {
   return process.env.BARD_MCP_URL || loadConfig().mcpUrl || DEFAULT_MCP;
+}
+
+async function mcpCall(tool, args = {}, tokenOverride = null) {
+  const token = tokenOverride || getToken();
+  if (!token) throw new Error('Not authenticated. Run: bard auth');
+  const endpoint = `${getMcpUrl().replace(/\/mcp\/?$/, '').replace(/\/$/, '')}/mcp`;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: Date.now(),
+      method: 'tools/call',
+      params: { name: tool, arguments: args },
+    }),
+  });
+  const rpc = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(rpc?.error?.message || `MCP request failed (${res.status})`);
+  if (rpc?.error) throw new Error(rpc.error.message);
+  const raw = rpc?.result?.content?.[0]?.text;
+  if (!raw) throw new Error(`MCP tool ${tool} returned no result`);
+  const data = JSON.parse(raw);
+  if (data?.error) throw new Error(data.error);
+  return data;
 }
 
 const MCP_CLIENTS = {
@@ -230,7 +257,7 @@ async function cmdMcpConfig() {
     process.exit(1);
   }
 
-  const mcpUrl = getMcpUrl().replace(/\/$/, '') + '/mcp';
+  const mcpUrl = `${getMcpUrl().replace(/\/mcp\/?$/, '').replace(/\/$/, '')}/mcp`;
   const output = renderMcpConfig(client, mcpUrl, token);
 
   if (args.includes('--quiet') || client === 'generic') {
@@ -247,29 +274,16 @@ async function cmdMe() {
   const token = getToken();
   if (!token) { console.error('✗ Not authenticated. Run: bard challenge && bard sign <KEY>'); process.exit(1); }
 
-  const apiUrl = getApiUrl();
-  const res = await apiFetch('/api/auth/me');
-  const data = await res.json();
-  if (!res.ok) { console.error('✗', data.error); process.exit(1); }
-
-  // Cross-deployment check: a token with shared JWT_SECRET validates
-  // everywhere, but the agent row only exists on the backend that issued
-  // it. If /api/auth/me works but /api/agents/:id 404s, we're talking to
-  // the wrong backend and the frontend reading this same backend will
-  // not see this agent. Surface that loudly here.
-  let rowOk = null;
-  if (data.agentId) {
-    try {
-      const a = await apiFetch(`/api/agents/${data.agentId}`);
-      rowOk = a.ok;
-    } catch { rowOk = false; }
-  }
+  let data;
+  try { data = await mcpCall('bard_get_identity'); }
+  catch (err) { console.error('✗', err.message); process.exit(1); }
+  const rowOk = Boolean(data.agent);
 
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║   BARD Agent Identity                  ║`);
   console.log(`  ╚═══════════════════════════════════════╝\n`);
-  console.log(`  Backend:      ${apiUrl}`);
-  console.log(`  Agent row:    ${rowOk === true ? '✓ found on this backend' : rowOk === false ? '✗ MISSING — token is cross-deployment' : 'unknown'}`);
+  console.log(`  MCP:          ${getMcpUrl()}`);
+  console.log(`  Agent row:    ${rowOk ? '✓ found on the MCP backend' : '✗ MISSING — token is cross-deployment'}`);
   console.log(`  Agent:        ${data.agentName} (${data.agentId})`);
   console.log(`  Wallet:       ${data.wallet}`);
   console.log(`  Scope:        ${data.scope}`);
@@ -277,7 +291,7 @@ async function cmdMe() {
   console.log(`  Tier:         ${data.reputation?.tier} (Level ${data.reputation?.level})`);
   console.log(`  Contributions: ${data.reputation?.totalContributions} (${data.reputation?.verified} verified)`);
   console.log(`  Endorsements: ${data.reputation?.totalEndorsements}\n`);
-  if (rowOk === false) {
+  if (!rowOk) {
     console.log(`  ⚠  Your JWT validates here (shared JWT_SECRET), but this backend has`);
     console.log(`     no row for ${data.agentId}. The frontend reading this backend will`);
     console.log(`     not show your agent. Two ways out:`);
@@ -291,9 +305,9 @@ async function cmdReputation() {
   const agentId = config.agentId;
   if (!agentId) { console.error('✗ Not authenticated. Run: bard challenge && bard sign <KEY>'); process.exit(1); }
 
-  const res = await apiFetch(`/api/agents/${agentId}/reputation`);
-  const data = await res.json();
-  if (!res.ok) { console.error('✗', data.error); process.exit(1); }
+  let data;
+  try { data = await mcpCall('bard_get_reputation', { agentId }); }
+  catch (err) { console.error('✗', err.message); process.exit(1); }
 
   const bar = '█'.repeat(Math.floor(data.score / 5)) + '░'.repeat(20 - Math.floor(data.score / 5));
   console.log(`\n  ${config.agentName || agentId}`);
@@ -316,14 +330,22 @@ async function cmdBounties() {
       statusParam = args[++i];
     }
   }
-  const res = await apiFetch(`/api/bounties?status=${encodeURIComponent(statusParam)}`);
-  const data = await res.json();
-  if (!res.ok) { console.error('✗', data.error); process.exit(1); }
+  let bounties = [];
+  try {
+    for (const status of statusParam.split(',').map((value) => value.trim()).filter(Boolean)) {
+      const data = await mcpCall('bard_list_bounties', { status });
+      bounties.push(...(data.bounties || []));
+    }
+  } catch (err) {
+    console.error('✗', err.message);
+    process.exit(1);
+  }
+  bounties = [...new Map(bounties.map((bounty) => [bounty.id, bounty])).values()];
 
-  console.log(`\n  Bounties (${data.bounties?.length || 0}):    [filter: status=${statusParam}]`);
+  console.log(`\n  Bounties (${bounties.length}):    [filter: status=${statusParam}]`);
   console.log(`  ─────────────────────────────────`);
-  if (!data.bounties?.length) { console.log('  No bounties match.\n'); return; }
-  for (const b of data.bounties) {
+  if (!bounties.length) { console.log('  No bounties match.\n'); return; }
+  for (const b of bounties) {
     const mode = b.selection_mode === 'proposal' ? ' (proposal-mode — bid via bard_submit_proposal)' : '';
     console.log(`  [$${b.amount_usdc}] ${b.title}${mode}`);
     console.log(`         Status: ${b.status} | Type: ${b.bounty_type} | Min Rep: ${b.min_reputation} | Deadline: ${new Date(b.deadline).toLocaleDateString()}`);
@@ -337,9 +359,9 @@ async function cmdContributions() {
   const agentId = config.agentId;
   if (!agentId) { console.error('✗ Not authenticated.'); process.exit(1); }
 
-  const res = await apiFetch(`/api/contributions/agent/${agentId}`);
-  const data = await res.json();
-  if (!res.ok) { console.error('✗', data.error); process.exit(1); }
+  let data;
+  try { data = await mcpCall('bard_list_my_contributions'); }
+  catch (err) { console.error('✗', err.message); process.exit(1); }
 
   console.log(`\n  Contributions (${data.contributions?.length || 0}):`);
   console.log(`  ─────────────────────────────────`);
@@ -355,9 +377,9 @@ async function cmdRevoke() {
   const token = getToken();
   if (!token) { console.error('✗ Not authenticated.'); process.exit(1); }
 
-  const res = await apiFetch('/api/auth/revoke', { method: 'POST', body: JSON.stringify({}) });
-  const data = await res.json();
-  if (!res.ok) { console.error('✗', data.error); process.exit(1); }
+  let data;
+  try { data = await mcpCall('bard_revoke_token'); }
+  catch (err) { console.error('✗', err.message); process.exit(1); }
 
   const config = loadConfig();
   delete config.token;
@@ -373,12 +395,9 @@ async function cmdGenerateLinkToken() {
   const agentId = config.agentId;
   if (!agentId) { console.error('✗ Not authenticated. Run: bard challenge && bard sign <KEY>'); process.exit(1); }
 
-  const res = await apiFetch(`/api/agents/${agentId}/generate-link-token`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
-  const data = await res.json();
-  if (!res.ok) { console.error('✗', data.error); process.exit(1); }
+  let data;
+  try { data = await mcpCall('bard_generate_link_token'); }
+  catch (err) { console.error('✗', err.message); process.exit(1); }
 
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║   BARD Agent Link Token                ║`);
@@ -446,11 +465,17 @@ async function cmdAuthTurnkey() {
 
   // Step 2: Provision Turnkey wallet
   console.log('  [2/3] Provisioning managed wallet...');
-  const walletRes = await apiFetch(`/api/agents/${agentId}/wallet`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
-  const walletData = await walletRes.json();
+  let walletData;
+  try {
+    const result = await mcpCall('bard_create_wallet', {}, token);
+    walletData = {
+      address: result.walletAddress,
+      turnkeyEnabled: result.turnkeyEnabled,
+      error: null,
+    };
+  } catch (err) {
+    walletData = { address: null, turnkeyEnabled: false, error: err.message };
+  }
 
   if (walletData.address) {
     config.turnkeyAddress = walletData.address;
@@ -458,8 +483,7 @@ async function cmdAuthTurnkey() {
     saveConfig(config);
     console.log(`  ✓ Wallet: ${walletData.address}`);
   } else {
-    console.log(`  ⚠ Wallet provider not configured on server — wallet pending`);
-    console.log(`    The platform operator must configure a wallet provider on the backend.`);
+    console.log(`  ⚠ Wallet pending: ${walletData.error || 'wallet provider unavailable'}`);
   }
 
   // Step 3: Summary
@@ -484,13 +508,10 @@ async function cmdAuthTurnkey() {
 async function cmdRegisterSelf() {
   const token = getToken();
   if (!token) { console.error('✗ Not authenticated. Run: bard auth'); process.exit(1); }
-  console.log(`\n  ── Register-self against ${getApiUrl()} ──\n`);
-  const res = await apiFetch('/api/agents/register-from-token', {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
-  const data = await res.json();
-  if (!res.ok) { console.error(`  ✗ ${data.error || res.status}`); process.exit(1); }
+  console.log(`\n  ── Register-self through ${getMcpUrl()} ──\n`);
+  let data;
+  try { data = await mcpCall('bard_register_self'); }
+  catch (err) { console.error(`  ✗ ${err.message}`); process.exit(1); }
   if (data.created) {
     console.log(`  ✓ Created agent row for ${data.agent.agent_name} (${data.agent.id})`);
     console.log(`\n  Next: bard wallet`);
@@ -506,12 +527,12 @@ async function cmdAuditOrphans() {
   const config = loadConfig();
   const callerWallet = config.turnkeyAddress || config.wallet;
   if (!callerWallet) { console.error('✗ No wallet in config. Run: bard auth'); process.exit(1); }
-  console.log(`\n  ── Orphan wallet audit (${getApiUrl()}) ──\n`);
-  const res = await apiFetch(`/api/admin/turnkey-orphans?callerWallet=${encodeURIComponent(callerWallet)}`);
-  const data = await res.json();
-  if (!res.ok) {
-    console.error(`  ✗ ${data.error || res.status}`);
-    if (res.status === 403) console.error(`  (this is a platform-verifier-only endpoint)`);
+  console.log(`\n  ── Orphan wallet audit (${getMcpUrl()}) ──\n`);
+  let data;
+  try { data = await mcpCall('bard_audit_orphans'); }
+  catch (err) {
+    console.error(`  ✗ ${err.message}`);
+    console.error(`  (this is a platform-verifier-only MCP tool)`);
     process.exit(1);
   }
   console.log(`  Total agent wallets at provider: ${data.summary.totalAgentWallets}`);
@@ -543,11 +564,18 @@ async function cmdWallet() {
   const agentId = config.agentId;
   if (!agentId) { console.error('✗ Not authenticated.'); process.exit(1); }
 
-  const res = await apiFetch(`/api/agents/${agentId}/wallet`, {
-    method: 'POST',
-    body: JSON.stringify({}),
-  });
-  const data = await res.json();
+  let data;
+  try {
+    const result = await mcpCall('bard_create_wallet');
+    data = {
+      turnkeyEnabled: result.turnkeyEnabled,
+      address: result.walletAddress,
+      walletId: result.walletId,
+    };
+  } catch (err) {
+    console.error('✗', err.message);
+    process.exit(1);
+  }
 
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║   BARD Agent Wallet                    ║`);
@@ -609,9 +637,7 @@ async function cmdUse(target) {
   const agentId = config.agentId;
   if (token && agentId) {
     try {
-      const res = await fetch(`${url}/api/agents/${agentId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(`${url}/api/agents/${agentId}`);
       if (res.ok) {
         console.log(`  Agent row for ${agentId}: ✓ found on the new backend.\n`);
       } else if (res.status === 404) {

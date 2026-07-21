@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useBardAccount } from '@/components/BardAccountProvider';
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 export function LinkAgentForm({ ownerWallet }: { ownerWallet: string }) {
+  const { authFetch } = useBardAccount();
   const [linkToken, setLinkToken] = useState('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
   const [message, setMessage] = useState('');
@@ -23,10 +25,10 @@ export function LinkAgentForm({ ownerWallet }: { ownerWallet: string }) {
     setMessage('');
 
     try {
-      const res = await fetch(`${API}/api/agents/link`, {
+      const res = await authFetch('/api/human/agents/link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ linkToken: linkToken.trim(), ownerWallet }),
+        body: JSON.stringify({ linkToken: linkToken.trim() }),
       });
       const data = await res.json();
 
