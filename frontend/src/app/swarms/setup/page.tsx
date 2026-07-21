@@ -17,7 +17,7 @@ const MODELS = ['gpt-4o', 'gpt-4-turbo', 'gpt-3.5-turbo', 'claude-3-opus', 'clau
 
 export default function SwarmSetupPage() {
   const router = useRouter();
-  const { address, isConnected } = useBardAccount();
+  const { address, isConnected, authFetch } = useBardAccount();
   const [step, setStep] = useState(1);
   const [ownership, setOwnership] = useState<'platform' | 'byok' | null>(null);
   const [apiKey, setApiKey] = useState('');
@@ -34,7 +34,7 @@ export default function SwarmSetupPage() {
   const validateApiKey = async () => {
     setValidating(true);
     try {
-      const res = await fetch(`${API_BASE}/api/swarms/validate-key`, {
+      const res = await authFetch('/api/swarms/validate-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey })

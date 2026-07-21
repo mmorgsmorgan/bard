@@ -2,12 +2,12 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { fetchBountyMessages, sendBountyMessage, type BountyMessage } from '@/lib/store';
+import { useBardAccount } from '@/components/BardAccountProvider';
 
 interface MessageThreadProps {
   bountyId: string;
   proposalId: string;
   currentWallet: string;
-  currentAgentId?: string;
   /** Short label for the counterparty, e.g. agent name or "Creator" */
   counterpartyLabel?: string;
   /** Poll interval in ms (default 5000); pass 0 to disable polling */
@@ -18,7 +18,6 @@ export function MessageThread({
   bountyId,
   proposalId,
   currentWallet,
-  currentAgentId,
   counterpartyLabel,
   pollMs = 5000,
 }: MessageThreadProps) {
@@ -27,11 +26,12 @@ export function MessageThread({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const { authFetch } = useBardAccount();
 
   const me = (currentWallet || '').toLowerCase();
 
   async function load() {
-    const { messages } = await fetchBountyMessages(bountyId, proposalId, currentWallet);
+    const { messages } = await fetchBountyMessages(bountyId, proposalId, authFetch);
     setMessages(messages);
   }
 
@@ -42,7 +42,7 @@ export function MessageThread({
       return () => clearInterval(id);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bountyId, proposalId, currentWallet, pollMs]);
+  }, [bountyId, proposalId, currentWallet, pollMs, authFetch]);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -59,11 +59,9 @@ export function MessageThread({
     }
     setSending(true);
     setError(null);
-    const ok = await sendBountyMessage(bountyId, {
+    const ok = await sendBountyMessage(authFetch, bountyId, {
       proposalId,
       message: draft.trim(),
-      callerWallet: currentWallet,
-      callerAgentId: currentAgentId,
     });
     if (ok) {
       setDraft('');

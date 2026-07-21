@@ -61,7 +61,7 @@ export default function DashboardPage() {
       fetchProfileByWallet(address),
       fetchProofsByWallet(address),
       fetchPortfolioByWallet(address),
-      fetchNotificationsByWallet(address),
+      fetchNotificationsByWallet(address, authFetch),
       authFetch('/api/human/wallet').then(async (response) => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Could not load managed wallet');

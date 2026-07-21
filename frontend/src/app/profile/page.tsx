@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useReadContract } from 'wagmi';
-import { PROFILE_TYPES, CONTRACTS, CONTRIBUTION_TYPES, API_URL } from '@/lib/config';
+import { PROFILE_TYPES, CONTRACTS, CONTRIBUTION_TYPES } from '@/lib/config';
 import { BARD_PROFILE_ABI, BARD_PFP_ABI, BARD_PROOF_ABI, BARD_VOUCH_ABI, IDENTITY_REGISTRY_ABI } from '@/lib/abi';
 import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, savePortfolioItem, deletePortfolioItem, type StoredProfile, type StoredProof, type PortfolioItem } from '@/lib/store';
 import Link from 'next/link';
@@ -134,8 +134,7 @@ export default function ProfilePage() {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      formData.append('wallet', address || '');
-      const res = await fetch(`${API_URL}/api/upload/pfp`, { method: 'POST', body: formData });
+      const res = await authFetch('/api/upload/pfp', { method: 'POST', body: formData });
       // Surface the real server error instead of a generic message.
       let data: { success?: boolean; url?: string; error?: string } = {};
       try {
@@ -289,8 +288,7 @@ export default function ProfilePage() {
       if (proofFile) {
         const formData = new FormData();
         formData.append('file', proofFile);
-        formData.append('wallet', address);
-        const uploadRes = await fetch(`${API_URL}/api/upload/proof`, { method: 'POST', body: formData });
+        const uploadRes = await authFetch('/api/upload/proof', { method: 'POST', body: formData });
         const uploadData = await uploadRes.json() as {
           success?: boolean;
           url?: string;
@@ -356,8 +354,7 @@ export default function ProfilePage() {
       try {
         const formData = new FormData();
         formData.append('file', pFile);
-        formData.append('wallet', address);
-        const res = await fetch(`${API_URL}/api/upload/portfolio`, { method: 'POST', body: formData });
+        const res = await authFetch('/api/upload/portfolio', { method: 'POST', body: formData });
         const data = await res.json();
         if (data.success) imageUrl = data.url;
       } catch (err) {
@@ -373,7 +370,7 @@ export default function ProfilePage() {
       tags: pTags.split(',').map(t => t.trim()).filter(Boolean),
       createdAt: new Date().toISOString(), order: portfolio.length,
     };
-    savePortfolioItem(item);
+    savePortfolioItem(authFetch, item);
     setTimeout(() => fetchPortfolioByWallet(address).then(setPortfolio), 300);
     setShowAddPortfolio(false);
     setUploadingFile(false);
@@ -386,9 +383,11 @@ export default function ProfilePage() {
     const item = portfolio.find(p => p.id === id);
     if (item?.imageDataURI?.startsWith('http')) {
       const filename = item.imageDataURI.split('/').pop();
-      if (filename) fetch(`${API_URL}/api/files/portfolio/${filename}`, { method: 'DELETE' }).catch(() => {});
+      if (filename) {
+        authFetch(`/api/files/portfolio/${filename}`, { method: 'DELETE' }).catch(() => {});
+      }
     }
-    deletePortfolioItem(id);
+    deletePortfolioItem(authFetch, id);
     setTimeout(() => fetchPortfolioByWallet(address).then(setPortfolio), 300);
   };
 
@@ -463,8 +462,7 @@ export default function ProfilePage() {
       try {
         const formData = new FormData();
         formData.append('file', file);
-        formData.append('wallet', address || '');
-        const res = await fetch(`${API_URL}/api/upload/pfp`, { method: 'POST', body: formData });
+        const res = await authFetch('/api/upload/pfp', { method: 'POST', body: formData });
         const data = await res.json();
         if (data.success) setEditPfpUrl(data.url);
         else setSaveMsg('Upload failed');

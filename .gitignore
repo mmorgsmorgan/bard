@@ -26,6 +26,7 @@ foundry.zip
 contracts/.foundry-bin/
 *.exe
 *.tsbuildinfo
+sdk/dist/
 
 # Local editing safety copies (duplicate-before-editing) + redesign scratch — not for the repo
 *.original.tsx

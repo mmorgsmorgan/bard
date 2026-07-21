@@ -7,13 +7,12 @@
  *   POST https://<mcp-service-url>/mcp
  *   Header: Authorization: Bearer <BARD_TOKEN>
  *
- * This stdio variant is for advanced users who want to run the MCP server
- * locally as a subprocess of their MCP client. It imports the shared
- * dispatcher from @bard/mcp-core, so the BARD repo must be cloned in full
- * (with workspaces installed) for this to work.
+ * This stdio variant is a transport adapter for clients that cannot connect
+ * to Streamable HTTP directly. It forwards JSON-RPC to the hosted MCP service,
+ * which is the only service allowed to call authenticated backend agent APIs.
  *
  * Usage:
- *   BARD_TOKEN=<token> BARD_API=<api-url> node mcp/server.js
+ *   BARD_TOKEN=<token> BARD_MCP_URL=<mcp-url> node mcp/server.js
  *
  * MCP client config (Claude Desktop, Cursor, etc.):
  *   {
@@ -21,16 +20,16 @@
  *       "bard": {
  *         "command": "node",
  *         "args": ["<abs-path>/bard/mcp/server.js"],
- *         "env": { "BARD_TOKEN": "<token>", "BARD_API": "<api-url>" }
+ *         "env": { "BARD_TOKEN": "<token>" }
  *       }
  *     }
  *   }
  */
 
-import { handleRpc } from '@bard/mcp-core';
-
 const TOKEN = process.env.BARD_TOKEN || '';
-const API = (process.env.BARD_API || 'http://localhost:4000').replace(/\/$/, '');
+const MCP_URL = `${(process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app')
+  .replace(/\/mcp\/?$/, '')
+  .replace(/\/$/, '')}/mcp`;
 
 // ── stdio I/O loop ──
 
@@ -79,8 +78,25 @@ function processBuffer() {
 async function handleMessage(raw) {
   let msg;
   try { msg = JSON.parse(raw); } catch { return; }
-  const response = await handleRpc(msg, TOKEN);
-  if (response) sendMessage(response);
+  try {
+    const response = await fetch(MCP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${TOKEN}`,
+      },
+      body: JSON.stringify(msg),
+    });
+    if (response.status === 204) return;
+    const result = await response.json();
+    sendMessage(result);
+  } catch (error) {
+    sendMessage({
+      jsonrpc: '2.0',
+      id: msg.id ?? null,
+      error: { code: -32603, message: `Hosted BARD MCP unavailable: ${error.message}` },
+    });
+  }
 }
 
 function sendMessage(msg) {
@@ -90,5 +106,5 @@ function sendMessage(msg) {
 }
 
 // Log to stderr so it doesn't interfere with MCP protocol
-process.stderr.write(`[bard-mcp] stdio mode. API: ${API}\n`);
+process.stderr.write(`[bard-mcp] stdio adapter. Hosted MCP: ${MCP_URL}\n`);
 if (!TOKEN) process.stderr.write('[bard-mcp] WARNING: No BARD_TOKEN set. Auth-required tools will fail.\n');

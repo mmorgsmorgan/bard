@@ -11,7 +11,7 @@ import {
 } from '@/lib/store';
 
 export function NotificationBell() {
-  const { address, isConnected } = useBardAccount();
+  const { address, isConnected, authFetch } = useBardAccount();
   const [open, setOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unread, setUnread] = useState(0);
@@ -30,7 +30,7 @@ export function NotificationBell() {
   useEffect(() => {
     if (!address) return;
     const load = () => {
-      fetchNotificationsByWallet(address).then(notifs => {
+      fetchNotificationsByWallet(address, authFetch).then(notifs => {
         setNotifications(notifs);
         setUnread(notifs.filter(n => !n.read).length);
       });
@@ -38,19 +38,19 @@ export function NotificationBell() {
     load();
     const interval = setInterval(load, 3000);
     return () => clearInterval(interval);
-  }, [address]);
+  }, [address, authFetch]);
 
   if (!isConnected) return null;
 
   const handleMarkRead = (id: string) => {
-    markNotificationRead(id);
+    markNotificationRead(authFetch, id);
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
     setUnread(prev => Math.max(0, prev - 1));
   };
 
   const handleMarkAllRead = () => {
     if (!address) return;
-    markAllNotificationsRead(address);
+    markAllNotificationsRead(authFetch, address);
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
     setUnread(0);
   };
