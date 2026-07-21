@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { GitHubIcon, DiscordIcon, FarcasterIcon, XIcon } from '@/components/SocialIcons';
+import { useLinkAccount } from '@privy-io/react-auth';
 import { useReadContract } from 'wagmi';
 import { formatUnits } from 'viem';
 import { CONTRACTS } from '@/lib/config';
@@ -12,20 +13,29 @@ import { PageHeader, Em } from '@/components/Editorial';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import type { StoredProfile, StoredProof, PortfolioItem, Notification } from '@/lib/store';
 
-type ManagedWalletBalance = {
+type WalletBalance = {
   address: string;
+  type: 'managed' | 'external';
   balanceUsdc: string;
   nativeGasBalanceWei: string;
   explorer: string;
 };
 
 export default function DashboardPage() {
-  const { account, address, isConnected, status, login, authFetch } = useBardAccount();
+  const {
+    account,
+    address,
+    isConnected,
+    status,
+    login,
+    refreshAccount,
+    authFetch,
+  } = useBardAccount();
   const [profile, setProfile] = useState<StoredProfile | null>(null);
   const [proofs, setProofs] = useState<StoredProof[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [walletBalance, setWalletBalance] = useState<ManagedWalletBalance | null>(null);
+  const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
   const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(true);
   const [showKeyExport, setShowKeyExport] = useState(false);
@@ -35,6 +45,27 @@ export default function DashboardPage() {
   const [exportError, setExportError] = useState('');
   const [exportBusy, setExportBusy] = useState(false);
   const [keyCopied, setKeyCopied] = useState(false);
+  const [exportTarget, setExportTarget] = useState<'primary' | 'legacy'>('primary');
+  const [emailLinkState, setEmailLinkState] = useState<'idle' | 'linking' | 'done'>('idle');
+  const [emailLinkError, setEmailLinkError] = useState('');
+  const { linkEmail } = useLinkAccount({
+    onSuccess: async (_user, linkMethod) => {
+      if (linkMethod !== 'email') return;
+      setEmailLinkState('linking');
+      setEmailLinkError('');
+      try {
+        await refreshAccount();
+        setEmailLinkState('done');
+      } catch (cause) {
+        setEmailLinkState('idle');
+        setEmailLinkError(cause instanceof Error ? cause.message : 'Could not sync linked email');
+      }
+    },
+    onError: (error) => {
+      setEmailLinkState('idle');
+      setEmailLinkError(String(error || 'Email linking was not completed'));
+    },
+  });
 
   // On-chain data
   const { data: onChainProfile } = useReadContract({
@@ -64,8 +95,8 @@ export default function DashboardPage() {
       fetchNotificationsByWallet(address, authFetch),
       authFetch('/api/human/wallet').then(async (response) => {
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Could not load managed wallet');
-        return data as ManagedWalletBalance;
+        if (!response.ok) throw new Error(data.error || 'Could not load wallet');
+        return data as WalletBalance;
       }),
     ])
       .then(([p, pr, po, n, wallet]) => {
@@ -109,6 +140,9 @@ export default function DashboardPage() {
     setExportError('');
     setExportBusy(false);
     setKeyCopied(false);
+    setExportTarget('primary');
+    setEmailLinkState('idle');
+    setEmailLinkError('');
   }, [address]);
 
   function closeKeyExport() {
@@ -119,6 +153,18 @@ export default function DashboardPage() {
     setExportError('');
     setExportBusy(false);
     setKeyCopied(false);
+    setExportTarget('primary');
+  }
+
+  function openKeyExport(target: 'primary' | 'legacy') {
+    setExportTarget(target);
+    setExportStage('request');
+    setExportCode('');
+    setPrivateKey('');
+    setExportError('');
+    setExportBusy(false);
+    setKeyCopied(false);
+    setShowKeyExport(true);
   }
 
   async function requestKeyExport() {
@@ -127,6 +173,8 @@ export default function DashboardPage() {
     try {
       const response = await authFetch('/api/human/wallet/export-key/request', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target: exportTarget }),
       });
       const data = await response.json() as { sent?: boolean; devCode?: string; error?: string };
       if (!response.ok || !data.sent) {
@@ -152,7 +200,7 @@ export default function DashboardPage() {
       const verifyResponse = await authFetch('/api/human/wallet/export-key/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: exportCode }),
+        body: JSON.stringify({ code: exportCode, target: exportTarget }),
       });
       const verifyData = await verifyResponse.json() as {
         elevatedToken?: string;
@@ -196,6 +244,11 @@ export default function DashboardPage() {
   const validatedProofs = proofs.filter((p) => p.status === 'validated').length;
   const trustScore = Math.min(100, validatedProofs * 15 + proofs.length * 5 + portfolio.length * 3);
   const unread = notifications.filter((n) => !n.read).length;
+  const exportWallet = exportTarget === 'legacy'
+    ? account?.legacyManagedWallet
+    : account?.wallet.type === 'managed'
+      ? account.wallet
+      : null;
 
   if (status === 'connecting') {
     return <div className="min-h-[80vh]" />;
@@ -207,7 +260,9 @@ export default function DashboardPage() {
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-16 animate-fade-in">
           <div className="font-mono text-2xl text-surface-600 mb-6">⬡</div>
           <h1 className="text-xl font-bold text-white mb-3">Sign in to BARD</h1>
-          <p className="text-surface-400 text-sm mb-5">Access your profile and BARD-managed wallet.</p>
+          <p className="text-surface-400 text-sm mb-5">
+            Email sign-in uses a BARD-managed wallet. Wallet sign-in keeps your connected wallet.
+          </p>
           <button onClick={login} className="btn-primary text-xs px-6 py-3">Continue with email or wallet</button>
         </div>
       </div>
@@ -266,7 +321,14 @@ export default function DashboardPage() {
       {/* Wallet Info */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-px mb-6">
         <div className="bg-[#0c0c0c] border border-[rgba(255,255,255,0.04)] p-5">
-          <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-3">Wallet</div>
+          <div className="flex items-center justify-between gap-4 mb-3">
+            <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase">
+              {account?.wallet.type === 'external' ? 'External wallet' : 'BARD-managed wallet'}
+            </div>
+            <div className="font-mono text-[9px] text-surface-600 uppercase">
+              {account?.wallet.type === 'external' ? 'Connected' : 'Email account'}
+            </div>
+          </div>
           <div className="font-mono text-sm text-surface-300 break-all">{address}</div>
           <div className="flex gap-4 mt-3">
             <div>
@@ -283,20 +345,67 @@ export default function DashboardPage() {
             </div>
           </div>
           <div className="mt-4 pt-4 border-t border-[rgba(255,255,255,0.04)]">
-            {account?.wallet.canExportPrivateKey ? (
+            {account?.wallet.type === 'managed' && account.wallet.canExportPrivateKey ? (
               <button
                 type="button"
-                onClick={() => setShowKeyExport(true)}
+                onClick={() => openKeyExport('primary')}
                 className="btn-secondary text-xs px-4 py-2"
               >
                 Export private key
               </button>
+            ) : account?.wallet.type === 'external' ? (
+              <p className="font-mono text-[10px] text-surface-600">
+                BARD does not create or store a private key for this wallet.
+              </p>
             ) : (
               <p className="font-mono text-[10px] text-surface-600">
-                Private-key export requires a verified email and a local BARD wallet.
+                {account?.email
+                  ? 'Private-key export is unavailable for this managed wallet.'
+                  : 'Link and verify an email to export this BARD wallet private key.'}
               </p>
             )}
           </div>
+          {account?.legacyManagedWallet && (
+            <div className="mt-4 pt-4 border-t border-[rgba(255,255,255,0.04)]">
+              <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">
+                Previous BARD wallet
+              </div>
+              <div className="font-mono text-xs text-surface-400 break-all">
+                {account.legacyManagedWallet.address}
+              </div>
+              {account.legacyManagedWallet.canExportPrivateKey ? (
+                <button
+                  type="button"
+                  onClick={() => openKeyExport('legacy')}
+                  className="btn-secondary text-xs px-4 py-2 mt-3"
+                >
+                  Export previous wallet key
+                </button>
+              ) : !account.email && account.legacyManagedWallet.provider === 'local' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailLinkState('linking');
+                      setEmailLinkError('');
+                      linkEmail();
+                    }}
+                    disabled={emailLinkState === 'linking'}
+                    className="btn-secondary text-xs px-4 py-2 mt-3"
+                  >
+                    {emailLinkState === 'linking' ? 'Linking email...' : 'Link email to export key'}
+                  </button>
+                  {emailLinkError && (
+                    <p className="font-mono text-[10px] text-red-400 mt-2">{emailLinkError}</p>
+                  )}
+                </>
+              ) : (
+                <p className="font-mono text-[10px] text-surface-600 mt-3">
+                  Private-key export is unavailable for this previous wallet.
+                </p>
+              )}
+            </div>
+          )}
         </div>
         <div className="bg-[#0c0c0c] border border-[rgba(255,255,255,0.04)] p-5">
           <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-3">On-Chain Status</div>
@@ -385,7 +494,8 @@ export default function DashboardPage() {
                   Export private key
                 </h2>
                 <p className="font-mono text-[10px] text-surface-500 mt-1">
-                  BARD wallet {address?.slice(0, 8)}...{address?.slice(-6)}
+                  {exportTarget === 'legacy' ? 'Previous BARD wallet' : 'BARD-managed wallet'}{' '}
+                  {exportWallet?.address.slice(0, 8)}...{exportWallet?.address.slice(-6)}
                 </p>
               </div>
               <button

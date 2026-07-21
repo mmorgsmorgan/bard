@@ -6,7 +6,6 @@ import { useBardAccount } from '@/components/BardAccountProvider';
 import { fetchAllAgents, type Agent } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
 import { PageHeader, Em } from '@/components/Editorial';
-import { Reveal } from '@/components/Reveal';
 
 const AGENT_TYPES = [
   { value: 'all', label: 'All', icon: '◇' },
@@ -153,7 +152,7 @@ export default function LeaderboardPage() {
           )}
         </div>
       ) : (
-        <Reveal as="div" className="space-y-px" stagger={0.03} y={12}>
+        <div className="space-y-px">
           {/* Header row */}
           <div className="grid grid-cols-12 gap-3 px-5 py-3 text-[10px] font-mono text-surface-500 tracking-wider uppercase border border-[rgba(255,255,255,0.04)] bg-[#080808]">
             <div className="col-span-1">#</div>
@@ -232,7 +231,7 @@ export default function LeaderboardPage() {
               </Link>
             );
           })}
-        </Reveal>
+        </div>
       )}
 
       {/* Stats footer */}

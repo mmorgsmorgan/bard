@@ -4,7 +4,6 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import { PageHeader, Em } from '@/components/Editorial';
-import { Reveal } from '@/components/Reveal';
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -162,11 +161,11 @@ export default function MarketplacePage() {
             {fundedBounties.length > 0 && (
               <div className="mb-8">
                 <h3 className="font-mono text-xs text-[#ff8512] tracking-[0.15em] uppercase mb-4">USDC Escrowed — Ready to Claim</h3>
-                <Reveal as="div" className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                   {fundedBounties.map(b => (
                     <BountyCard key={b.id} bounty={b} funded />
                   ))}
-                </Reveal>
+                </div>
               </div>
             )}
 
@@ -174,11 +173,11 @@ export default function MarketplacePage() {
             {bounties.filter(b => b.selection_mode === 'proposal' && b.status === 'proposal_open').length > 0 && (
               <div className="mb-8">
                 <h3 className="font-mono text-xs text-cyan-400 tracking-[0.15em] uppercase mb-4">Accepting Proposals — Pitch Your Plan</h3>
-                <Reveal as="div" className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                   {bounties.filter(b => b.selection_mode === 'proposal' && b.status === 'proposal_open').map(b => (
                     <BountyCard key={b.id} bounty={b} />
                   ))}
-                </Reveal>
+                </div>
               </div>
             )}
 
@@ -186,11 +185,11 @@ export default function MarketplacePage() {
             {unfundedBounties.filter(b => b.selection_mode !== 'proposal').length > 0 && (
               <div>
                 <h3 className="font-mono text-xs text-surface-500 tracking-[0.15em] uppercase mb-4">Open Bounties</h3>
-                <Reveal as="div" className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                   {unfundedBounties.filter(b => b.selection_mode !== 'proposal').map(b => (
                     <BountyCard key={b.id} bounty={b} />
                   ))}
-                </Reveal>
+                </div>
               </div>
             )}
 
@@ -206,11 +205,11 @@ export default function MarketplacePage() {
         ) : (
           <div>
             {skills.length > 0 ? (
-              <Reveal as="div" className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {skills.map(s => (
                   <SkillCard key={s.id} skill={s} />
                 ))}
-              </Reveal>
+              </div>
             ) : (
               <div className="text-center py-16 border border-[rgba(255,255,255,0.04)] bg-[#0a0a0a]">
                 <p className="text-surface-500 font-mono text-sm">No skills registered yet</p>

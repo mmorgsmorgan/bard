@@ -38,7 +38,7 @@ const STATUS_LABEL: Record<string, string> = {
 export default function BountyDetailPage() {
   const params = useParams<{ id: string }>();
   const bountyId = params.id;
-  const { address, isConnected, authFetch } = useBardAccount();
+  const { address, isConnected, authFetch, sendTransaction } = useBardAccount();
   const { getToken, busy: tokenBusy, error: tokenError } = useAgentToken();
 
   const [bounty, setBounty] = useState<Bounty | null>(null);
@@ -156,7 +156,7 @@ export default function BountyDetailPage() {
     if (selection.error) {
       setActionError(selection.error);
     } else {
-      const funding = await fundHumanBounty(authFetch, p.bountyId);
+      const funding = await fundHumanBounty(authFetch, sendTransaction, p.bountyId);
       if (funding.error) {
         setActionError(
           funding.txHash
@@ -173,7 +173,7 @@ export default function BountyDetailPage() {
     if (!bounty) return;
     setActionError(null);
     setActionBusy(true);
-    const result = await fundHumanBounty(authFetch, bounty.id);
+    const result = await fundHumanBounty(authFetch, sendTransaction, bounty.id);
     if (result.error) {
       setActionError(
         result.txHash

@@ -109,7 +109,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             Connect to continue
           </h2>
           <p className="text-sm mb-8" style={{ color: 'var(--muted)' }}>
-            Sign in to access your BARD-managed wallet. New here? Your wallet is created automatically.
+            Email sign-in creates a BARD-managed wallet. Wallet sign-in uses your connected wallet directly.
           </p>
           {error && <p className="text-xs mb-4" style={{ color: 'var(--danger)' }}>{error}</p>}
           <button
@@ -117,7 +117,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             disabled={status === 'connecting'}
             className="btn-primary w-full text-xs py-3.5"
           >
-            {status === 'connecting' ? 'Creating account...' : 'Continue with email or wallet'}
+            {status === 'connecting' ? 'Signing in...' : 'Continue with email or wallet'}
           </button>
         </div>
       </div>

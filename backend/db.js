@@ -83,23 +83,32 @@ export async function initSchema() {
     )`,
 
     // ── human accounts ──
-    // Privy proves identity only. BARD provisions and signs with its own
-    // encrypted managed wallet through wallet-provider.js.
+    // Privy proves identity. Email accounts use a BARD-managed wallet; wallet
+    // logins keep the verified external wallet as their primary signer.
     `CREATE TABLE IF NOT EXISTS human_accounts (
       id TEXT PRIMARY KEY,
       privy_did TEXT UNIQUE NOT NULL,
       email TEXT DEFAULT NULL,
       email_verified_at TEXT DEFAULT NULL,
       login_wallet TEXT DEFAULT NULL,
+      wallet_type TEXT DEFAULT NULL,
       wallet_id TEXT UNIQUE DEFAULT NULL,
       wallet_address TEXT UNIQUE DEFAULT NULL,
+      legacy_wallet_id TEXT DEFAULT NULL,
+      legacy_wallet_address TEXT DEFAULT NULL,
       created_at TEXT DEFAULT (NOW()::text),
       updated_at TEXT DEFAULT (NOW()::text)
     )`,
     `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS email_verified_at TEXT DEFAULT NULL`,
+    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS wallet_type TEXT DEFAULT NULL`,
+    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS legacy_wallet_id TEXT DEFAULT NULL`,
+    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS legacy_wallet_address TEXT DEFAULT NULL`,
     `CREATE INDEX IF NOT EXISTS idx_human_accounts_wallet
        ON human_accounts (LOWER(wallet_address))
        WHERE wallet_address IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_human_accounts_legacy_wallet
+       ON human_accounts (LOWER(legacy_wallet_address))
+       WHERE legacy_wallet_address IS NOT NULL`,
     `CREATE TABLE IF NOT EXISTS human_otp_codes (
       id BIGSERIAL PRIMARY KEY,
       human_id TEXT NOT NULL REFERENCES human_accounts(id),
@@ -123,6 +132,18 @@ export async function initSchema() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_human_security_events
        ON human_security_events(human_id, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS human_tx_confirmations (
+      tx_hash TEXT NOT NULL,
+      action TEXT NOT NULL,
+      human_id TEXT NOT NULL REFERENCES human_accounts(id),
+      resource_id TEXT DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (tx_hash, action)
+    )`,
+    `ALTER TABLE human_tx_confirmations
+       ADD COLUMN IF NOT EXISTS resource_id TEXT DEFAULT ''`,
+    `CREATE INDEX IF NOT EXISTS idx_human_tx_confirmations_human
+       ON human_tx_confirmations(human_id, created_at DESC)`,
 
     // ── proofs ──
     // Note: file_url and submitted_by are included in initial schema so we no
@@ -823,14 +844,15 @@ export const stmts = {
 
   // ── Bounties ──
   insertBounty: async (p) => run(
-    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, created_at, updated_at, status, selection_mode, proposal_deadline)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, created_at, updated_at, status, selection_mode, proposal_deadline, escrow_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
     [
       p.id, p.creator_wallet, p.title, p.description, p.bounty_type, p.amount_usdc, p.deadline,
       p.min_reputation, p.created_at, p.updated_at,
       p.status || 'open',
       p.selection_mode || 'first_come',
       p.proposal_deadline || null,
+      p.escrow_status || 'none',
     ]
   ),
   getBountyById: async (id) => one('SELECT * FROM bounties WHERE id = $1', [id]),

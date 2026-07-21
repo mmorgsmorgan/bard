@@ -13,7 +13,7 @@ import { LinkedAgentStatus } from '@/components/LinkedAgentStatus';
 import { useBardAccount } from '@/components/BardAccountProvider';
 
 export default function ProfilePage() {
-  const { address, isConnected, status, login, authFetch } = useBardAccount();
+  const { address, isConnected, status, login, authFetch, sendTransaction } = useBardAccount();
   const [step, setStep] = useState(1);
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
@@ -224,29 +224,41 @@ export default function ProfilePage() {
     setTxStatus('submitting');
     setErrorMsg('');
     try {
-      const response = await authFetch('/api/human/profile', {
+      const profileInput = {
+        username,
+        displayName,
+        bio,
+        profileType,
+        ecosystems: ecosystems.split(',').map((item) => item.trim()).filter(Boolean),
+        farcaster,
+        github,
+        x: xHandle,
+        discord,
+        linkedin,
+        pfp: pfpDataURI || '',
+      };
+      let response = await authFetch('/api/human/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username,
-          displayName,
-          bio,
-          profileType,
-          ecosystems: ecosystems.split(',').map((item) => item.trim()).filter(Boolean),
-          farcaster,
-          github,
-          x: xHandle,
-          discord,
-          linkedin,
-          pfp: pfpDataURI || '',
-        }),
+        body: JSON.stringify(profileInput),
       });
-      const data = await response.json() as {
+      let data = await response.json() as {
         profile?: StoredProfile;
         txHash?: string;
         explorer?: string;
+        signatureRequired?: boolean;
+        transaction?: Parameters<typeof sendTransaction>[0];
         error?: string;
       };
+      if (response.status === 202 && data.signatureRequired && data.transaction) {
+        const txHash = await sendTransaction(data.transaction);
+        response = await authFetch('/api/human/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...profileInput, txHash }),
+        });
+        data = await response.json();
+      }
       if (!response.ok || !data.profile) {
         throw new Error(data.error || 'Profile registration failed');
       }
@@ -300,19 +312,34 @@ export default function ProfilePage() {
         fileUrl = uploadData.url;
       }
 
-      const response = await authFetch('/api/human/proofs', {
+      const proofInput = {
+        id: `proof-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+        title: proofTitle,
+        ecosystem: proofEcosystem,
+        contributionType: proofType,
+        description: proofDescription,
+        externalLinks: proofLinks.split(',').map((link) => link.trim()).filter(Boolean),
+        fileUrl,
+      };
+      let response = await authFetch('/api/human/proofs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: proofTitle,
-          ecosystem: proofEcosystem,
-          contributionType: proofType,
-          description: proofDescription,
-          externalLinks: proofLinks.split(',').map((link) => link.trim()).filter(Boolean),
-          fileUrl,
-        }),
+        body: JSON.stringify(proofInput),
       });
-      const data = await response.json() as { error?: string };
+      let data = await response.json() as {
+        signatureRequired?: boolean;
+        transaction?: Parameters<typeof sendTransaction>[0];
+        error?: string;
+      };
+      if (response.status === 202 && data.signatureRequired && data.transaction) {
+        const txHash = await sendTransaction(data.transaction);
+        response = await authFetch('/api/human/proofs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...proofInput, txHash }),
+        });
+        data = await response.json();
+      }
       if (!response.ok) throw new Error(data.error || 'Proof submission failed');
 
       const [storedProofs] = await Promise.all([
@@ -411,7 +438,7 @@ export default function ProfilePage() {
             </div>
             <h1 className="text-3xl font-bold text-white mb-3">Join BARD</h1>
             <p className="text-surface-400 text-sm max-w-xs mx-auto leading-relaxed">
-              Build your reputation with a BARD-managed wallet on Arc.
+              Use a BARD-managed wallet with email, or keep your existing wallet when signing in by wallet.
             </p>
           </div>
 
@@ -472,24 +499,39 @@ export default function ProfilePage() {
     const handleSaveSettings = async () => {
       setSaving(true); setSaveMsg('');
       try {
-        const response = await authFetch('/api/human/profile', {
+        const profileInput = {
+          username: existingProfile.username,
+          displayName: editDisplayName,
+          bio: editBio,
+          profileType: existingProfile.profileType,
+          ecosystems: editEcosystems.split(',').map((item) => item.trim()).filter(Boolean),
+          farcaster: editFarcaster,
+          github: editGithub,
+          x: editX,
+          discord: editDiscord,
+          linkedin: editLinkedin,
+          pfp: editPfpUrl,
+        };
+        let response = await authFetch('/api/human/profile', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            username: existingProfile.username,
-            displayName: editDisplayName,
-            bio: editBio,
-            profileType: existingProfile.profileType,
-            ecosystems: editEcosystems.split(',').map((item) => item.trim()).filter(Boolean),
-            farcaster: editFarcaster,
-            github: editGithub,
-            x: editX,
-            discord: editDiscord,
-            linkedin: editLinkedin,
-            pfp: editPfpUrl,
-          }),
+          body: JSON.stringify(profileInput),
         });
-        const data = await response.json() as { profile?: StoredProfile; error?: string };
+        let data = await response.json() as {
+          profile?: StoredProfile;
+          signatureRequired?: boolean;
+          transaction?: Parameters<typeof sendTransaction>[0];
+          error?: string;
+        };
+        if (response.status === 202 && data.signatureRequired && data.transaction) {
+          const txHash = await sendTransaction(data.transaction);
+          response = await authFetch('/api/human/profile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...profileInput, txHash }),
+          });
+          data = await response.json();
+        }
         if (!response.ok || !data.profile) {
           throw new Error(data.error || 'Profile update failed');
         }
@@ -558,7 +600,7 @@ export default function ProfilePage() {
               { label: 'Wallet', value: `${address?.slice(0, 6)}...${address?.slice(-4)}`, mono: true },
               { label: 'Network', value: 'Arc Testnet' },
               { label: 'Profile', value: onChainExists ? 'On-chain' : 'Local only' },
-              { label: 'Identity', value: identityRegistered ? 'ERC-8004 (via Agent)' : 'Agent-minted' },
+              { label: 'Identity', value: identityRegistered ? 'ERC-8004 registered' : 'Not registered' },
             ].map((row) => (
               <div key={row.label} className="flex items-center justify-between p-3 bg-[#050505] text-sm">
                 <span className="text-surface-500 font-mono text-xs uppercase tracking-wider">{row.label}</span>

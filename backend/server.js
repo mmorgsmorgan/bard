@@ -27,12 +27,20 @@ import { withMemo, MemoIds, ARC_MEMO_ADDRESS } from './arc-memo.js';
 import { createSiweRouter } from './siwe-auth.js';
 import { createHumanAuthRouter, requireHumanSession } from './human-auth.js';
 import {
+  buildHumanProfileTransactions,
+  buildHumanProofTransaction,
+  buildHumanUsdcTransfer,
+  buildHumanVouchTransactions,
   createHumanVouch,
   createOrUpdateHumanProfile,
   fundManagedEscrow,
   humanWalletBalance,
+  prepareHumanProfileTransaction,
+  prepareHumanUsdcTransfer,
+  prepareHumanVouchTransactions,
   sendHumanUsdc,
   submitHumanProof,
+  validateExternalTransactionDetails,
 } from './human-wallet-service.js';
 import * as onchainEscrow from './escrow-service.js';
 import { computeReputationScore } from './reputation-score.js';
@@ -151,7 +159,14 @@ app.use(cors({
     if (!origin || allowed.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked origin: ${origin}`));
   },
-  allowedHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id', 'Accept'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Mcp-Session-Id',
+    'Accept',
+    'X-Privy-Token',
+    'X-Elevated-Token',
+  ],
 }));
 const captureRawBody = (req, _res, buffer) => {
   req.rawBody = Buffer.from(buffer);
@@ -1231,12 +1246,135 @@ app.get('/api/profiles', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════
-// ── Managed human wallet actions ──
+// ── Human wallet actions ──
 // ══════════════════════════════════════════════════════
+
+function humanUsesExternalWallet(req) {
+  return req.human.wallet_type === 'external';
+}
+
+function externalTransactionPayload(transaction) {
+  return {
+    to: transaction.to,
+    data: transaction.data || '0x',
+    value: `0x${BigInt(transaction.value || 0n).toString(16)}`,
+    chainId: 5042002,
+  };
+}
+
+async function verifyExactExternalTransaction(
+  txHash,
+  expectedFrom,
+  expectedTo,
+  acceptedData
+) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash || '')) {
+    return { valid: false, error: 'Valid transaction hash required' };
+  }
+  const receipt = await onchainEscrow.withArcRpcRetry(
+    () => arcTestnetClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 }),
+    { label: `external transaction ${txHash} receipt` },
+  );
+  const transaction = await onchainEscrow.withArcRpcRetry(
+    () => arcTestnetClient.getTransaction({ hash: txHash }),
+    { label: `external transaction ${txHash} details` },
+  );
+  const validation = validateExternalTransactionDetails({
+    receipt,
+    transaction,
+    expectedFrom,
+    expectedTo,
+    acceptedData,
+  });
+  return validation.valid
+    ? { valid: true, receipt, transaction }
+    : validation;
+}
+
+async function claimHumanTransaction(req, txHash, action) {
+  const result = await pool.query(
+    `INSERT INTO human_tx_confirmations (tx_hash, action, human_id)
+     VALUES (LOWER($1), $2, $3)
+     ON CONFLICT (tx_hash, action) DO NOTHING
+     RETURNING tx_hash`,
+    [txHash, action, req.human.id]
+  );
+  return result.rowCount > 0;
+}
+
+async function persistExternalProofConfirmation(req, txHash, proof) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const inserted = await client.query(
+      `INSERT INTO human_tx_confirmations
+         (tx_hash, action, human_id, resource_id)
+       VALUES (LOWER($1), 'proof', $2, $3)
+       ON CONFLICT (tx_hash, action) DO NOTHING
+       RETURNING human_id, resource_id`,
+      [txHash, req.human.id, proof.id]
+    );
+    const confirmation = inserted.rows[0] || (await client.query(
+      `SELECT human_id, resource_id
+         FROM human_tx_confirmations
+        WHERE tx_hash = LOWER($1) AND action = 'proof'
+        FOR UPDATE`,
+      [txHash]
+    )).rows[0];
+    if (!confirmation || confirmation.human_id !== req.human.id) {
+      throw Object.assign(
+        new Error('This proof transaction is already assigned to another account'),
+        { status: 409 }
+      );
+    }
+    if (confirmation.resource_id && confirmation.resource_id !== proof.id) {
+      throw Object.assign(
+        new Error('This proof transaction is already assigned to another proof'),
+        { status: 409 }
+      );
+    }
+    if (!confirmation.resource_id) {
+      await client.query(
+        `UPDATE human_tx_confirmations
+            SET resource_id = $1
+          WHERE tx_hash = LOWER($2) AND action = 'proof'`,
+        [proof.id, txHash]
+      );
+    }
+    await client.query(
+      `INSERT INTO proofs
+         (id, title, ecosystem, contribution_type, description, external_links,
+          contributor, status, timestamp)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        proof.id,
+        proof.title,
+        proof.ecosystem,
+        proof.contribution_type,
+        proof.description,
+        proof.external_links,
+        proof.contributor,
+        proof.status,
+        proof.timestamp,
+      ]
+    );
+    await client.query('COMMIT');
+    return inserted.rowCount > 0;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 app.get('/api/human/wallet', requireHuman, async (req, res) => {
   try {
-    res.json(await humanWalletBalance(req.human.wallet_address));
+    res.json({
+      ...(await humanWalletBalance(req.human.wallet_address)),
+      type: req.human.wallet_type === 'external' ? 'external' : 'managed',
+    });
   } catch (error) {
     res.status(error.status || 502).json({ error: error.message });
   }
@@ -1256,6 +1394,7 @@ app.post('/api/human/profile', requireHuman, async (req, res) => {
     discord = '',
     linkedin = '',
     pfp = '',
+    txHash = '',
   } = req.body || {};
   if (!/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(username || '') || username.includes('--')) {
     return res.status(400).json({ error: 'Username must be 3-32 lowercase letters, numbers, or single hyphens' });
@@ -1282,11 +1421,36 @@ app.post('/api/human/profile', requireHuman, async (req, res) => {
     if (usernameOwner && usernameOwner.wallet.toLowerCase() !== wallet.toLowerCase()) {
       return res.status(409).json({ error: 'Username is already taken' });
     }
-    const chain = await createOrUpdateHumanProfile(wallet, {
+    const profileTransaction = {
       username,
       metadataURI,
       profileType: profileKind === 'agent' ? 1 : 0,
-    });
+    };
+    let confirmedTxHash = '';
+    if (humanUsesExternalWallet(req)) {
+      const expected = buildHumanProfileTransactions(profileTransaction);
+      if (!txHash) {
+        const prepared = await prepareHumanProfileTransaction(wallet, profileTransaction);
+        return res.status(202).json({
+          signatureRequired: true,
+          walletType: 'external',
+          transaction: externalTransactionPayload(prepared.transaction),
+        });
+      }
+      const verification = await verifyExactExternalTransaction(
+        txHash,
+        wallet,
+        expected.create.to,
+        [expected.create.data, expected.update.data]
+      );
+      if (!verification.valid) {
+        return res.status(409).json({ error: verification.error, txHash });
+      }
+      confirmedTxHash = txHash.toLowerCase();
+    } else {
+      const chain = await createOrUpdateHumanProfile(wallet, profileTransaction);
+      confirmedTxHash = chain.txHash;
+    }
     const now = new Date().toISOString();
     await stmts.upsertProfile({
       wallet,
@@ -1303,12 +1467,15 @@ app.post('/api/human/profile', requireHuman, async (req, res) => {
       pfp,
       created_at: now,
     });
+    if (humanUsesExternalWallet(req)) {
+      await claimHumanTransaction(req, confirmedTxHash, 'profile');
+    }
     const saved = await stmts.getProfileByWallet(wallet);
     res.json({
       success: true,
       profile: profileToJSON(saved),
-      txHash: chain.txHash,
-      explorer: `https://testnet.arcscan.app/tx/${chain.txHash}`,
+      txHash: confirmedTxHash,
+      explorer: `https://testnet.arcscan.app/tx/${confirmedTxHash}`,
     });
   } catch (error) {
     res.status(error.status || 502).json({
@@ -1322,28 +1489,56 @@ app.post('/api/human/profile', requireHuman, async (req, res) => {
 
 app.post('/api/human/send-usdc', requireHuman, async (req, res) => {
   try {
-    const { to, amount } = req.body || {};
-    const result = await sendHumanUsdc(req.human.wallet_address, to, amount);
-    await createNotification({
-      wallet: req.human.wallet_address,
-      type: 'send',
-      title: 'USDC Sent',
-      message: `${amount} USDC sent to ${to}`,
-      from: req.human.wallet_address,
-      amount: String(amount),
-    });
-    await createNotification({
-      wallet: to,
-      type: 'send',
-      title: 'USDC Received',
-      message: `${amount} USDC received from ${req.human.wallet_address}`,
-      from: req.human.wallet_address,
-      amount: String(amount),
-    });
+    const { to, amount, txHash = '' } = req.body || {};
+    let confirmedTxHash = '';
+    let firstConfirmation = true;
+    if (humanUsesExternalWallet(req)) {
+      const transaction = buildHumanUsdcTransfer(to, amount);
+      if (!txHash) {
+        await prepareHumanUsdcTransfer(req.human.wallet_address, to, amount);
+        return res.status(202).json({
+          signatureRequired: true,
+          walletType: 'external',
+          transaction: externalTransactionPayload(transaction),
+        });
+      }
+      const verification = await verifyExactExternalTransaction(
+        txHash,
+        req.human.wallet_address,
+        transaction.to,
+        transaction.data
+      );
+      if (!verification.valid) {
+        return res.status(409).json({ error: verification.error, txHash });
+      }
+      confirmedTxHash = txHash.toLowerCase();
+      firstConfirmation = await claimHumanTransaction(req, confirmedTxHash, 'send-usdc');
+    } else {
+      const result = await sendHumanUsdc(req.human.wallet_address, to, amount);
+      confirmedTxHash = result.txHash;
+    }
+    if (firstConfirmation) {
+      await createNotification({
+        wallet: req.human.wallet_address,
+        type: 'send',
+        title: 'USDC Sent',
+        message: `${amount} USDC sent to ${to}`,
+        from: req.human.wallet_address,
+        amount: String(amount),
+      });
+      await createNotification({
+        wallet: to,
+        type: 'send',
+        title: 'USDC Received',
+        message: `${amount} USDC received from ${req.human.wallet_address}`,
+        from: req.human.wallet_address,
+        amount: String(amount),
+      });
+    }
     res.json({
       success: true,
-      txHash: result.txHash,
-      explorer: `https://testnet.arcscan.app/tx/${result.txHash}`,
+      txHash: confirmedTxHash,
+      explorer: `https://testnet.arcscan.app/tx/${confirmedTxHash}`,
     });
   } catch (error) {
     res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
@@ -1361,18 +1556,44 @@ app.post('/api/human/proofs', requireHuman, async (req, res) => {
       contributionType = 'other',
       externalLinks = [],
       fileUrl = '',
+      txHash = '',
     } = req.body || {};
     const links = Array.isArray(externalLinks) ? externalLinks.filter(Boolean) : [];
     if (fileUrl) links.push(fileUrl);
-    const chain = await submitHumanProof(wallet, {
+    const proofTransaction = {
       title,
       description,
       ecosystem,
       contributionType,
       externalLink: links[0] || '',
-    });
+    };
+    let confirmedTxHash = '';
+    let alreadyConfirmed = false;
+    if (humanUsesExternalWallet(req)) {
+      const transaction = buildHumanProofTransaction(proofTransaction);
+      if (!txHash) {
+        return res.status(202).json({
+          signatureRequired: true,
+          walletType: 'external',
+          transaction: externalTransactionPayload(transaction),
+        });
+      }
+      const verification = await verifyExactExternalTransaction(
+        txHash,
+        wallet,
+        transaction.to,
+        transaction.data
+      );
+      if (!verification.valid) {
+        return res.status(409).json({ error: verification.error, txHash });
+      }
+      confirmedTxHash = txHash.toLowerCase();
+    } else {
+      const chain = await submitHumanProof(wallet, proofTransaction);
+      confirmedTxHash = chain.txHash;
+    }
     const timestamp = new Date().toISOString();
-    await stmts.insertProof({
+    const proof = {
       id,
       title,
       ecosystem,
@@ -1382,16 +1603,26 @@ app.post('/api/human/proofs', requireHuman, async (req, res) => {
       contributor: wallet,
       status: 'unvalidated',
       timestamp,
-    });
+    };
+    if (humanUsesExternalWallet(req)) {
+      alreadyConfirmed = !await persistExternalProofConfirmation(
+        req,
+        confirmedTxHash,
+        proof
+      );
+    } else {
+      await stmts.insertProof(proof);
+    }
     res.json({
       success: true,
+      alreadyConfirmed,
       proof: proofToJSON(await stmts.getProofById?.(id) || {
         id, title, ecosystem, contribution_type: contributionType, description,
         external_links: JSON.stringify(links), contributor: wallet,
         status: 'unvalidated', timestamp,
       }),
-      txHash: chain.txHash,
-      explorer: `https://testnet.arcscan.app/tx/${chain.txHash}`,
+      txHash: confirmedTxHash,
+      explorer: `https://testnet.arcscan.app/tx/${confirmedTxHash}`,
     });
   } catch (error) {
     res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
@@ -1400,16 +1631,79 @@ app.post('/api/human/proofs', requireHuman, async (req, res) => {
 
 app.post('/api/human/vouches', requireHuman, async (req, res) => {
   try {
-    const result = await createHumanVouch(req.human.wallet_address, req.body || {});
-    const target = req.body?.contributorWallet;
-    await createNotification({
-      wallet: target,
-      type: 'vouch',
-      title: 'New Vouch Received',
-      message: `${req.body?.amount} USDC vouch received`,
-      from: req.human.wallet_address,
-      amount: String(req.body?.amount || ''),
-    });
+    const input = req.body || {};
+    let result;
+    let firstConfirmation = true;
+    if (humanUsesExternalWallet(req)) {
+      const transactions = buildHumanVouchTransactions(input);
+      const approveTxHash = String(input.approveTxHash || '');
+      const vouchTxHash = String(input.vouchTxHash || '');
+      if (!approveTxHash) {
+        await prepareHumanVouchTransactions(req.human.wallet_address, input);
+        return res.status(202).json({
+          signatureRequired: true,
+          walletType: 'external',
+          stage: 'approve',
+          transaction: externalTransactionPayload(transactions.approve),
+        });
+      }
+      const approval = await verifyExactExternalTransaction(
+        approveTxHash,
+        req.human.wallet_address,
+        transactions.approve.to,
+        transactions.approve.data
+      );
+      if (!approval.valid) {
+        return res.status(409).json({
+          error: approval.error,
+          txHash: approveTxHash,
+          stage: 'approve',
+        });
+      }
+      if (!vouchTxHash) {
+        return res.status(202).json({
+          signatureRequired: true,
+          walletType: 'external',
+          stage: 'vouch',
+          approveTxHash: approveTxHash.toLowerCase(),
+          transaction: externalTransactionPayload(transactions.vouch),
+        });
+      }
+      const vouch = await verifyExactExternalTransaction(
+        vouchTxHash,
+        req.human.wallet_address,
+        transactions.vouch.to,
+        transactions.vouch.data
+      );
+      if (!vouch.valid) {
+        return res.status(409).json({
+          error: vouch.error,
+          txHash: vouchTxHash,
+          stage: 'vouch',
+        });
+      }
+      firstConfirmation = await claimHumanTransaction(
+        req,
+        vouchTxHash.toLowerCase(),
+        'vouch'
+      );
+      result = {
+        approveTxHash: approveTxHash.toLowerCase(),
+        txHash: vouchTxHash.toLowerCase(),
+      };
+    } else {
+      result = await createHumanVouch(req.human.wallet_address, input);
+    }
+    if (firstConfirmation) {
+      await createNotification({
+        wallet: input.contributorWallet,
+        type: 'vouch',
+        title: 'New Vouch Received',
+        message: `${input.amount} USDC vouch received`,
+        from: req.human.wallet_address,
+        amount: String(input.amount || ''),
+      });
+    }
     res.json({
       success: true,
       ...result,
@@ -4006,7 +4300,8 @@ app.post('/api/bounties', requireAuth, async (req, res) => {
     bounty = await insertManagedBounty(
       creatorWallet,
       input,
-      input.selectionMode === 'proposal' ? 'proposal_open' : 'funding'
+      input.selectionMode === 'proposal' ? 'proposal_open' : 'funding',
+      input.selectionMode === 'proposal' ? 'none' : 'funding'
     );
 
     if (input.selectionMode === 'proposal') {
@@ -4021,10 +4316,6 @@ app.post('/api/bounties', requireAuth, async (req, res) => {
       return res.json({ success: true, funded: false, bounty });
     }
 
-    await pool.query(
-      `UPDATE bounties SET escrow_status = 'funding' WHERE id = $1`,
-      [bounty.id]
-    );
     const transfer = await fundManagedEscrow(
       creatorWallet,
       SELLER_ADDRESS,
@@ -4375,7 +4666,7 @@ function normalizeBountyInput(body = {}) {
   };
 }
 
-async function insertManagedBounty(wallet, input, status) {
+async function insertManagedBounty(wallet, input, status, escrowStatus = 'none') {
   const id = `bounty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
   await stmts.insertBounty({
@@ -4392,6 +4683,7 @@ async function insertManagedBounty(wallet, input, status) {
     status,
     selection_mode: input.selectionMode,
     proposal_deadline: input.proposalDeadline,
+    escrow_status: escrowStatus,
   });
   return stmts.getBountyById(id);
 }
@@ -4592,6 +4884,46 @@ async function transferAndFundCustodialBounty(bounty, creatorWallet, actorType =
         [new Date().toISOString(), bounty.id]
       ).catch(() => {});
     }
+    throw error;
+  }
+}
+
+async function prepareExternalBountyFunding(bounty, creatorWallet) {
+  if (bounty.creator_wallet.toLowerCase() !== creatorWallet.toLowerCase()) {
+    throw Object.assign(new Error('Only the bounty creator can fund it'), { status: 403 });
+  }
+  if (bounty.escrow_status !== 'none') {
+    throw Object.assign(
+      new Error(`Bounty is already in escrow state: ${bounty.escrow_status}`),
+      { status: 409 }
+    );
+  }
+  if (bounty.selection_mode === 'proposal' && (
+    bounty.status !== 'proposal_selected' ||
+    !bounty.selected_proposal_id
+  )) {
+    throw Object.assign(new Error('Select a proposal before funding this bounty'), { status: 409 });
+  }
+  if (bounty.selection_mode !== 'proposal' && bounty.status !== 'open') {
+    throw Object.assign(new Error(`Bounty cannot be funded in status: ${bounty.status}`), { status: 409 });
+  }
+
+  await getSelectedProposalAgent(bounty);
+  await reserveBountyFunding(bounty.id);
+  try {
+    return await prepareHumanUsdcTransfer(
+      creatorWallet,
+      SELLER_ADDRESS,
+      Number(bounty.amount_usdc),
+      { maxAmount: 10_000 }
+    );
+  } catch (error) {
+    await pool.query(
+      `UPDATE bounties
+          SET escrow_status = 'none', updated_at = $1
+        WHERE id = $2 AND escrow_status = 'funding'`,
+      [new Date().toISOString(), bounty.id]
+    ).catch(() => {});
     throw error;
   }
 }
@@ -4976,13 +5308,72 @@ async function refundUnclaimedCustodialBounty({
 // the creator selects a proposal and therefore knows the final price.
 app.post('/api/human/bounties', requireHuman, async (req, res) => {
   let bounty = null;
+  let externalRecoveryTxHash = '';
   try {
     const input = normalizeBountyInput(req.body);
     const creatorWallet = req.human.wallet_address;
+    if (
+      humanUsesExternalWallet(req) &&
+      input.selectionMode !== 'proposal'
+    ) {
+      const transaction = buildHumanUsdcTransfer(
+        SELLER_ADDRESS,
+        input.amountUsdc,
+        { maxAmount: 10_000 }
+      );
+      const suppliedTxHash = String(req.body?.txHash || '');
+      if (suppliedTxHash) {
+        if (!/^0x[0-9a-fA-F]{64}$/.test(suppliedTxHash)) {
+          return res.status(400).json({ error: 'Valid funding txHash required' });
+        }
+        externalRecoveryTxHash = suppliedTxHash;
+        const existingFunding = (await pool.query(
+          `SELECT b.*
+             FROM bounty_funding_transactions f
+             JOIN bounties b ON b.id = f.bounty_id
+            WHERE LOWER(f.tx_hash) = LOWER($1)
+            LIMIT 1`,
+          [suppliedTxHash]
+        )).rows[0];
+        if (existingFunding) {
+          return res.json({
+            success: true,
+            funded: true,
+            txHash: suppliedTxHash.toLowerCase(),
+            explorer: `https://testnet.arcscan.app/tx/${suppliedTxHash}`,
+            bounty: existingFunding,
+          });
+        }
+      } else {
+        await prepareHumanUsdcTransfer(
+          creatorWallet,
+          SELLER_ADDRESS,
+          input.amountUsdc,
+          { maxAmount: 10_000 }
+        );
+        bounty = await insertManagedBounty(creatorWallet, input, 'funding', 'funding');
+        return res.status(202).json({
+          signatureRequired: true,
+          walletType: 'external',
+          bountyId: bounty.id,
+          transaction: externalTransactionPayload(transaction),
+        });
+      }
+
+      bounty = await insertManagedBounty(creatorWallet, input, 'funding', 'funding');
+      return res.status(409).json({
+        error: 'Funding transaction requires reconciliation against the reserved bounty',
+        recoverable: true,
+        bountyId: bounty.id,
+        txHash: suppliedTxHash.toLowerCase(),
+      });
+    }
+
     bounty = await insertManagedBounty(
       creatorWallet,
       input,
-      input.selectionMode === 'proposal' ? 'proposal_open' : 'funding'
+      input.selectionMode === 'proposal' ? 'proposal_open' : 'funding',
+      input.selectionMode === 'proposal' ? 'none' : 'funding'
     );
 
     if (input.selectionMode === 'proposal') {
@@ -4997,10 +5388,6 @@ app.post('/api/human/bounties', requireHuman, async (req, res) => {
       return res.json({ success: true, funded: false, bounty });
     }
 
-    await pool.query(
-      `UPDATE bounties SET escrow_status = 'funding' WHERE id = $1`,
-      [bounty.id]
-    );
     const transfer = await fundManagedEscrow(creatorWallet, SELLER_ADDRESS, input.amountUsdc);
     let fundedBounty;
     try {
@@ -5037,6 +5424,9 @@ app.post('/api/human/bounties', requireHuman, async (req, res) => {
       bounty: fundedBounty,
     });
   } catch (error) {
+    if (externalRecoveryTxHash && !error.txHash) {
+      error.txHash = externalRecoveryTxHash;
+    }
     if (bounty && bounty.status === 'funding' && !error.txHash) {
       await pool.query(
         `DELETE FROM bounties
@@ -5057,6 +5447,18 @@ app.post('/api/human/bounties/:id/fund', requireHuman, async (req, res) => {
   try {
     const bounty = await stmts.getBountyById(req.params.id);
     if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+    if (humanUsesExternalWallet(req)) {
+      const transaction = await prepareExternalBountyFunding(
+        bounty,
+        req.human.wallet_address
+      );
+      return res.status(202).json({
+        signatureRequired: true,
+        walletType: 'external',
+        bountyId: bounty.id,
+        transaction: externalTransactionPayload(transaction),
+      });
+    }
     const result = await transferAndFundCustodialBounty(bounty, req.human.wallet_address);
     emitFeedEvent('escrow:funded', {
       bountyId: bounty.id,
@@ -5092,6 +5494,33 @@ app.post('/api/human/bounties/:id/fund', requireHuman, async (req, res) => {
   }
 });
 
+app.post('/api/human/bounties/:id/fund/abort', requireHuman, async (req, res) => {
+  try {
+    const bounty = await stmts.getBountyById(req.params.id);
+    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+    if (bounty.creator_wallet.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
+      return res.status(403).json({ error: 'Only the bounty creator can abort funding' });
+    }
+    const recorded = (await pool.query(
+      'SELECT 1 FROM bounty_funding_transactions WHERE bounty_id = $1 LIMIT 1',
+      [bounty.id]
+    )).rows[0];
+    if (recorded) {
+      return res.status(409).json({ error: 'Funding is already confirmed and cannot be aborted' });
+    }
+    // The server cannot prove that the browser did not broadcast the prepared
+    // transaction before calling abort. Keep the hidden reservation so a late
+    // transaction hash can always be reconciled instead of orphaning funds.
+    res.json({
+      success: true,
+      retained: bounty.escrow_status === 'funding',
+      message: 'Funding reservation retained for safe retry or reconciliation',
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
 app.post('/api/human/bounties/:id/fund/reconcile', requireHuman, async (req, res) => {
   try {
     const txHash = String(req.body?.txHash || '');
@@ -5111,11 +5540,16 @@ app.post('/api/human/bounties/:id/fund/reconcile', requireHuman, async (req, res
     }
 
     const amountUsdc = Number(bounty.amount_usdc);
-    const verification = await verifyTransaction(
+    const expectedTransaction = buildHumanUsdcTransfer(
+      SELLER_ADDRESS,
+      amountUsdc,
+      { maxAmount: 10_000 }
+    );
+    const verification = await verifyExactExternalTransaction(
       txHash,
       creatorWallet,
-      SELLER_ADDRESS,
-      amountUsdc
+      expectedTransaction.to,
+      expectedTransaction.data
     );
     if (!verification.valid) {
       return res.status(409).json({
@@ -5142,6 +5576,30 @@ app.post('/api/human/bounties/:id/fund/reconcile', requireHuman, async (req, res
       txHash,
       selectedAgent,
     });
+    if (bounty.selection_mode !== 'proposal') {
+      emitFeedEvent('bounty:created', fundedBounty);
+      await createNotification({
+        wallet: creatorWallet,
+        type: 'system',
+        title: 'Bounty Funded',
+        message: `Your bounty "${bounty.title}" is live with ${amountUsdc} USDC in escrow.`,
+        from: 'BARD System',
+        amount: String(amountUsdc),
+      });
+    } else if (selectedAgent) {
+      emitFeedEvent('escrow:claimed', {
+        bountyId: bounty.id,
+        agentId: selectedAgent.id,
+        agentName: selectedAgent.agent_name,
+      });
+      await createNotification({
+        agentId: selectedAgent.id,
+        type: 'system',
+        title: 'Bounty Funded - You Can Start',
+        message: `"${bounty.title}" is funded with ${amountUsdc} USDC. Begin work and submit your deliverable.`,
+        from: creatorWallet,
+      });
+    }
     emitFeedEvent('escrow:funded', {
       bountyId: bounty.id,
       budgetUsdc: amountUsdc,
@@ -5576,9 +6034,13 @@ async function verifyTransaction(
   { allowWrappedCall = false } = {}
 ) {
   try {
-    // Fetch transaction receipt
+    // Wait for normal block-inclusion latency before treating reconciliation as
+    // failed. Browser wallets return the hash before Arc confirms the transfer.
     const receipt = await onchainEscrow.withArcRpcRetry(
-      () => arcTestnetClient.getTransactionReceipt({ hash: txHash }),
+      () => arcTestnetClient.waitForTransactionReceipt({
+        hash: txHash,
+        timeout: 120_000,
+      }),
       { label: `transaction ${txHash} receipt` },
     );
 
