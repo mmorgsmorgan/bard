@@ -1621,11 +1621,13 @@ async function handleTool(name, args, token) {
         }
         return {
           success: true,
+          reconciled: Boolean(data.reconciled),
+          alreadyFunded: Boolean(data.alreadyFunded),
           bounty: data.bounty,
           txHash: data.txHash,
           escrowMode: data.escrow_mode,
           onchainJobId: data.onchain_job_id,
-          message: 'Bounty funded and the selected agent can start work.',
+          message: data.message || 'Bounty funded and the selected agent can start work.',
         };
       }
 

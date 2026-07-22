@@ -6234,6 +6234,35 @@ app.post('/api/bounties/:id/fund', requireAuth, async (req, res) => {
         });
       }
 
+      const requestedTxHash = String(req.body?.txHash || '');
+      const requestedOnchainJobId = String(req.body?.onchainJobId || '');
+      const suppliedTxHash = requestedTxHash;
+      const suppliedOnchainJobId = String(
+        requestedOnchainJobId || bounty.onchain_job_id || ''
+      );
+      const matchingRecovery =
+        (requestedOnchainJobId && bounty.onchain_job_id &&
+          requestedOnchainJobId === String(bounty.onchain_job_id)) ||
+        (requestedTxHash && bounty.escrow_tx_hash &&
+          requestedTxHash.toLowerCase() === String(bounty.escrow_tx_hash).toLowerCase());
+      if (
+        bounty.selection_mode === 'proposal' &&
+        bounty.selected_proposal_id &&
+        ['funded', 'claimed', 'submitted', 'released'].includes(bounty.escrow_status) &&
+        matchingRecovery
+      ) {
+        return res.json({
+          success: true,
+          reconciled: true,
+          alreadyFunded: true,
+          txHash: bounty.escrow_tx_hash || null,
+          escrow_mode: bounty.escrow_mode || (bounty.onchain_job_id ? 'onchain' : 'custodial'),
+          onchain_job_id: bounty.onchain_job_id || null,
+          bounty,
+          message: 'Bounty funding was already confirmed; returning the existing escrow record.',
+        });
+      }
+
       if (bounty.selection_mode === 'proposal' && (
         bounty.status !== 'proposal_selected' ||
         !bounty.selected_proposal_id
@@ -6249,10 +6278,6 @@ app.post('/api/bounties/:id/fund', requireAuth, async (req, res) => {
       }
 
       const selectedAgent = await getSelectedProposalAgent(bounty);
-      const suppliedTxHash = String(req.body?.txHash || '');
-      const suppliedOnchainJobId = String(
-        req.body?.onchainJobId || bounty.onchain_job_id || ''
-      );
       const creatorWallet = creator.turnkey_address;
 
       let result;
