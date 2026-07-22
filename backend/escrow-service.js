@@ -41,6 +41,10 @@ const GAS_LIMIT_BUFFER_BPS = BigInt(process.env.GAS_LIMIT_BUFFER_BPS || '12000')
 const GAS_PRICE_BUFFER_BPS = BigInt(process.env.GAS_PRICE_BUFFER_BPS || '12500');
 const GAS_RESERVE_WEI = BigInt(process.env.GAS_RESERVE_WEI || '2000000000000000');
 const BPS_DENOMINATOR = 10_000n;
+const ARC_TX_PACE_MS = (() => {
+  const value = Number(process.env.ARC_TX_PACE_MS || '2000');
+  return Number.isFinite(value) && value >= 0 ? value : 2000;
+})();
 
 export function toUsdcWei(amountUsdc) {
   return BigInt(Math.round(Number(amountUsdc) * 10 ** USDC_DECIMALS));
@@ -51,6 +55,8 @@ export function fromUsdcWei(wei) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const _walletQueues = new Map();
+let _arcTxQueue = Promise.resolve();
+let _lastArcTxCompletedAt = 0;
 
 function ceilDiv(value, divisor) {
   return (value + divisor - 1n) / divisor;
@@ -92,6 +98,20 @@ export function isTransientArcRpcError(error) {
   return /-32011|request limit|rate limit|too many requests|\b429\b|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|fetch failed|socket hang up/i.test(detail);
 }
 
+export function arcRpcRetryDelay(attempt, baseDelayMs = 500, maxDelayMs = 8_000) {
+  const attemptIndex = Math.max(0, Number(attempt) - 1);
+  const base = Math.max(0, Number(baseDelayMs) || 0);
+  const maximum = Math.max(0, Number(maxDelayMs) || 0);
+  return Math.min(base * (2 ** attemptIndex), maximum);
+}
+
+export function arcTxPaceDelay(lastCompletedAt, now = Date.now(), paceMs = ARC_TX_PACE_MS) {
+  const last = Number(lastCompletedAt) || 0;
+  const current = Number(now) || 0;
+  const pace = Math.max(0, Number(paceMs) || 0);
+  return Math.max(0, last + pace - current);
+}
+
 export async function withArcRpcRetry(operation, {
   label = 'Arc RPC request',
   attempts = 8,
@@ -105,12 +125,29 @@ export async function withArcRpcRetry(operation, {
     } catch (error) {
       lastError = error;
       if (!isTransientArcRpcError(error) || attempt === attempts) throw error;
-      const delayMs = Math.min(baseDelayMs * (2 ** (attempt - 1)), 8_000);
+      const delayMs = arcRpcRetryDelay(attempt, baseDelayMs);
       console.warn(`[Arc RPC] ${label} transient failure (${attempt}/${attempts}): ${error.shortMessage || error.message}. Retrying in ${delayMs}ms.`);
       await sleepFn(delayMs);
     }
   }
   throw lastError;
+}
+
+async function withArcTransactionPacing(operation) {
+  const previous = _arcTxQueue;
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  _arcTxQueue = current;
+  await previous.catch(() => {});
+  try {
+    const delayMs = arcTxPaceDelay(_lastArcTxCompletedAt);
+    if (delayMs > 0) await sleep(delayMs);
+    return await operation();
+  } finally {
+    _lastArcTxCompletedAt = Date.now();
+    release();
+    if (_arcTxQueue === current) _arcTxQueue = Promise.resolve();
+  }
 }
 
 async function waitForReceipt(txHash, label) {
@@ -185,7 +222,7 @@ async function signerFor(address) {
  */
 export async function sendAs(signer, { to, data, value = 0n }, label = 'tx') {
   if (!signer) throw new Error(`escrow-service: missing signer for ${label}`);
-  return withWalletQueue(signer, async () => {
+  return withArcTransactionPacing(() => withWalletQueue(signer, async () => {
     const wc = await signerFor(signer);
     const gasFunding = await ensureGasForTransaction(signer, { to, data, value }, { label });
     const txHash = await wc.sendTransaction({
@@ -200,7 +237,7 @@ export async function sendAs(signer, { to, data, value = 0n }, label = 'tx') {
       throw new Error(`escrow-service: ${label} reverted (tx ${txHash})`);
     }
     return { txHash, receipt, gasFunding };
-  });
+  }));
 }
 
 // ──────────────────────────────────────────────
