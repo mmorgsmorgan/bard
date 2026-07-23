@@ -27,6 +27,7 @@ import { withMemo, MemoIds, ARC_MEMO_ADDRESS } from './arc-memo.js';
 import { createSiweRouter } from './siwe-auth.js';
 import { createHumanAuthRouter, requireHumanSession } from './human-auth.js';
 import {
+  buildHumanProfileMetadataURI,
   buildHumanProfileTransactions,
   buildHumanProofTransaction,
   buildHumanUsdcTransfer,
@@ -1400,21 +1401,20 @@ app.post('/api/human/profile', requireHuman, async (req, res) => {
     return res.status(400).json({ error: 'Username must be 3-32 lowercase letters, numbers, or single hyphens' });
   }
   const profileKind = profileType === 'agent' ? 'agent' : 'human';
-  const metadata = {
+  const metadataURI = buildHumanProfileMetadataURI({
     username,
-    display_name: displayName,
-    profile_type: profileKind,
+    displayName,
+    profileType: profileKind,
     bio,
-    ecosystems: Array.isArray(ecosystems) ? ecosystems : [],
+    ecosystems,
     wallet,
-    farcaster: farcaster || undefined,
-    github: github || undefined,
-    x: x || undefined,
-    discord: discord || undefined,
-    linkedin: linkedin || undefined,
-    created_at: new Date().toISOString(),
-  };
-  const metadataURI = `data:application/json,${encodeURIComponent(JSON.stringify(metadata))}`;
+    farcaster,
+    github,
+    x,
+    discord,
+    linkedin,
+    pfp,
+  });
 
   try {
     const usernameOwner = await stmts.getProfileByUsername(username);

@@ -86,6 +86,37 @@ export function buildHumanProfileTransactions({
   };
 }
 
+export function buildHumanProfileMetadataURI({
+  username,
+  displayName = '',
+  profileType = 'human',
+  bio = '',
+  ecosystems = [],
+  wallet,
+  farcaster = '',
+  github = '',
+  x = '',
+  discord = '',
+  linkedin = '',
+  pfp = '',
+}) {
+  const metadata = {
+    username,
+    display_name: displayName,
+    profile_type: profileType === 'agent' ? 'agent' : 'human',
+    bio,
+    ecosystems: Array.isArray(ecosystems) ? ecosystems : [],
+    wallet,
+    farcaster: farcaster || undefined,
+    github: github || undefined,
+    x: x || undefined,
+    discord: discord || undefined,
+    linkedin: linkedin || undefined,
+    pfp: pfp || undefined,
+  };
+  return `data:application/json,${encodeURIComponent(JSON.stringify(metadata))}`;
+}
+
 export async function prepareHumanProfileTransaction(address, profile) {
   const exists = await onchainEscrow.withArcRpcRetry(
     () => import('./erc8183-client.js').then(({ publicClient }) => (
