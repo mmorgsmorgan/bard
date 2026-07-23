@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { useLogin, usePrivy, useWallets } from '@privy-io/react-auth';
@@ -53,6 +54,7 @@ interface BardAccountContextValue {
   account: BardAccount | null;
   address: `0x${string}` | undefined;
   isConnected: boolean;
+  authReady: boolean;
   status: BardAccountStatus;
   token: string | null;
   error: string | null;
@@ -89,8 +91,14 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
   } = usePrivy();
   const { wallets } = useWallets();
   const [loginContext, setLoginContext] = useState<LoginContext | null>(null);
+  const [account, setAccount] = useState<BardAccount | null>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const [status, setStatus] = useState<BardAccountStatus>('connecting');
+  const [error, setError] = useState<string | null>(null);
+  const pendingLoginRef = useRef(false);
   const { login: privyLogin } = useLogin({
     onComplete: (_user, _isNewUser, _wasAlreadyAuthenticated, loginMethod, loginAccount) => {
+      pendingLoginRef.current = false;
       const context: LoginContext = {
         loginMethod: loginMethod || '',
       };
@@ -104,11 +112,12 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
       window.sessionStorage.setItem(LOGIN_CONTEXT_KEY, JSON.stringify(context));
       setLoginContext(context);
     },
+    onError: (cause) => {
+      pendingLoginRef.current = false;
+      setStatus('error');
+      setError(`Sign-in failed: ${String(cause)}`);
+    },
   });
-  const [account, setAccount] = useState<BardAccount | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [status, setStatus] = useState<BardAccountStatus>('connecting');
-  const [error, setError] = useState<string | null>(null);
 
   const clearBardSession = useCallback(() => {
     window.localStorage.removeItem(SESSION_KEY);
@@ -175,6 +184,7 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
       })
       .then((data) => {
         if (cancelled) return;
+        pendingLoginRef.current = false;
         window.localStorage.setItem(SESSION_KEY, data.token);
         window.sessionStorage.removeItem(LOGIN_CONTEXT_KEY);
         setToken(data.token);
@@ -183,6 +193,7 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
       })
       .catch(async (cause) => {
         if (cancelled) return;
+        pendingLoginRef.current = false;
         clearBardSession();
         const code = (cause as { code?: string })?.code;
         if (
@@ -211,13 +222,29 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
     loginContext,
   ]);
 
-  const login = useCallback(() => {
+  const startPrivyLogin = useCallback(() => {
+    pendingLoginRef.current = false;
     setStatus('connecting');
     setError(null);
     privyLogin();
   }, [privyLogin]);
 
+  useEffect(() => {
+    if (!ready || !pendingLoginRef.current) return;
+    startPrivyLogin();
+  }, [ready, startPrivyLogin]);
+
+  const login = useCallback(() => {
+    setError(null);
+    if (!ready) {
+      pendingLoginRef.current = true;
+      return;
+    }
+    startPrivyLogin();
+  }, [ready, startPrivyLogin]);
+
   const logout = useCallback(async () => {
+    pendingLoginRef.current = false;
     clearSession();
     setStatus('disconnected');
     await privyLogout();
@@ -289,6 +316,7 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
     account,
     address: account?.wallet.address,
     isConnected: status === 'connected' && Boolean(account?.wallet.address),
+    authReady: ready,
     status,
     token,
     error,
@@ -297,7 +325,7 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
     refreshAccount,
     authFetch,
     sendTransaction,
-  }), [account, status, token, error, login, logout, refreshAccount, authFetch, sendTransaction]);
+  }), [account, ready, status, token, error, login, logout, refreshAccount, authFetch, sendTransaction]);
 
   return (
     <BardAccountContext.Provider value={value}>
