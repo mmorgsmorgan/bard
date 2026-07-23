@@ -1478,6 +1478,18 @@ app.post('/api/human/profile', requireHuman, async (req, res) => {
       explorer: `https://testnet.arcscan.app/tx/${confirmedTxHash}`,
     });
   } catch (error) {
+    if (
+      error.code === '23505' &&
+      (
+        error.constraint === 'profiles_username_key' ||
+        error.message?.includes('profiles_username_key')
+      )
+    ) {
+      return res.status(409).json({
+        error: 'Username is already taken',
+        code: 'username_taken',
+      });
+    }
     res.status(error.status || 502).json({
       error: error.message,
       code: error.code,
