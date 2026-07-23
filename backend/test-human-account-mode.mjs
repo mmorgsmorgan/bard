@@ -18,6 +18,7 @@ const {
   identityFromPrivyUser,
   requireLoginContext,
   requestedWallet,
+  restoreHumanAccount,
   upsertHumanAccount,
 } = humanAuthTestUtils;
 const suffix = `${Date.now()}-${randomBytes(3).toString('hex')}`;
@@ -224,6 +225,41 @@ try {
   assert.equal(externalAccount.wallet_type, 'external');
   assert.equal(externalAccount.wallet_address, externalAddress);
   assert.equal(externalAccount.wallet_id, null);
+  const restoredExternalAccount = await restoreHumanAccount({
+    privyDid: ids.externalDid,
+    email: null,
+    emailVerifiedAt: null,
+    loginWallet: externalAddress,
+    externalWallets: [externalAddress],
+    authenticatedEmail: false,
+    authenticatedExternalWallets: [],
+  });
+  assert.equal(restoredExternalAccount.id, externalAccount.id);
+  assert.equal(restoredExternalAccount.wallet_address, externalAddress);
+  await assert.rejects(
+    restoreHumanAccount({
+      privyDid: ids.externalDid,
+      email: null,
+      emailVerifiedAt: null,
+      loginWallet: null,
+      externalWallets: [],
+      authenticatedEmail: false,
+      authenticatedExternalWallets: [],
+    }),
+    (error) => error.code === 'external_wallet_not_linked'
+  );
+  await assert.rejects(
+    restoreHumanAccount({
+      privyDid: `did:privy:missing-${suffix}`,
+      email: null,
+      emailVerifiedAt: null,
+      loginWallet: null,
+      externalWallets: [],
+      authenticatedEmail: false,
+      authenticatedExternalWallets: [],
+    }),
+    (error) => error.code === 'human_account_not_found'
+  );
   const unexpectedExternalWallet = await pool.query(
     'SELECT 1 FROM local_wallets WHERE label = $1',
     [`bard-human-${externalAccount.id}`]

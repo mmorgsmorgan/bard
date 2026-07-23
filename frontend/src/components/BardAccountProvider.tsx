@@ -48,6 +48,13 @@ interface BardAccount {
   createdAt: string;
 }
 
+interface BardSessionResponse {
+  token: string;
+  account: BardAccount;
+  error?: string;
+  code?: string;
+}
+
 type BardAccountStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 interface BardAccountContextValue {
@@ -79,6 +86,39 @@ function storedLoginContext(): LoginContext | null {
     return value ? JSON.parse(value) : null;
   } catch {
     return null;
+  }
+}
+
+async function getPrivyAccessToken(
+  getAccessToken: () => Promise<string | null>
+): Promise<string> {
+  let lastError: unknown = null;
+  for (const delayMs of [0, 250, 750]) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }
+    try {
+      const accessToken = await getAccessToken();
+      if (accessToken) return accessToken;
+    } catch (cause) {
+      lastError = cause;
+    }
+  }
+  throw Object.assign(
+    new Error(
+      lastError instanceof Error
+        ? lastError.message
+        : 'Privy did not return an access token'
+    ),
+    { code: 'privy_token_unavailable' }
+  );
+}
+
+async function responseJson<T>(response: Response): Promise<Partial<T>> {
+  try {
+    return await response.json() as Partial<T>;
+  } catch {
+    return {};
   }
 }
 
@@ -136,7 +176,11 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
     let cancelled = false;
 
     if (!authenticated) {
-      clearSession();
+      // Privy can briefly report signed-out while restoring its persisted
+      // session. Keep the BARD token so a later authenticated render can
+      // validate or renew it instead of forcing the user to start over.
+      setAccount(null);
+      setToken(null);
       setStatus('disconnected');
       setError(null);
       return;
@@ -145,23 +189,55 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
     setStatus('connecting');
     setError(null);
     Promise.resolve()
-      .then(async () => {
+      .then(async (): Promise<BardSessionResponse> => {
         const context = loginContext || storedLoginContext();
-        const privyToken = await getAccessToken();
-        if (!privyToken) throw new Error('Privy did not return an access token');
+        const privyToken = await getPrivyAccessToken(getAccessToken);
         const previousToken = storedToken();
-        if (previousToken && !context) {
-          const sessionResponse = await fetch(`${API_URL}/api/human/me`, {
-            headers: {
-              Authorization: `Bearer ${previousToken}`,
-              'X-Privy-Token': privyToken,
-            },
-          });
-          if (sessionResponse.ok) {
-            const sessionData = await sessionResponse.json();
-            return { token: previousToken, account: sessionData.account };
+        if (!context) {
+          if (previousToken) {
+            try {
+              const sessionResponse = await fetch(`${API_URL}/api/human/me`, {
+                headers: {
+                  Authorization: `Bearer ${previousToken}`,
+                  'X-Privy-Token': privyToken,
+                },
+              });
+              if (sessionResponse.ok) {
+                const sessionData = await responseJson<BardSessionResponse>(sessionResponse);
+                if (!sessionData.account) {
+                  throw new Error('BARD returned an invalid session response');
+                }
+                return { token: previousToken, account: sessionData.account };
+              }
+            } catch {
+              // The restore endpoint below can still renew the BARD session.
+            }
           }
-          window.localStorage.removeItem(SESSION_KEY);
+
+          const restoreResponse = await fetch(`${API_URL}/api/human/session/restore`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ privyToken }),
+          });
+          const restoreData = await responseJson<BardSessionResponse>(restoreResponse);
+          if (!restoreResponse.ok) {
+            throw Object.assign(
+              new Error(
+                String(restoreData.error || 'Could not restore the BARD session')
+              ),
+              {
+                code: restoreData.code,
+                status: restoreResponse.status,
+              }
+            );
+          }
+          if (!restoreData.token || !restoreData.account) {
+            throw new Error('BARD returned an invalid session restore response');
+          }
+          return {
+            token: restoreData.token,
+            account: restoreData.account,
+          };
         }
 
         const response = await fetch(`${API_URL}/api/human/auth`, {
@@ -173,14 +249,20 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
             loginWallet: context?.loginWallet,
           }),
         });
-        const data = await response.json();
+        const data = await responseJson<BardSessionResponse>(response);
         if (!response.ok) {
           throw Object.assign(
-            new Error(data.error || 'BARD account provisioning failed'),
+            new Error(String(data.error || 'BARD account provisioning failed')),
             { code: data.code }
           );
         }
-        return data;
+        if (!data.token || !data.account) {
+          throw new Error('BARD returned an invalid account response');
+        }
+        return {
+          token: data.token,
+          account: data.account,
+        };
       })
       .then((data) => {
         if (cancelled) return;
@@ -194,15 +276,20 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
       .catch(async (cause) => {
         if (cancelled) return;
         pendingLoginRef.current = false;
-        clearBardSession();
         const code = (cause as { code?: string })?.code;
-        if (
+        const resetPrivySession =
           code === 'account_login_method_mismatch' ||
           code === 'external_wallet_not_linked' ||
           code === 'email_login_mismatch' ||
-          code === 'wallet_login_mismatch'
-        ) {
+          code === 'wallet_login_mismatch';
+        if (resetPrivySession) {
+          clearBardSession();
           await privyLogout().catch(() => {});
+        } else {
+          // Keep the persisted BARD token on transient failures. It may still
+          // be valid and can be retried on the next Privy/session refresh.
+          setAccount(null);
+          setToken(null);
         }
         if (cancelled) return;
         setStatus('error');
@@ -217,7 +304,6 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
     authenticated,
     getAccessToken,
     privyLogout,
-    clearSession,
     clearBardSession,
     loginContext,
   ]);
@@ -231,8 +317,28 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     if (!ready || !pendingLoginRef.current) return;
+    if (authenticated) {
+      pendingLoginRef.current = false;
+      return;
+    }
     startPrivyLogin();
-  }, [ready, startPrivyLogin]);
+  }, [ready, authenticated, startPrivyLogin]);
+
+  const restartPrivyLogin = useCallback(() => {
+    pendingLoginRef.current = false;
+    setStatus('connecting');
+    setError(null);
+    void privyLogout()
+      .then(() => {
+        clearSession();
+        setStatus('connecting');
+        privyLogin();
+      })
+      .catch((cause) => {
+        setStatus('error');
+        setError(cause instanceof Error ? cause.message : String(cause));
+      });
+  }, [clearSession, privyLogin, privyLogout]);
 
   const login = useCallback(() => {
     setError(null);
@@ -240,8 +346,20 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
       pendingLoginRef.current = true;
       return;
     }
+    if (authenticated && !account) {
+      if (status === 'connecting') return;
+      restartPrivyLogin();
+      return;
+    }
     startPrivyLogin();
-  }, [ready, startPrivyLogin]);
+  }, [
+    ready,
+    authenticated,
+    account,
+    status,
+    restartPrivyLogin,
+    startPrivyLogin,
+  ]);
 
   const logout = useCallback(async () => {
     pendingLoginRef.current = false;
