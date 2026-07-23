@@ -450,6 +450,32 @@ async function syncHumanIdentity(account, identity) {
   return stmts.getHumanAccountById(account.id);
 }
 
+async function restoreHumanAccount(identity) {
+  const account = await stmts.getHumanAccountByPrivyDid(identity.privyDid);
+  if (!account) {
+    throw Object.assign(
+      new Error('No BARD account exists for the current Privy session'),
+      { status: 404, code: 'human_account_not_found' }
+    );
+  }
+  if (!account.wallet_address) {
+    throw Object.assign(
+      new Error('This BARD account does not have an active wallet'),
+      { status: 409, code: 'human_wallet_missing' }
+    );
+  }
+  if (
+    account.wallet_type === 'external' &&
+    !identity.externalWallets.includes(account.wallet_address.toLowerCase())
+  ) {
+    throw Object.assign(
+      new Error('The external wallet for this BARD account is no longer linked in Privy'),
+      { status: 409, code: 'external_wallet_not_linked' }
+    );
+  }
+  return syncHumanIdentity(account, identity);
+}
+
 function publicAccount(account) {
   const walletType = account.wallet_type === 'external' ? 'external' : 'managed';
   const provider = walletType === 'external' ? 'external' : getWalletProvider(pool).name;
@@ -717,6 +743,25 @@ export function createHumanAuthRouter({ jwtSecret }) {
   const router = express.Router();
   const requireSession = requireHumanSession(jwtSecret);
 
+  router.post('/session/restore', async (req, res) => {
+    res.set('Cache-Control', 'no-store, private');
+    try {
+      const identity = await verifyPrivyToken(req.body?.privyToken);
+      const account = await restoreHumanAccount(identity);
+      res.json({
+        token: mintHumanSession(account, jwtSecret),
+        expiresIn: SESSION_TTL,
+        account: publicAccount(account),
+      });
+    } catch (error) {
+      console.error('[human-auth] session restore failed:', error.message);
+      res.status(error.status || 401).json({
+        error: error.status ? error.message : 'Privy session restoration failed',
+        code: error.code,
+      });
+    }
+  });
+
   router.post('/auth', async (req, res) => {
     try {
       const { privyToken, loginMethod, loginWallet } = req.body || {};
@@ -845,5 +890,6 @@ export const humanAuthTestUtils = Object.freeze({
   identityFromPrivyUser,
   requireLoginContext,
   requestedWallet,
+  restoreHumanAccount,
   upsertHumanAccount,
 });
