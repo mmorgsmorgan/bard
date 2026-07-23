@@ -29,7 +29,7 @@ export function EnterButton({
   style?: React.CSSProperties;
 }) {
   const router = useRouter();
-  const { isConnected, status, login } = useBardAccount();
+  const { isConnected, authReady, status, login } = useBardAccount();
   const { hasProfile, resolved } = useHasProfile();
   // Set when the user clicks while disconnected — we then route once connected.
   const [awaitingConnect, setAwaitingConnect] = useState(false);
@@ -52,7 +52,7 @@ export function EnterButton({
     <button
       className={className}
       style={style}
-      disabled={status === 'connecting'}
+      disabled={authReady && status === 'connecting'}
       onClick={() => {
         if (!isConnected) {
           routedRef.current = false;

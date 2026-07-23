@@ -17,6 +17,7 @@ export default function PublicProfilePage() {
   const {
     address: viewerAddress,
     isConnected,
+    authReady,
     status,
     login,
     authFetch,
@@ -345,8 +346,8 @@ export default function PublicProfilePage() {
       {!isConnected && (
         <div className="flex items-center justify-between gap-4 border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-px">
           <span className="text-sm text-surface-400">Sign in to vouch or send USDC.</span>
-          <button onClick={login} disabled={status === 'connecting'} className="btn-primary shrink-0 text-xs px-5 py-2.5">
-            {status === 'connecting' ? 'Signing in...' : 'Sign in'}
+          <button onClick={login} disabled={authReady && status === 'connecting'} className="btn-primary shrink-0 text-xs px-5 py-2.5">
+            {authReady && status === 'connecting' ? 'Signing in...' : 'Sign in'}
           </button>
         </div>
       )}

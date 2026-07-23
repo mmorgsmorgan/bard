@@ -32,7 +32,7 @@ function isFullyPublic(pathname: string): boolean {
 }
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
-  const { isConnected, address, status, login, error } = useBardAccount();
+  const { isConnected, address, authReady, status, login, error } = useBardAccount();
   const pathname = usePathname();
   const router = useRouter();
   const [profileResolved, setProfileResolved] = useState(false);
@@ -114,10 +114,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           {error && <p className="text-xs mb-4" style={{ color: 'var(--danger)' }}>{error}</p>}
           <button
             onClick={login}
-            disabled={status === 'connecting'}
+            disabled={authReady && status === 'connecting'}
             className="btn-primary w-full text-xs py-3.5"
           >
-            {status === 'connecting' ? 'Signing in...' : 'Continue with email or wallet'}
+            {authReady && status === 'connecting' ? 'Signing in...' : 'Continue with email or wallet'}
           </button>
         </div>
       </div>
