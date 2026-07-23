@@ -678,24 +678,62 @@ export const stmts = {
 
   // ── Profiles ──
   upsertProfile: async (p) => run(
-    `INSERT INTO profiles (wallet, username, display_name, bio, profile_type, ecosystems, farcaster, github, x, discord, linkedin, pfp, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-     ON CONFLICT (wallet) DO UPDATE SET
-       username = EXCLUDED.username,
-       display_name = EXCLUDED.display_name,
-       bio = EXCLUDED.bio,
-       profile_type = EXCLUDED.profile_type,
-       ecosystems = EXCLUDED.ecosystems,
-       farcaster = EXCLUDED.farcaster,
-       github = EXCLUDED.github,
-       x = EXCLUDED.x,
-       discord = EXCLUDED.discord,
-       linkedin = EXCLUDED.linkedin,
-       pfp = EXCLUDED.pfp`,
+    `WITH matched AS (
+       SELECT wallet
+         FROM profiles
+        WHERE LOWER(wallet) = LOWER($1)
+        LIMIT 1
+     ),
+     updated AS (
+       UPDATE profiles AS current
+          SET username = $2,
+              display_name = $3,
+              bio = $4,
+              profile_type = $5,
+              ecosystems = $6,
+              farcaster = $7,
+              github = $8,
+              x = $9,
+              discord = $10,
+              linkedin = $11,
+              pfp = $12
+         FROM matched
+        WHERE current.wallet = matched.wallet
+       RETURNING current.wallet
+     ),
+     inserted AS (
+       INSERT INTO profiles
+         (wallet, username, display_name, bio, profile_type, ecosystems,
+          farcaster, github, x, discord, linkedin, pfp, created_at)
+       SELECT LOWER($1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+        WHERE NOT EXISTS (SELECT 1 FROM updated)
+       ON CONFLICT (wallet) DO UPDATE SET
+         username = EXCLUDED.username,
+         display_name = EXCLUDED.display_name,
+         bio = EXCLUDED.bio,
+         profile_type = EXCLUDED.profile_type,
+         ecosystems = EXCLUDED.ecosystems,
+         farcaster = EXCLUDED.farcaster,
+         github = EXCLUDED.github,
+         x = EXCLUDED.x,
+         discord = EXCLUDED.discord,
+         linkedin = EXCLUDED.linkedin,
+         pfp = EXCLUDED.pfp
+       RETURNING profiles.wallet
+     )
+     SELECT wallet FROM updated
+     UNION ALL
+     SELECT wallet FROM inserted`,
     [p.wallet, p.username, p.display_name, p.bio, p.profile_type, p.ecosystems, p.farcaster, p.github, p.x, p.discord, p.linkedin, p.pfp, p.created_at]
   ),
-  getProfileByWallet: async (wallet) => one('SELECT * FROM profiles WHERE wallet = $1', [wallet]),
-  getProfileByUsername: async (username) => one('SELECT * FROM profiles WHERE username = $1', [username]),
+  getProfileByWallet: async (wallet) => one(
+    'SELECT * FROM profiles WHERE LOWER(wallet) = LOWER($1) LIMIT 1',
+    [wallet]
+  ),
+  getProfileByUsername: async (username) => one(
+    'SELECT * FROM profiles WHERE LOWER(username) = LOWER($1) LIMIT 1',
+    [username]
+  ),
   getAllProfiles: async () => many('SELECT * FROM profiles ORDER BY created_at DESC'),
 
   // ── Proofs ──
