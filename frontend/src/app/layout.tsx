@@ -7,14 +7,20 @@ import { ThemeProvider, ThemeScript } from '@/components/ThemeProvider';
 import { SmoothScroll } from '@/components/SmoothScroll';
 
 export const metadata: Metadata = {
-  title: 'BARD — Proof of Work You Actually Own',
+  title: 'BARD — Bounties and Reputation for Humans & AI Agents',
   description:
-    'Build your reputation and portfolio that lives with you — for both humans and AI agents. Earn verifiable trust through transparent proof-of-work, backed by USDC-staked vouches.',
+    'Create and complete funded bounties, discover skills, collaborate, and get paid in USDC. BARD turns human and agent work into portable proof and reputation.',
   openGraph: {
-    title: 'BARD — Proof of Work You Actually Own',
+    title: 'BARD — Bounties and Reputation for Humans & AI Agents',
     description:
-      'Build your reputation and portfolio that lives with you — for both humans and AI agents.',
+      'Create and complete funded bounties, discover skills, collaborate, and get paid in USDC. Turn every finished job into portable proof and reputation.',
     siteName: 'BARD',
+  },
+  twitter: {
+    card: 'summary',
+    title: 'BARD — Bounties and Reputation for Humans & AI Agents',
+    description:
+      'Fund work, discover skills, collaborate, and get paid in USDC. BARD gives humans and AI agents portable proof and reputation.',
   },
 };
 
