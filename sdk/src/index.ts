@@ -67,6 +67,27 @@ export interface BountyResult {
   amountUsdc: string;
   deadline: string;
   status: string;
+  acceptanceCriteria?: Array<{ id: string; text: string }>;
+}
+
+export interface DeliverableEvidence {
+  criterionId: string;
+  proof: string;
+  links?: string[];
+}
+
+export interface DeliverableArtifact {
+  label: string;
+  url: string;
+  type?: string;
+}
+
+export interface DeliverablePackage {
+  content: string;
+  summary?: string;
+  evidence?: DeliverableEvidence[];
+  testInstructions?: string;
+  artifacts?: DeliverableArtifact[];
 }
 
 export interface DeliverableResult {
@@ -366,11 +387,17 @@ export class BardAgent {
     );
   }
 
-  /** Submit completed work for a claimed bounty */
-  async submitDeliverable(bountyId: string, content: string): Promise<DeliverableResult> {
+  /** Submit completed work and optional human-review evidence for a claimed bounty */
+  async submitDeliverable(
+    bountyId: string,
+    deliverable: string | DeliverablePackage
+  ): Promise<DeliverableResult> {
+    const payload = typeof deliverable === 'string'
+      ? { content: deliverable }
+      : deliverable;
     const result = await this._mcpCall<DeliverableResult>('bard_submit_deliverable', {
       bountyId,
-      content,
+      ...payload,
     });
     console.log(`[BardAgent] Deliverable submitted for bounty ${bountyId}`);
     return result;

@@ -168,8 +168,55 @@ export interface Bounty {
   refundTxHash?: string;
   selectedProposalId?: string;
   proposalDeadline?: string;
+  acceptanceCriteria: AcceptanceCriterion[];
+  deliverableHash?: string;
+  deliverableContent?: string;
+  deliverableSummary?: string;
+  deliverableEvidence: DeliverableEvidence[];
+  deliverableInstructions?: string;
+  deliverableArtifacts: DeliverableArtifact[];
+  verificationReport?: VerificationReport;
+  verificationRequestedAt?: string;
+  verificationRequestNote?: string;
+  revisionCount: number;
+  submittedAt?: string;
+  releaseTxHash?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AcceptanceCriterion {
+  id: string;
+  text: string;
+}
+
+export interface DeliverableEvidence {
+  criterionId: string;
+  proof: string;
+  links: string[];
+}
+
+export interface DeliverableArtifact {
+  label: string;
+  url: string;
+  type: string;
+}
+
+export interface VerificationReport {
+  status: 'ready_for_human_review' | 'needs_attention';
+  generatedAt: string;
+  checks: {
+    criteriaCovered: number;
+    criteriaTotal: number;
+    allCriteriaCovered: boolean;
+    instructionsProvided: boolean;
+    artifactCount: number;
+    linkCount: number;
+    invalidLinks: number;
+  };
+  criteria: Array<AcceptanceCriterion & { covered: boolean; evidenceCount: number }>;
+  links: Array<{ url: string; source: string; valid: boolean }>;
+  note?: string;
 }
 
 export interface BountyProposal {
@@ -677,6 +724,24 @@ export async function fetchEndorsementsByWallet(wallet: string): Promise<Endorse
 // ══════════════════════════════════════════════════════
 
 function bountyFromRow(row: Record<string, unknown>): Bounty {
+  const parseArray = <T,>(value: unknown): T[] => {
+    if (Array.isArray(value)) return value as T[];
+    try {
+      const parsed = JSON.parse(String(value || '[]'));
+      return Array.isArray(parsed) ? parsed as T[] : [];
+    } catch {
+      return [];
+    }
+  };
+  const parseObject = <T,>(value: unknown): T | undefined => {
+    if (value && typeof value === 'object') return value as T;
+    try {
+      const parsed = JSON.parse(String(value || '{}'));
+      return parsed && typeof parsed === 'object' ? parsed as T : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   return {
     id: row.id as string,
     creatorWallet: (row.creator_wallet || row.creatorWallet) as string,
@@ -696,6 +761,19 @@ function bountyFromRow(row: Record<string, unknown>): Bounty {
     refundTxHash: (row.refund_tx_hash || row.refundTxHash) as string | undefined,
     selectedProposalId: (row.selected_proposal_id || row.selectedProposalId) as string | undefined,
     proposalDeadline: (row.proposal_deadline || row.proposalDeadline) as string | undefined,
+    acceptanceCriteria: parseArray<AcceptanceCriterion>(row.acceptance_criteria || row.acceptanceCriteria),
+    deliverableHash: (row.deliverable_hash || row.deliverableHash) as string | undefined,
+    deliverableContent: (row.deliverable_content || row.deliverableContent) as string | undefined,
+    deliverableSummary: (row.deliverable_summary || row.deliverableSummary) as string | undefined,
+    deliverableEvidence: parseArray<DeliverableEvidence>(row.deliverable_evidence || row.deliverableEvidence),
+    deliverableInstructions: (row.deliverable_instructions || row.deliverableInstructions) as string | undefined,
+    deliverableArtifacts: parseArray<DeliverableArtifact>(row.deliverable_artifacts || row.deliverableArtifacts),
+    verificationReport: parseObject<VerificationReport>(row.verification_report || row.verificationReport),
+    verificationRequestedAt: (row.verification_requested_at || row.verificationRequestedAt) as string | undefined,
+    verificationRequestNote: (row.verification_request_note || row.verificationRequestNote) as string | undefined,
+    revisionCount: Number(row.revision_count || row.revisionCount || 0),
+    submittedAt: (row.submitted_at || row.submittedAt) as string | undefined,
+    releaseTxHash: (row.release_tx_hash || row.releaseTxHash) as string | undefined,
     createdAt: (row.created_at || row.createdAt) as string,
     updatedAt: (row.updated_at || row.updatedAt) as string,
   };
@@ -773,6 +851,7 @@ export async function createBounty(data: {
   minReputation?: number;
   selectionMode?: 'first_come' | 'proposal';
   proposalDeadline?: string;
+  acceptanceCriteria?: string[];
 }): Promise<Bounty | null> {
   try {
     const res = await fetch(`${API}/api/bounties`, {
@@ -867,6 +946,59 @@ export async function createHumanBounty(
     return {
       bounty: null,
       txHash: broadcastTxHash || undefined,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function reviewHumanBounty(
+  authFetch: AuthFetch,
+  bountyId: string,
+  decision: 'approved' | 'rejected',
+  reason: string
+): Promise<{ bounty: Bounty | null; pending?: boolean; txHash?: string; error?: string }> {
+  try {
+    const res = await authFetch(`/api/human/bounties/${bountyId}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, reason }),
+    });
+    const json = await res.json();
+    if (!res.ok && res.status !== 202) {
+      return { bounty: null, error: json.error || 'Bounty review failed' };
+    }
+    return {
+      bounty: json.bounty ? bountyFromRow(json.bounty) : null,
+      pending: Boolean(json.pending),
+      txHash: json.txHash || undefined,
+    };
+  } catch (error) {
+    return {
+      bounty: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function requestHumanBountyVerification(
+  authFetch: AuthFetch,
+  bountyId: string,
+  note: string
+): Promise<{ bounty: Bounty | null; error?: string }> {
+  try {
+    const res = await authFetch(`/api/human/bounties/${bountyId}/request-verification`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    });
+    const json = await res.json();
+    if (!res.ok) {
+      return { bounty: null, error: json.error || 'Independent review request failed' };
+    }
+    return { bounty: json.bounty ? bountyFromRow(json.bounty) : null };
+  } catch (error) {
+    return {
+      bounty: null,
       error: error instanceof Error ? error.message : String(error),
     };
   }

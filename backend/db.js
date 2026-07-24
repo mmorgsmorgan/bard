@@ -318,6 +318,14 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS provider_wallet TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS deliverable_hash TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS deliverable_content TEXT`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS acceptance_criteria TEXT DEFAULT '[]'`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS deliverable_summary TEXT DEFAULT ''`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS deliverable_evidence TEXT DEFAULT '[]'`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS deliverable_instructions TEXT DEFAULT ''`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS deliverable_artifacts TEXT DEFAULT '[]'`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS verification_report TEXT DEFAULT '{}'`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS verification_requested_at TEXT`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS verification_request_note TEXT DEFAULT ''`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS client_decision TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS client_decision_at TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS verifier_wallet TEXT`,
@@ -882,11 +890,11 @@ export const stmts = {
 
   // ── Bounties ──
   insertBounty: async (p) => run(
-    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, created_at, updated_at, status, selection_mode, proposal_deadline, escrow_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, acceptance_criteria, created_at, updated_at, status, selection_mode, proposal_deadline, escrow_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
     [
       p.id, p.creator_wallet, p.title, p.description, p.bounty_type, p.amount_usdc, p.deadline,
-      p.min_reputation, p.created_at, p.updated_at,
+      p.min_reputation, p.acceptance_criteria || '[]', p.created_at, p.updated_at,
       p.status || 'open',
       p.selection_mode || 'first_come',
       p.proposal_deadline || null,
@@ -955,8 +963,33 @@ export const stmts = {
     [p.provider_agent_id, p.provider_wallet, p.claimed_at, p.updated_at, p.id]
   ),
   submitBountyDeliverable: async (p) => run(
-    `UPDATE bounties SET deliverable_hash = $1, deliverable_content = $2, escrow_status = 'submitted', status = 'submitted', submitted_at = $3, updated_at = $4 WHERE id = $5`,
-    [p.deliverable_hash, p.deliverable_content, p.submitted_at, p.updated_at, p.id]
+    `UPDATE bounties
+        SET deliverable_hash = $1,
+            deliverable_content = $2,
+            deliverable_summary = $3,
+            deliverable_evidence = $4,
+            deliverable_instructions = $5,
+            deliverable_artifacts = $6,
+            verification_report = $7,
+            verification_requested_at = NULL,
+            verification_request_note = '',
+            escrow_status = 'submitted',
+            status = 'submitted',
+            submitted_at = $8,
+            updated_at = $9
+      WHERE id = $10`,
+    [
+      p.deliverable_hash,
+      p.deliverable_content,
+      p.deliverable_summary,
+      p.deliverable_evidence,
+      p.deliverable_instructions,
+      p.deliverable_artifacts,
+      p.verification_report,
+      p.submitted_at,
+      p.updated_at,
+      p.id,
+    ]
   ),
   clientReviewBounty: async (p) => run(
     `UPDATE bounties SET client_decision = $1, client_decision_at = $2, escrow_status = $3, updated_at = $4 WHERE id = $5`,
@@ -980,7 +1013,22 @@ export const stmts = {
     [p.refund_tx_hash, p.updated_at, p.id]
   ),
   incrementBountyRevision: async (p) => run(
-    `UPDATE bounties SET revision_count = revision_count + 1, escrow_status = 'claimed', deliverable_hash = NULL, deliverable_content = NULL, client_decision = NULL, client_decision_at = NULL, updated_at = $1 WHERE id = $2`,
+    `UPDATE bounties
+        SET revision_count = revision_count + 1,
+            escrow_status = 'claimed',
+            deliverable_hash = NULL,
+            deliverable_content = NULL,
+            deliverable_summary = '',
+            deliverable_evidence = '[]',
+            deliverable_instructions = '',
+            deliverable_artifacts = '[]',
+            verification_report = '{}',
+            verification_requested_at = NULL,
+            verification_request_note = '',
+            client_decision = NULL,
+            client_decision_at = NULL,
+            updated_at = $1
+      WHERE id = $2`,
     [p.updated_at, p.id]
   ),
   getFundedBounties: async (limit) => many(
