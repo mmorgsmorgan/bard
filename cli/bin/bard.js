@@ -26,6 +26,48 @@ const CONFIG_DIR = path.join(os.homedir(), '.bard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const DEFAULT_API = process.env.BARD_DEFAULT_API || 'https://bard-production-e88b.up.railway.app';
 const DEFAULT_MCP = 'https://mcp-production-8d2e.up.railway.app';
+const HTTP_TIMEOUT_MS = positiveInteger(process.env.BARD_HTTP_TIMEOUT_MS, 45_000);
+const HTTP_RETRY_DELAY_MS = positiveInteger(process.env.BARD_HTTP_RETRY_DELAY_MS, 750);
+
+function positiveInteger(value, fallback) {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function networkErrorMessage(url, elapsedMs, err) {
+  const reason = err?.name === 'TimeoutError' || err?.name === 'AbortError'
+    ? `timed out after ${HTTP_TIMEOUT_MS}ms`
+    : err?.cause?.code || err?.message || 'network request failed';
+  return `Request to ${url} failed after ${(elapsedMs / 1000).toFixed(1)}s: ${reason}`;
+}
+
+async function resilientFetch(url, opts = {}, { retries = 0 } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const startedAt = Date.now();
+    try {
+      const res = await fetch(url, {
+        ...opts,
+        signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      });
+      if (attempt < retries && [408, 429, 500, 502, 503, 504].includes(res.status)) {
+        await res.body?.cancel().catch(() => {});
+        await sleep(HTTP_RETRY_DELAY_MS * (attempt + 1));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = new Error(networkErrorMessage(url, Date.now() - startedAt, err), { cause: err });
+      if (attempt >= retries) throw lastError;
+      await sleep(HTTP_RETRY_DELAY_MS * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
 
 // ── Config helpers ──
 
@@ -59,7 +101,10 @@ async function apiFetch(path, opts = {}, baseUrl = getApiUrl()) {
   const token = getToken();
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(url, { ...opts, headers });
+  const method = (opts.method || 'GET').toUpperCase();
+  const res = await resilientFetch(url, { ...opts, headers }, {
+    retries: method === 'GET' ? 1 : 0,
+  });
   return res;
 }
 
@@ -83,9 +128,7 @@ function responseError(res, data, fallback) {
 
 async function probeBackend(url) {
   try {
-    const res = await fetch(`${url.replace(/\/$/, '')}/api/health`, {
-      signal: AbortSignal.timeout(10_000),
-    });
+    const res = await resilientFetch(`${url.replace(/\/$/, '')}/api/health`, {}, { retries: 1 });
     const data = await responseData(res);
     return {
       ok: res.ok && data?.status === 'ok',
@@ -239,7 +282,8 @@ async function mcpCall(tool, args = {}, tokenOverride = null) {
   const token = tokenOverride || getToken();
   if (!token) throw new Error('Not authenticated. Run: bard auth');
   const endpoint = `${getMcpUrl().replace(/\/mcp\/?$/, '').replace(/\/$/, '')}/mcp`;
-  const res = await fetch(endpoint, {
+  const readOnly = /^(bard_get_|bard_list_)/.test(tool);
+  const res = await resilientFetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -251,7 +295,7 @@ async function mcpCall(tool, args = {}, tokenOverride = null) {
       method: 'tools/call',
       params: { name: tool, arguments: args },
     }),
-  });
+  }, { retries: readOnly ? 1 : 0 });
   const rpc = await res.json().catch(() => null);
   if (!res.ok) throw new Error(rpc?.error?.message || `MCP request failed (${res.status})`);
   if (rpc?.error) throw new Error(rpc.error.message);
@@ -402,10 +446,11 @@ async function cmdBounties() {
   }
   let bounties = [];
   try {
-    for (const status of statusParam.split(',').map((value) => value.trim()).filter(Boolean)) {
-      const data = await mcpCall('bard_list_bounties', { status });
-      bounties.push(...(data.bounties || []));
-    }
+    const statuses = statusParam.split(',').map((value) => value.trim()).filter(Boolean);
+    const results = await Promise.all(
+      statuses.map((status) => mcpCall('bard_list_bounties', { status }))
+    );
+    bounties = results.flatMap((data) => data.bounties || []);
   } catch (err) {
     console.error('✗', err.message);
     process.exit(1);
@@ -422,6 +467,33 @@ async function cmdBounties() {
     console.log(`         ID: ${b.id}`);
   }
   console.log();
+}
+
+async function cmdClaimBounty(bountyId) {
+  if (!bountyId) {
+    console.error('✗ Usage: bard claim <BOUNTY_ID>');
+    process.exit(1);
+  }
+
+  let data;
+  try {
+    data = await mcpCall('bard_claim_bounty', { bountyId });
+  } catch (err) {
+    console.error(`✗ Could not claim ${bountyId}: ${err.message}`);
+    process.exit(1);
+  }
+
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+
+  const bounty = data.bounty || {};
+  console.log(`\n  ✓ ${data.message || 'Bounty claimed!'}`);
+  console.log(`  Bounty: ${bounty.title || bountyId}`);
+  console.log(`  ID:     ${bounty.id || bountyId}`);
+  if (bounty.status) console.log(`  Status: ${bounty.status}`);
+  console.log(`\n  Next: complete the work, then submit it with the bard_submit_deliverable MCP tool.\n`);
 }
 
 async function cmdContributions() {
@@ -703,7 +775,7 @@ async function cmdUse(target) {
   // Health probe so we don't silently point at a dead backend.
   let healthOk = false;
   try {
-    const res = await fetch(`${url}/api/health`);
+    const res = await resilientFetch(`${url}/api/health`, {}, { retries: 1 });
     if (res.ok) { const j = await res.json(); healthOk = j.status === 'ok'; }
   } catch { /* fall through */ }
   if (!healthOk) {
@@ -726,7 +798,7 @@ async function cmdUse(target) {
   const agentId = config.agentId;
   if (token && agentId) {
     try {
-      const res = await fetch(`${url}/api/agents/${agentId}`);
+      const res = await resilientFetch(`${url}/api/agents/${agentId}`, {}, { retries: 1 });
       if (res.ok) {
         console.log(`  Agent row for ${agentId}: ✓ found on the new backend.\n`);
       } else if (res.status === 404) {
@@ -795,6 +867,10 @@ function printHelp() {
     npx @chiefmmorgs/bard-cli auth --name "MyAgent" --type research
     npx @chiefmmorgs/bard-cli mcp-config > ~/.config/claude/claude_desktop_config.json
 
+  Bounties:
+    bard bounties             List open first-come and proposal bounties
+    bard claim <BOUNTY_ID>    Claim an open first-come bounty
+
   Quick Start (Manual key):
     bard challenge
     bard sign 0xYourPrivateKey
@@ -813,6 +889,7 @@ switch (cmd) {
   case 'wallet': await cmdWallet(); break;
   case 'reputation': case 'rep': await cmdReputation(); break;
   case 'bounties': await cmdBounties(); break;
+  case 'claim': case 'claim-bounty': await cmdClaimBounty(arg); break;
   case 'contributions': case 'contribs': await cmdContributions(); break;
   case 'revoke': case 'logout': await cmdRevoke(); break;
   case 'link-token': case 'generate-link-token': await cmdGenerateLinkToken(); break;

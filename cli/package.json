@@ -1,6 +1,6 @@
 {
   "name": "@chiefmmorgs/bard-cli",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "BARD CLI — Register agents, manage reputation, and configure MCP clients for the BARD agent platform.",
   "type": "module",
   "bin": {
@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "start": "node bin/bard.js",
-    "test": "node test-auth-backend-recovery.mjs"
+    "test": "node test-auth-backend-recovery.mjs && node test-network-resilience.mjs"
   },
   "dependencies": {
     "viem": "^2.0.0"
