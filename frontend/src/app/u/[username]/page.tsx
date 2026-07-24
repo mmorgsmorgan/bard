@@ -41,6 +41,7 @@ export default function PublicProfilePage() {
   const [vouchStep, setVouchStep] = useState<'form' | 'vouching' | 'done' | 'error'>('form');
   const [vouchError, setVouchError] = useState('');
   const [vouchExplorer, setVouchExplorer] = useState('');
+  const [vouchStatus, setVouchStatus] = useState('');
   const [pendingApproveTxHash, setPendingApproveTxHash] = useState('');
   const [pendingVouchTxHash, setPendingVouchTxHash] = useState('');
 
@@ -106,7 +107,11 @@ export default function PublicProfilePage() {
   }, [onChainProfile, localProfile]);
 
   const handleVouch = async () => {
-    if (!isConnected || !profileWallet) return;
+    if (!isConnected) {
+      setVouchStep('error');
+      setVouchError('Your BARD session is no longer connected. Sign in again and retry.');
+      return;
+    }
     const amountNumber = Number(vouchAmount);
     const scoreNumber = Number(vouchScore);
     if (!Number.isFinite(amountNumber) || amountNumber < VOUCH_TIERS[vouchTier].minUSDC) {
@@ -121,9 +126,10 @@ export default function PublicProfilePage() {
     }
     setVouchStep('vouching');
     setVouchError('');
+    setVouchStatus('Checking your balance and preparing the vouch...');
     try {
       const vouchInput = {
-        contributorWallet: profileWallet,
+        contributorUsername: username,
         amount: vouchAmount,
         tier: vouchTier,
         statement: vouchStatement,
@@ -154,8 +160,10 @@ export default function PublicProfilePage() {
         data.stage === 'approve' &&
         data.transaction
       ) {
+        setVouchStatus('Approve the USDC stake in your wallet...');
         approveTxHash = await sendTransaction(data.transaction);
         setPendingApproveTxHash(approveTxHash);
+        setVouchStatus('Approval confirmed. Preparing the vouch transaction...');
         response = await authFetch('/api/human/vouches', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -170,8 +178,10 @@ export default function PublicProfilePage() {
         data.transaction
       ) {
         approveTxHash = data.approveTxHash || approveTxHash;
+        setVouchStatus('Confirm the vouch transaction in your wallet...');
         const vouchTxHash = await sendTransaction(data.transaction);
         setPendingVouchTxHash(vouchTxHash);
+        setVouchStatus('Vouch submitted. Waiting for Arc confirmation...');
         response = await authFetch('/api/human/vouches', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -183,17 +193,22 @@ export default function PublicProfilePage() {
       setVouchExplorer(data.explorer || '');
       setPendingApproveTxHash('');
       setPendingVouchTxHash('');
+      setVouchStatus('');
       setVouchStep('done');
       await Promise.all([refetchVouchCount(), refetchTotalStaked()]);
     } catch (cause) {
       setVouchStep('error');
+      setVouchStatus('');
       setVouchError(cause instanceof Error ? cause.message.slice(0, 180) : 'Vouch failed');
     }
   };
 
-  const profileWallet = onChainProfile && !profileReadError
-    ? (Array.isArray(onChainProfile) ? (onChainProfile[0] as string) : null)
-    : localProfile?.wallet;
+  const onChainWallet = onChainProfile && !profileReadError && Array.isArray(onChainProfile)
+    ? (onChainProfile[0] as string)
+    : null;
+  const profileWallet = onChainWallet && onChainWallet !== '0x0000000000000000000000000000000000000000'
+    ? onChainWallet
+    : localProfile?.wallet || null;
   const profileName = localProfile?.displayName || (onChainProfile && Array.isArray(onChainProfile) ? (onChainProfile[1] as string) : username);
   const profileType = localProfile?.profileType || (onChainProfile && Array.isArray(onChainProfile) && Number(onChainProfile[3]) === 1 ? 'agent' : 'human');
   const profileBio = localProfile?.bio || '';
@@ -335,7 +350,16 @@ export default function PublicProfilePage() {
       {/* Vouch CTA */}
       {isConnected && viewerAddress?.toLowerCase() !== profileWallet?.toLowerCase() && (
         <div className="flex gap-px mb-px">
-          <button onClick={() => setShowVouchModal(true)} className="btn-primary flex-1 py-3.5 text-xs">
+          <button
+            type="button"
+            onClick={() => {
+              setVouchError('');
+              setVouchStatus('');
+              setVouchStep('form');
+              setShowVouchModal(true);
+            }}
+            className="btn-primary flex-1 py-3.5 text-xs"
+          >
             Vouch for {profileName}
           </button>
           <Link href={`/send?to=${username}`} className="btn-secondary flex-1 py-3.5 text-xs text-center">
@@ -568,7 +592,14 @@ export default function PublicProfilePage() {
       {/* ─── Vouch Modal ─── */}
       {showVouchModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/70" onClick={() => { setShowVouchModal(false); setVouchStep('form'); }} />
+          <div
+            className="absolute inset-0 bg-black/70"
+            onClick={() => {
+              if (vouchStep === 'vouching') return;
+              setShowVouchModal(false);
+              setVouchStep('form');
+            }}
+          />
           <div className="bg-[#0c0c0c] border border-[rgba(255,255,255,0.06)] p-8 w-full max-w-lg relative z-10 animate-slide-up">
             {vouchStep === 'done' ? (
               <div className="text-center">
@@ -631,6 +662,11 @@ export default function PublicProfilePage() {
                   </div>
                 </div>
 
+                {vouchStatus && (
+                  <div className="mt-4 p-3 border border-[rgba(255,133,18,0.25)] bg-[rgba(255,133,18,0.05)] text-[#ff8512] text-xs font-mono">
+                    {vouchStatus}
+                  </div>
+                )}
                 {vouchError && <div className="mt-4 p-3 bg-red-900/20 border border-red-900/30 text-red-400 text-sm font-mono">{vouchError}</div>}
                 {hasPendingVouch && (
                   <div className="mt-4 p-3 border border-[rgba(255,133,18,0.25)] bg-[rgba(255,133,18,0.05)] text-surface-400 text-xs font-mono">
@@ -639,8 +675,20 @@ export default function PublicProfilePage() {
                 )}
 
                 <div className="flex gap-3 mt-8">
-                  <button onClick={() => { setShowVouchModal(false); setVouchStep('form'); }} className="btn-secondary flex-1 text-xs">Cancel</button>
-                  <button onClick={handleVouch} disabled={!vouchStatement || !vouchEcosystem || vouchStep === 'vouching'} className="btn-primary flex-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => { setShowVouchModal(false); setVouchStep('form'); }}
+                    disabled={vouchStep === 'vouching'}
+                    className="btn-secondary flex-1 text-xs disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleVouch}
+                    disabled={!vouchStatement.trim() || !vouchEcosystem.trim() || vouchStep === 'vouching'}
+                    className="btn-primary flex-1 text-xs disabled:opacity-40"
+                  >
                     {vouchStep === 'vouching'
                       ? 'Confirming...'
                       : hasPendingVouch
