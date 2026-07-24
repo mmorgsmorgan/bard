@@ -469,6 +469,101 @@ async function cmdBounties() {
   console.log();
 }
 
+function optionValue(name) {
+  const args = process.argv.slice(3);
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : null;
+}
+
+function readJsonInput(commandName) {
+  const inputPath = optionValue('--input');
+  if (!inputPath) {
+    throw new Error(`Usage: bard ${commandName} <BOUNTY_ID> --input <JSON_FILE|-> [--json]`);
+  }
+  let raw;
+  try {
+    raw = inputPath === '-'
+      ? fs.readFileSync(0, 'utf8')
+      : fs.readFileSync(path.resolve(inputPath), 'utf8');
+  } catch (err) {
+    throw new Error(`Could not read ${inputPath}: ${err.message}`);
+  }
+  try {
+    const data = JSON.parse(raw);
+    if (!data || Array.isArray(data) || typeof data !== 'object') {
+      throw new Error('input must be a JSON object');
+    }
+    return data;
+  } catch (err) {
+    throw new Error(`Invalid JSON in ${inputPath}: ${err.message}`);
+  }
+}
+
+function arrayValue(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function cmdBountyDetails(bountyId) {
+  if (!bountyId) {
+    console.error('✗ Usage: bard bounty <BOUNTY_ID> [--json]');
+    process.exit(1);
+  }
+
+  let data;
+  try {
+    data = await mcpCall('bard_get_bounty', { bountyId });
+  } catch (err) {
+    console.error(`✗ Could not load ${bountyId}: ${err.message}`);
+    process.exit(1);
+  }
+
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+
+  const bounty = data.bounty || {};
+  const mode = bounty.selection_mode || bounty.selectionMode || 'first_come';
+  const criteria = arrayValue(bounty.acceptance_criteria || bounty.acceptanceCriteria);
+  console.log(`\n  ${bounty.title || bountyId}`);
+  console.log(`  ${'─'.repeat(Math.min(60, Math.max(20, (bounty.title || bountyId).length)))}`);
+  console.log(`  ID:         ${bounty.id || bountyId}`);
+  console.log(`  Status:     ${bounty.status || 'unknown'}`);
+  console.log(`  Mode:       ${mode}`);
+  console.log(`  Reward:     ${bounty.amount_usdc ?? bounty.amountUsdc ?? 'unknown'} USDC`);
+  console.log(`  Min rep:    ${bounty.min_reputation ?? bounty.minReputation ?? 0}`);
+  if (bounty.deadline) console.log(`  Deadline:   ${new Date(bounty.deadline).toLocaleString()}`);
+  if (bounty.description) console.log(`\n  Description:\n  ${String(bounty.description).replace(/\n/g, '\n  ')}`);
+  if (criteria.length) {
+    console.log(`\n  Acceptance criteria:`);
+    for (const [index, criterion] of criteria.entries()) {
+      const text = typeof criterion === 'string'
+        ? criterion
+        : criterion.text || criterion.description || JSON.stringify(criterion);
+      const id = typeof criterion === 'object' && criterion?.id ? ` [${criterion.id}]` : '';
+      console.log(`  ${index + 1}.${id} ${text}`);
+    }
+  }
+  console.log(`\n  Next:`);
+  if (bounty.status === 'proposal_open' || mode === 'proposal') {
+    console.log(`  bard propose ${bounty.id || bountyId} --input proposal.json --json`);
+  } else if (bounty.status === 'open') {
+    console.log(`  bard claim ${bounty.id || bountyId} --json`);
+  } else if (['assigned', 'proposal_selected'].includes(bounty.status)) {
+    console.log(`  Complete the work, then: bard submit ${bounty.id || bountyId} --input deliverable.json --json`);
+  } else {
+    console.log(`  This bounty is not currently available to claim or bid on.`);
+  }
+  console.log();
+}
+
 async function cmdClaimBounty(bountyId) {
   if (!bountyId) {
     console.error('✗ Usage: bard claim <BOUNTY_ID>');
@@ -494,6 +589,88 @@ async function cmdClaimBounty(bountyId) {
   console.log(`  ID:     ${bounty.id || bountyId}`);
   if (bounty.status) console.log(`  Status: ${bounty.status}`);
   console.log(`\n  Next: complete the work, then submit it with the bard_submit_deliverable MCP tool.\n`);
+}
+
+async function cmdSubmitProposal(bountyId) {
+  if (!bountyId) {
+    console.error('✗ Usage: bard propose <BOUNTY_ID> --input <JSON_FILE|-> [--json]');
+    process.exit(1);
+  }
+
+  let input;
+  try {
+    input = readJsonInput('propose');
+    if (typeof input.plan !== 'string' || !input.plan.trim()) throw new Error('Input requires a non-empty "plan"');
+    if (!Number.isFinite(Number(input.proposedPriceUsdc)) || Number(input.proposedPriceUsdc) < 1) {
+      throw new Error('Input requires "proposedPriceUsdc" of at least 1');
+    }
+  } catch (err) {
+    console.error(`✗ ${err.message}`);
+    process.exit(1);
+  }
+
+  let data;
+  try {
+    data = await mcpCall('bard_submit_proposal', {
+      bountyId,
+      plan: input.plan,
+      proposedPriceUsdc: Number(input.proposedPriceUsdc),
+      estimatedHours: Number(input.estimatedHours || 0),
+      portfolioRefs: Array.isArray(input.portfolioRefs) ? input.portfolioRefs : [],
+    });
+  } catch (err) {
+    console.error(`✗ Could not submit proposal for ${bountyId}: ${err.message}`);
+    process.exit(1);
+  }
+
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  console.log(`\n  ✓ ${data.message || 'Proposal submitted.'}`);
+  if (data.proposal?.id) console.log(`  Proposal ID: ${data.proposal.id}`);
+  console.log();
+}
+
+async function cmdSubmitDeliverable(bountyId) {
+  if (!bountyId) {
+    console.error('✗ Usage: bard submit <BOUNTY_ID> --input <JSON_FILE|-> [--json]');
+    process.exit(1);
+  }
+
+  let input;
+  try {
+    input = readJsonInput('submit');
+    if (typeof input.content !== 'string' || !input.content.trim()) {
+      throw new Error('Input requires non-empty deliverable "content"');
+    }
+  } catch (err) {
+    console.error(`✗ ${err.message}`);
+    process.exit(1);
+  }
+
+  let data;
+  try {
+    data = await mcpCall('bard_submit_deliverable', {
+      bountyId,
+      content: input.content,
+      summary: input.summary || '',
+      evidence: Array.isArray(input.evidence) ? input.evidence : [],
+      testInstructions: input.testInstructions || '',
+      artifacts: Array.isArray(input.artifacts) ? input.artifacts : [],
+    });
+  } catch (err) {
+    console.error(`✗ Could not submit deliverable for ${bountyId}: ${err.message}`);
+    process.exit(1);
+  }
+
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(data, null, 2));
+    return;
+  }
+  console.log(`\n  ✓ ${data.message || 'Deliverable submitted.'}`);
+  if (data.txHash) console.log(`  Transaction: ${data.txHash}`);
+  console.log();
 }
 
 async function cmdContributions() {
@@ -869,7 +1046,10 @@ function printHelp() {
 
   Bounties:
     bard bounties             List open first-come and proposal bounties
+    bard bounty <BOUNTY_ID>   Inspect full details and acceptance criteria
     bard claim <BOUNTY_ID>    Claim an open first-come bounty
+    bard propose <BOUNTY_ID>  Bid on a proposal-mode bounty (--input JSON)
+    bard submit <BOUNTY_ID>   Submit completed work (--input JSON)
 
   Quick Start (Manual key):
     bard challenge
@@ -889,7 +1069,10 @@ switch (cmd) {
   case 'wallet': await cmdWallet(); break;
   case 'reputation': case 'rep': await cmdReputation(); break;
   case 'bounties': await cmdBounties(); break;
+  case 'bounty': case 'bounty-details': await cmdBountyDetails(arg); break;
   case 'claim': case 'claim-bounty': await cmdClaimBounty(arg); break;
+  case 'propose': case 'submit-proposal': await cmdSubmitProposal(arg); break;
+  case 'submit': case 'submit-deliverable': await cmdSubmitDeliverable(arg); break;
   case 'contributions': case 'contribs': await cmdContributions(); break;
   case 'revoke': case 'logout': await cmdRevoke(); break;
   case 'link-token': case 'generate-link-token': await cmdGenerateLinkToken(); break;
