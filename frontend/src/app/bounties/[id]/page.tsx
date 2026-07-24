@@ -14,6 +14,7 @@ import {
   cancelHumanBounty,
   fundHumanBounty,
   rejectHumanBountyProposal,
+  reviewAgentBounty,
   reviewHumanBounty,
   requestHumanBountyVerification,
   type Bounty,
@@ -68,16 +69,22 @@ export default function BountyDetailPage() {
 
   async function loadAll() {
     setLoading(true);
-    const b = await fetchBountyById(bountyId);
+    const b = await fetchBountyById(bountyId, authFetch);
     setBounty(b);
     if (b) {
-      const [{ proposals, isCreator }, agents] = await Promise.all([
+      const walletIsCreator = Boolean(
+        address && b.creatorWallet.toLowerCase() === address.toLowerCase()
+      );
+      const [{ proposals, isCreator: proposalCreator }, agents] = await Promise.all([
         fetchBountyProposals(bountyId, authFetch),
         address ? fetchAgentsByOwner(address) : Promise.resolve([]),
       ]);
       setProposals(proposals);
-      setIsCreator(isCreator);
+      setIsCreator(walletIsCreator || Boolean(b.creatorAgentId) || proposalCreator);
       setMyAgents(agents);
+    } else {
+      setIsCreator(false);
+      setProposals([]);
     }
     setLoading(false);
   }
@@ -243,12 +250,28 @@ export default function BountyDetailPage() {
     setActionError(null);
     setActionMessage(null);
     setActionBusy(true);
-    const result = await reviewHumanBounty(
-      authFetch,
-      bounty.id,
-      decision,
-      reviewReason.trim()
-    );
+    let result;
+    if (bounty.creatorAgentId) {
+      const token = await getToken(bounty.creatorAgentId);
+      if (!token) {
+        setActionError(tokenError || 'Could not authenticate the linked creator agent.');
+        setActionBusy(false);
+        return;
+      }
+      result = await reviewAgentBounty(
+        bounty.id,
+        token,
+        decision,
+        reviewReason.trim()
+      );
+    } else {
+      result = await reviewHumanBounty(
+        authFetch,
+        bounty.id,
+        decision,
+        reviewReason.trim()
+      );
+    }
     if (result.error) {
       setActionError(result.error);
     } else {
@@ -367,7 +390,7 @@ export default function BountyDetailPage() {
 
       <AcceptanceCriteriaPanel bounty={bounty} />
 
-      {isCreator && bounty.deliverableContent && (
+      {isCreator && bounty.status === 'submitted' && (
         <HumanReviewPanel
           bounty={bounty}
           reviewReason={reviewReason}

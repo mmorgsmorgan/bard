@@ -4474,6 +4474,44 @@ app.get('/api/bounties', async (req, res) => {
 app.get('/api/bounties/:id', async (req, res) => {
   const bounty = await stmts.getBountyById(req.params.id);
   if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+  const {
+    deliverable_content,
+    deliverable_summary,
+    deliverable_evidence,
+    deliverable_instructions,
+    deliverable_artifacts,
+    verification_report,
+    ...publicBounty
+  } = bounty;
+  res.json({ bounty: publicBounty });
+});
+
+async function getHumanManagedBounty(humanWallet, bountyId) {
+  return (await pool.query(
+    `SELECT b.*,
+            creator_agent.id AS creator_agent_id,
+            creator_agent.agent_name AS creator_agent_name,
+            provider_agent.agent_name AS provider_agent_name
+       FROM bounties b
+       LEFT JOIN agents creator_agent
+         ON LOWER(creator_agent.turnkey_address) = LOWER(b.creator_wallet)
+        AND LOWER(creator_agent.owner_wallet) = LOWER($1)
+       LEFT JOIN agents provider_agent
+         ON provider_agent.id = COALESCE(b.provider_agent_id, b.assigned_agent_id)
+      WHERE b.id = $2
+        AND (
+          LOWER(b.creator_wallet) = LOWER($1)
+          OR creator_agent.id IS NOT NULL
+        )`,
+    [humanWallet, bountyId]
+  )).rows[0] || null;
+}
+
+// Authenticated creators receive the complete submission package for review,
+// including bounties created by agents linked to their account.
+app.get('/api/human/bounties/:id', requireHuman, async (req, res) => {
+  const bounty = await getHumanManagedBounty(req.human.wallet_address, req.params.id);
+  if (!bounty) return res.status(404).json({ error: 'Managed bounty not found' });
   res.json({ bounty });
 });
 
@@ -5516,6 +5554,27 @@ async function refundUnclaimedCustodialBounty({
 // Managed humans create and operate bounties through their BARD wallet. First-come
 // bounties transfer funds before becoming visible; proposal bounties fund only after
 // the creator selects a proposal and therefore knows the final price.
+app.get('/api/human/bounties', requireHuman, async (req, res) => {
+  const wallet = req.human.wallet_address;
+  const { rows } = await pool.query(
+    `SELECT b.*,
+            creator_agent.id AS creator_agent_id,
+            creator_agent.agent_name AS creator_agent_name,
+            provider_agent.agent_name AS provider_agent_name
+       FROM bounties b
+       LEFT JOIN agents creator_agent
+         ON LOWER(creator_agent.turnkey_address) = LOWER(b.creator_wallet)
+        AND LOWER(creator_agent.owner_wallet) = LOWER($1)
+       LEFT JOIN agents provider_agent
+         ON provider_agent.id = COALESCE(b.provider_agent_id, b.assigned_agent_id)
+      WHERE LOWER(b.creator_wallet) = LOWER($1)
+         OR creator_agent.id IS NOT NULL
+      ORDER BY b.created_at DESC`,
+    [wallet]
+  );
+  res.json({ bounties: rows });
+});
+
 app.post('/api/human/bounties', requireHuman, async (req, res) => {
   let bounty = null;
   let externalRecoveryTxHash = '';
@@ -7273,11 +7332,8 @@ app.post('/api/human/bounties/:id/request-verification', requireHuman, async (re
     return res.status(429).json({ error: 'Rate limit exceeded' });
   }
 
-  const bounty = await stmts.getBountyById(req.params.id);
-  if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-  if (bounty.creator_wallet.toLowerCase() !== clientWallet.toLowerCase()) {
-    return res.status(403).json({ error: 'Only bounty creator can request verification' });
-  }
+  const bounty = await getHumanManagedBounty(clientWallet, req.params.id);
+  if (!bounty) return res.status(403).json({ error: 'Only bounty creator can request verification' });
   if (bounty.escrow_status !== 'submitted') {
     return res.status(409).json({ error: 'Independent review is only available for submitted work' });
   }

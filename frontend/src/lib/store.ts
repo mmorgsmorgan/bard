@@ -160,7 +160,10 @@ export interface Bounty {
   amountUsdc: string;
   deadline: string;
   minReputation: number;
+  creatorAgentId?: string;
+  creatorAgentName?: string;
   assignedAgentId?: string;
+  providerAgentName?: string;
   contributionId?: string;
   status: 'open' | 'assigned' | 'submitted' | 'verified' | 'completed' | 'expired' | 'cancelled' | 'proposal_open' | 'proposal_selected';
   selectionMode: 'first_come' | 'proposal';
@@ -753,7 +756,10 @@ function bountyFromRow(row: Record<string, unknown>): Bounty {
     amountUsdc: (row.amount_usdc || row.amountUsdc) as string,
     deadline: row.deadline as string,
     minReputation: (row.min_reputation || row.minReputation || 0) as number,
+    creatorAgentId: (row.creator_agent_id || row.creatorAgentId) as string | undefined,
+    creatorAgentName: (row.creator_agent_name || row.creatorAgentName) as string | undefined,
     assignedAgentId: (row.assigned_agent_id || row.assignedAgentId) as string | undefined,
+    providerAgentName: (row.provider_agent_name || row.providerAgentName) as string | undefined,
     contributionId: (row.contribution_id || row.contributionId) as string | undefined,
     status: row.status as Bounty['status'],
     selectionMode: ((row.selection_mode || row.selectionMode) as Bounty['selectionMode']) || 'first_come',
@@ -835,8 +841,26 @@ export async function fetchBounties(status?: string): Promise<Bounty[]> {
   } catch { return []; }
 }
 
-export async function fetchBountyById(id: string): Promise<Bounty | null> {
+export async function fetchMyBounties(authFetch: AuthFetch): Promise<Bounty[]> {
+  const res = await authFetch('/api/human/bounties');
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Could not load your bounties');
+  return (json.bounties || []).map(bountyFromRow);
+}
+
+export async function fetchBountyById(id: string, authFetch?: AuthFetch): Promise<Bounty | null> {
   try {
+    if (authFetch) {
+      try {
+        const creatorRes = await authFetch(`/api/human/bounties/${id}`);
+        if (creatorRes.ok) {
+          const creatorJson = await creatorRes.json();
+          return creatorJson.bounty ? bountyFromRow(creatorJson.bounty) : null;
+        }
+      } catch {
+        // Non-creators and expired sessions can still load public bounty metadata.
+      }
+    }
     const res = await fetch(`${API}/api/bounties/${id}`);
     const json = await res.json();
     return json.bounty ? bountyFromRow(json.bounty) : null;
@@ -963,6 +987,38 @@ export async function reviewHumanBounty(
     const res = await authFetch(`/api/human/bounties/${bountyId}/review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, reason }),
+    });
+    const json = await res.json();
+    if (!res.ok && res.status !== 202) {
+      return { bounty: null, error: json.error || 'Bounty review failed' };
+    }
+    return {
+      bounty: json.bounty ? bountyFromRow(json.bounty) : null,
+      pending: Boolean(json.pending),
+      txHash: json.txHash || undefined,
+    };
+  } catch (error) {
+    return {
+      bounty: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function reviewAgentBounty(
+  bountyId: string,
+  token: string,
+  decision: 'approved' | 'rejected',
+  reason: string
+): Promise<{ bounty: Bounty | null; pending?: boolean; txHash?: string; error?: string }> {
+  try {
+    const res = await fetch(`${API}/api/bounties/${bountyId}/agent-review`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({ decision, reason }),
     });
     const json = await res.json();

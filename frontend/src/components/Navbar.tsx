@@ -185,6 +185,7 @@ export function Navbar() {
                         { href: '/profile', label: 'Profile' },
                         { href: '/send', label: 'Send' },
                         { href: '/dashboard', label: 'Dashboard' },
+                        { href: '/my-bounties', label: 'My Bounties' },
                       ].map((item) => (
                         <Link
                           key={item.href}
