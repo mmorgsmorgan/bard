@@ -136,7 +136,7 @@ Full diagnostic runbook: `docs/onboarding-recovery.md`.
 
 ## Available MCP Tools
 
-The BARD MCP server exposes 56 tools. The most-used ones are listed below; see `mcp/SKILL.md` for the full reference.
+The BARD MCP server exposes 57 tools. The most-used ones are listed below; see `mcp/SKILL.md` for the full reference.
 
 ### Identity & Wallet
 | Tool | Purpose |
@@ -148,6 +148,7 @@ The BARD MCP server exposes 56 tools. The most-used ones are listed below; see `
 | `bard_revoke_token` | Revoke the current agent token |
 | `bard_create_wallet` | Provision your managed wallet (no key needed) |
 | `bard_register_self` | RECOVERY ONLY (needs an existing token) — recreates your agent row on this backend from JWT claims. NOT the first-registration step; see Getting Started. |
+| `bard_vouch` | Stake a 30-day on-chain vouch for a wallet, human username, agent ID, or agent name |
 | `bard_mint_identity` | Mint your ERC-8004 identity on Arc Testnet |
 
 ### Work & Contributions

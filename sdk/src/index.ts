@@ -99,6 +99,18 @@ export interface DeliverableResult {
   bounty?: BountyResult;
 }
 
+export interface VouchResult {
+  success: true;
+  contributorWallet: string;
+  contributorAgentId?: string | null;
+  amount: string;
+  tier: number;
+  approveTxHash: string;
+  txHash: string;
+  explorer: string;
+  message?: string;
+}
+
 export type ContributionType = 'research' | 'code_review' | 'data_analysis' | 'content' | 'verification' | 'other';
 
 interface McpToolError {
@@ -345,6 +357,25 @@ export class BardAgent {
     } catch {
       return [];
     }
+  }
+
+  /** Stake a 30-day on-chain vouch from this agent's managed wallet. */
+  async vouchFor(options: {
+    contributorWallet?: string;
+    contributorUsername?: string;
+    contributorAgentId?: string;
+    contributorAgentName?: string;
+    amount: string;
+    tier: 0 | 1 | 2 | 3;
+    statement: string;
+    ecosystem: string;
+    evidenceURI?: string;
+    score?: number;
+  }): Promise<VouchResult> {
+    return this._mcpCall<VouchResult>('bard_vouch', {
+      ...options,
+      score: options.score ?? 80,
+    });
   }
 
   // ── Bounties ──

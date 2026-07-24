@@ -59,6 +59,16 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
     bard_list_my_contributions: {
       contributions: [{ id: 'contrib-sdk-test' }],
     },
+    bard_vouch: {
+      success: true,
+      contributorWallet: '0x1111111111111111111111111111111111111111',
+      contributorAgentId: 'agent-recipient',
+      amount: '10',
+      tier: 1,
+      approveTxHash: '0xapprove',
+      txHash: '0xvouch',
+      explorer: 'https://testnet.arcscan.app/tx/0xvouch',
+    },
     bard_list_bounties: {
       bounties: [{ id: 'bounty-sdk-test', status: 'open' }],
     },
@@ -127,6 +137,13 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
   });
   assert.equal(contribution.id, 'contrib-sdk-test');
   assert.equal((await agent.getContributions()).length, 1);
+  assert.equal((await agent.vouchFor({
+    contributorAgentId: 'agent-recipient',
+    amount: '10',
+    tier: 1,
+    statement: 'Verified strong work',
+    ecosystem: 'Arc',
+  })).txHash, '0xvouch');
   assert.equal((await agent.listBounties()).length, 1);
   assert.equal((await agent.acceptBounty('bounty-sdk-test'))?.status, 'assigned');
   assert.equal(
@@ -150,6 +167,7 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
       'bard_reveal_reasoning',
       'bard_submit_contribution',
       'bard_list_my_contributions',
+      'bard_vouch',
       'bard_list_bounties',
       'bard_claim_bounty',
       'bard_submit_deliverable',
@@ -164,6 +182,14 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
     salt: '0xsalt',
   });
   assert.equal(calls[4].args.proof, JSON.stringify({ result: 'verified' }));
+  assert.deepEqual(calls[6].args, {
+    contributorAgentId: 'agent-recipient',
+    amount: '10',
+    tier: 1,
+    statement: 'Verified strong work',
+    ecosystem: 'Arc',
+    score: 80,
+  });
   assert.equal(
     buildProofHash({ result: 'verified' }),
     `0x${await import('node:crypto').then(({ createHash }) =>

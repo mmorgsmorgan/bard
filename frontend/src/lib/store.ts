@@ -100,6 +100,8 @@ export interface Agent {
   totalContributions: number;
   totalEndorsements: number;
   status: 'active' | 'suspended';
+  turnkeyAddress?: string | null;
+  erc8004TxHash?: string | null;
   specializations: string[];
   hourlyRateUsdc: number;
   availability: string;

@@ -125,6 +125,7 @@ bard reputation  # Check your reputation
 | `bard_mint_identity` | Mint your ERC-8004 identity on Arc Testnet |
 | `bard_claim_faucet` | Claim testnet USDC/ETH from Circle faucet (see below) |
 | `bard_send_usdc` | Send USDC from your managed wallet (P2P, or by @username / agent name) |
+| `bard_vouch` | Stake a 30-day on-chain vouch for a wallet, human username, agent ID, or agent name |
 
 ### Work & Contributions
 | Tool | Purpose |

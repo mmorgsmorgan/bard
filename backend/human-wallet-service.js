@@ -62,6 +62,63 @@ function validAddress(address) {
   return /^0x[0-9a-fA-F]{40}$/.test(address || '');
 }
 
+export const VOUCH_TIER_MIN_USDC = Object.freeze([1, 10, 100, 500]);
+
+export function validateVouchInput({
+  contributorWallet,
+  amount,
+  tier = 0,
+  statement = '',
+  ecosystem = '',
+  score = 80,
+}, {
+  voucherAddress = '',
+} = {}) {
+  if (!validAddress(contributorWallet)) {
+    throw Object.assign(new Error('Valid contributor wallet required'), { status: 400 });
+  }
+  if (voucherAddress && !validAddress(voucherAddress)) {
+    throw Object.assign(new Error('Valid voucher wallet required'), { status: 400 });
+  }
+  if (voucherAddress && voucherAddress.toLowerCase() === contributorWallet.toLowerCase()) {
+    throw Object.assign(new Error('You cannot vouch for yourself'), { status: 400 });
+  }
+  const tierNumber = Number(tier);
+  if (!Number.isInteger(tierNumber) || tierNumber < 0 || tierNumber >= VOUCH_TIER_MIN_USDC.length) {
+    throw Object.assign(new Error('Vouch tier must be between 0 and 3'), { status: 400 });
+  }
+  const amountText = String(amount);
+  if (!/^\d+(?:\.\d{1,6})?$/.test(amountText)) {
+    throw Object.assign(new Error('Vouch amount must be a USDC value with at most 6 decimals'), { status: 400 });
+  }
+  const amountNumber = Number(amountText);
+  const minimum = VOUCH_TIER_MIN_USDC[tierNumber];
+  if (!Number.isFinite(amountNumber) || amountNumber < minimum) {
+    throw Object.assign(
+      new Error(`Tier ${tierNumber} requires at least ${minimum} USDC`),
+      { status: 400 }
+    );
+  }
+  if (!String(statement).trim()) {
+    throw Object.assign(new Error('Vouch statement required'), { status: 400 });
+  }
+  if (!String(ecosystem).trim()) {
+    throw Object.assign(new Error('Vouch ecosystem required'), { status: 400 });
+  }
+  const scoreNumber = Number(score);
+  if (!Number.isInteger(scoreNumber) || scoreNumber < 0 || scoreNumber > 100) {
+    throw Object.assign(new Error('Vouch score must be an integer between 0 and 100'), { status: 400 });
+  }
+  return {
+    contributorWallet,
+    amount: amountText,
+    tier: tierNumber,
+    statement: String(statement).trim(),
+    ecosystem: String(ecosystem).trim(),
+    score: scoreNumber,
+  };
+}
+
 export async function humanWalletBalance(address) {
   const [usdc, native] = await Promise.all([
     onchainEscrow.usdcBalance(address),
@@ -268,23 +325,16 @@ export function buildHumanVouchTransactions({
   ecosystem = '',
   evidenceURI = '',
   score = 80,
-}) {
-  if (!validAddress(contributorWallet)) {
-    throw Object.assign(new Error('Valid contributor wallet required'), { status: 400 });
-  }
-  const amountNumber = Number(amount);
-  if (!Number.isFinite(amountNumber) || amountNumber <= 0) {
-    throw Object.assign(new Error('Vouch amount must be greater than 0'), { status: 400 });
-  }
-  const tierNumber = Number(tier);
-  if (!Number.isInteger(tierNumber) || tierNumber < 0 || tierNumber > 3) {
-    throw Object.assign(new Error('Vouch tier must be between 0 and 3'), { status: 400 });
-  }
-  const scoreNumber = Number(score);
-  if (!Number.isInteger(scoreNumber) || scoreNumber < 0 || scoreNumber > 100) {
-    throw Object.assign(new Error('Vouch score must be an integer between 0 and 100'), { status: 400 });
-  }
-  const stakeAmount = parseUnits(String(amount), 6);
+}, options = {}) {
+  const validated = validateVouchInput({
+    contributorWallet,
+    amount,
+    tier,
+    statement,
+    ecosystem,
+    score,
+  }, options);
+  const stakeAmount = parseUnits(validated.amount, 6);
   return {
     approve: {
       to: USDC_ADDRESS,
@@ -295,20 +345,20 @@ export function buildHumanVouchTransactions({
       }),
     },
     vouch: buildVouchCalldata({
-      contributorId: BigInt(contributorWallet),
+      contributorId: BigInt(validated.contributorWallet),
       stakeAmount,
-      tier: tierNumber,
-      statement,
-      ecosystem,
+      tier: validated.tier,
+      statement: validated.statement,
+      ecosystem: validated.ecosystem,
       evidenceURI,
-      score: BigInt(scoreNumber),
+      score: BigInt(validated.score),
     }),
     stakeAmount,
   };
 }
 
 export async function prepareHumanVouchTransactions(address, input) {
-  const transactions = buildHumanVouchTransactions(input);
+  const transactions = buildHumanVouchTransactions(input, { voucherAddress: address });
   const balance = await onchainEscrow.usdcBalance(address);
   if (balance < transactions.stakeAmount) {
     throw Object.assign(new Error('Insufficient USDC balance'), { status: 409 });
@@ -330,5 +380,20 @@ export async function createHumanVouch(address, input) {
     'human-vouch'
   );
 
+  return { approveTxHash: approve.txHash, txHash: vouch.txHash };
+}
+
+export async function createAgentVouch(address, input, agentName = 'agent') {
+  const transactions = await prepareHumanVouchTransactions(address, input);
+  const approve = await onchainEscrow.sendAs(
+    address,
+    transactions.approve,
+    `agent-vouch-approve:${agentName}`
+  );
+  const vouch = await onchainEscrow.sendAs(
+    address,
+    transactions.vouch,
+    `agent-vouch:${agentName}`
+  );
   return { approveTxHash: approve.txHash, txHash: vouch.txHash };
 }

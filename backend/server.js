@@ -32,6 +32,7 @@ import {
   buildHumanProofTransaction,
   buildHumanUsdcTransfer,
   buildHumanVouchTransactions,
+  createAgentVouch,
   createHumanVouch,
   createOrUpdateHumanProfile,
   fundManagedEscrow,
@@ -45,6 +46,7 @@ import {
 } from './human-wallet-service.js';
 import * as onchainEscrow from './escrow-service.js';
 import { computeReputationScore } from './reputation-score.js';
+import { resolveVouchTarget } from './vouch-target.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -238,6 +240,7 @@ const RATE_LIMITS = {
   'auth_verify': { max: 10, window: 60 },     // 10 verify attempts per minute per IP
   'bounty_propose': { max: 5, window: 3600 },  // 5 proposals per hour per agent
   'bounty_message': { max: 60, window: 3600 }, // 60 messages per hour per wallet
+  'agent_vouch': { max: 10, window: 3600 },     // 10 staked vouches per hour per agent
   'dex_swap': { max: 10, window: 3600 },       // 10 swaps per hour per agent
   'dex_swap_daily_usdc': { max: 500, window: 86400 }, // 500 USDC equivalent per 24h per agent (counter incremented by USDC units, see checkRateLimitN)
 };
@@ -1643,11 +1646,14 @@ app.post('/api/human/proofs', requireHuman, async (req, res) => {
 
 app.post('/api/human/vouches', requireHuman, async (req, res) => {
   try {
-    const input = req.body || {};
+    const target = await resolveVouchTarget(stmts, req.body || {});
+    const input = { ...(req.body || {}), ...target };
     let result;
     let firstConfirmation = true;
     if (humanUsesExternalWallet(req)) {
-      const transactions = buildHumanVouchTransactions(input);
+      const transactions = buildHumanVouchTransactions(input, {
+        voucherAddress: req.human.wallet_address,
+      });
       const approveTxHash = String(input.approveTxHash || '');
       const vouchTxHash = String(input.vouchTxHash || '');
       if (!approveTxHash) {
@@ -1709,6 +1715,7 @@ app.post('/api/human/vouches', requireHuman, async (req, res) => {
     if (firstConfirmation) {
       await createNotification({
         wallet: input.contributorWallet,
+        agentId: input.contributorAgentId,
         type: 'vouch',
         title: 'New Vouch Received',
         message: `${input.amount} USDC vouch received`,
@@ -3007,6 +3014,64 @@ app.get('/api/agents/:id/wallet-balance', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Agent wallet balance error:', err);
     res.status(502).json({ error: 'Wallet balance unavailable', details: err.message });
+  }
+});
+
+// POST /api/agents/:id/vouches — stake an on-chain vouch from an agent wallet
+app.post('/api/agents/:id/vouches', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.agentId !== req.params.id) {
+      return res.status(403).json({ error: 'Can only vouch from your own agent wallet' });
+    }
+    const agent = await stmts.getAgentById(req.params.id);
+    if (!agent) return res.status(404).json({ error: 'Agent not found' });
+
+    const walletAddress = agent.turnkey_address;
+    if (!walletAddress) {
+      return res.status(400).json({
+        error: 'Agent has no managed wallet. Use bard_create_wallet first.',
+        hint: 'wallet_missing',
+      });
+    }
+    if (!walletSigningReady()) {
+      return res.status(400).json({ error: 'No wallet provider configured. Cannot sign transactions.' });
+    }
+    const target = await resolveVouchTarget(stmts, req.body || {});
+    const input = { ...(req.body || {}), ...target };
+    buildHumanVouchTransactions(input, { voucherAddress: walletAddress });
+    if (!(await checkRateLimit(agent.id, 'agent_vouch'))) {
+      return res.status(429).json({ error: 'Vouch rate limit exceeded. Try again later.' });
+    }
+    const result = await createAgentVouch(walletAddress, input, agent.agent_name);
+
+    await createNotification({
+      wallet: target.contributorWallet,
+      agentId: target.contributorAgentId,
+      type: 'vouch',
+      title: 'New Agent Vouch Received',
+      message: `${input.amount} USDC vouch received from agent ${agent.agent_name}`,
+      from: walletAddress,
+      amount: String(input.amount || ''),
+    });
+    emitFeedEvent('agent:vouch', {
+      agentId: agent.id,
+      agentName: agent.agent_name,
+      contributorWallet: target.contributorWallet,
+      contributorAgentId: target.contributorAgentId,
+      amount: String(input.amount),
+      tier: Number(input.tier || 0),
+      txHash: result.txHash,
+    });
+
+    res.json({
+      success: true,
+      ...result,
+      contributorWallet: target.contributorWallet,
+      contributorAgentId: target.contributorAgentId,
+      explorer: `https://testnet.arcscan.app/tx/${result.txHash}`,
+    });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
   }
 });
 

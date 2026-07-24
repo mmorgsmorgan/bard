@@ -400,6 +400,26 @@ export const TOOLS = [
     },
   },
   {
+    name: 'bard_vouch',
+    description: 'Stake an on-chain vouch from your authenticated managed agent wallet on Arc Testnet. The stake is locked for 30 days. Provide exactly one target: contributorWallet, contributorUsername, contributorAgentId, or contributorAgentName. Tier minimums are 0=1, 1=10, 2=100, 3=500 USDC.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        contributorWallet: { type: 'string', description: 'Raw contributor wallet address. Mutually exclusive with the other target fields.' },
+        contributorUsername: { type: 'string', description: 'BARD human username without @. Mutually exclusive with the other target fields.' },
+        contributorAgentId: { type: 'string', description: 'BARD agent ID. Mutually exclusive with the other target fields.' },
+        contributorAgentName: { type: 'string', description: 'Case-insensitive BARD agent name. Mutually exclusive with the other target fields.' },
+        amount: { type: 'string', description: 'USDC amount to stake. Must meet the selected tier minimum.' },
+        tier: { type: 'number', enum: [0, 1, 2, 3], description: 'Vouch tier: 0=1 USDC, 1=10, 2=100, 3=500 minimum.' },
+        statement: { type: 'string', description: 'Why this contributor deserves the vouch.' },
+        ecosystem: { type: 'string', description: 'Relevant ecosystem, such as Arc.' },
+        evidenceURI: { type: 'string', description: 'Optional evidence URL or URI.' },
+        score: { type: 'number', description: 'Integer trust score from 0 to 100 (default 80).' },
+      },
+      required: ['amount', 'tier', 'statement', 'ecosystem'],
+    },
+  },
+  {
     name: 'bard_quote_swap',
     description: 'Get a swap quote on Achswap DEX (Arc Testnet). Returns expected output amount and the on-chain route across V2/V3/V4 pools. No transaction is sent. tokenIn/tokenOut accept a 0x address or symbol (USDC, WUSDC, ACHS). amountIn is a decimal-aware integer string in the input token\'s smallest units (e.g. "1000000000000000000" = 1 token for an 18-decimal token).',
     inputSchema: {
@@ -1287,6 +1307,48 @@ async function handleTool(name, args, token) {
           explorer: data.explorer,
           message: data.message,
           details: data.details,
+        };
+      }
+
+      case 'bard_vouch': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const targetFields = [
+          args.contributorWallet,
+          args.contributorUsername,
+          args.contributorAgentId,
+          args.contributorAgentName,
+        ].filter(Boolean);
+        if (targetFields.length !== 1) {
+          return { error: 'Provide exactly one target: contributorWallet, contributorUsername, contributorAgentId, or contributorAgentName' };
+        }
+        const res = await apiFetch(`/api/agents/${auth.agentId}/vouches`, {
+          method: 'POST',
+          body: JSON.stringify({
+            contributorWallet: args.contributorWallet,
+            contributorUsername: args.contributorUsername,
+            contributorAgentId: args.contributorAgentId,
+            contributorAgentName: args.contributorAgentName,
+            amount: args.amount,
+            tier: args.tier,
+            statement: args.statement,
+            ecosystem: args.ecosystem,
+            evidenceURI: args.evidenceURI || '',
+            score: args.score ?? 80,
+          }),
+        }, token);
+        const data = await res.json();
+        if (!res.ok) return { error: data.error, hint: data.hint, txHash: data.txHash };
+        return {
+          success: true,
+          contributorWallet: data.contributorWallet,
+          contributorAgentId: data.contributorAgentId,
+          amount: String(args.amount),
+          tier: Number(args.tier),
+          approveTxHash: data.approveTxHash,
+          txHash: data.txHash,
+          explorer: data.explorer,
+          message: `Vouch confirmed. ${args.amount} USDC is staked for 30 days.`,
         };
       }
 

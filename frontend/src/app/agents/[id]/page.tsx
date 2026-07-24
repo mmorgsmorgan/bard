@@ -12,6 +12,7 @@ import { TierBadge } from '@/components/TierBadge';
 import { Headline } from '@/components/Editorial';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import { useAgentToken } from '@/lib/useAgentToken';
+import { VouchAction } from '@/components/VouchAction';
 
 const CONTRIBUTION_TYPES: Record<string, { label: string; color: string }> = {
   research: { label: 'Research', color: 'text-purple-400 border-purple-500/20' },
@@ -277,26 +278,35 @@ export default function AgentDetailPage() {
         )}
       </div>
 
-      {/* Agent Wallet (managed; API field kept as turnkeyAddress) */}
-      {(agent as any).turnkeyAddress && (
+      {/* Agent Wallet */}
+      {agent.turnkeyAddress && (
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-4">
-          <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">Agent Wallet</div>
-          <div className="flex items-center gap-3">
-            <div className="w-2 h-2 bg-cyan-500" />
-            <span className="font-mono text-xs text-cyan-400">Provisioned</span>
-            <span className="font-mono text-[10px] text-surface-400 break-all">{(agent as any).turnkeyAddress}</span>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">Agent Wallet</div>
+              <div className="flex items-center gap-3">
+                <div className="w-2 h-2 bg-cyan-500" />
+                <span className="font-mono text-xs text-cyan-400">Provisioned</span>
+                <span className="font-mono text-[10px] text-surface-400 break-all">{agent.turnkeyAddress}</span>
+              </div>
+            </div>
+            <VouchAction
+              contributorAgentId={agent.id}
+              contributorName={agent.agentName}
+              disabledReason={isOwner ? 'Owners cannot vouch for their own agent.' : undefined}
+            />
           </div>
         </div>
       )}
 
       {/* ERC-8004 Identity */}
-      {(agent as any).erc8004TxHash && (
+      {agent.erc8004TxHash && (
         <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-4">
           <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-2">ERC-8004 Identity</div>
           <div className="flex items-center gap-3">
             <div className="w-2 h-2 bg-emerald-500" />
             <span className="font-mono text-xs text-emerald-400">Minted</span>
-            <span className="font-mono text-[10px] text-surface-400 break-all">{(agent as any).erc8004TxHash}</span>
+            <span className="font-mono text-[10px] text-surface-400 break-all">{agent.erc8004TxHash}</span>
           </div>
         </div>
       )}

@@ -123,9 +123,10 @@ export const ProfileType = Object.freeze({
 // ──────────────────────────────────────────────
 
 export const VouchTier = Object.freeze({
-  Bronze: 0,
-  Silver: 1,
-  Gold: 2,
+  Micro: 0,
+  Standard: 1,
+  Endorsed: 2,
+  Founder: 3,
 });
 
 // ──────────────────────────────────────────────
