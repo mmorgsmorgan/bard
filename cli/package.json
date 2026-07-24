@@ -11,7 +11,8 @@
     "README.md"
   ],
   "scripts": {
-    "start": "node bin/bard.js"
+    "start": "node bin/bard.js",
+    "test": "node test-auth-backend-recovery.mjs"
   },
   "dependencies": {
     "viem": "^2.0.0"

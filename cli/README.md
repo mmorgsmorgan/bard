@@ -48,6 +48,8 @@ bard auth --name "MyAgent" --type research
 
 `bard auth` now pins the URL it ran against into `~/.bard/config.json`, so every later command lands on the same backend that issued your token. `bard me` shows that backend at the top and confirms the agent row is actually there — the most common failure mode (token validates, row missing) is surfaced inline with the fix.
 
+Before registration, `bard auth` health-checks the selected backend. If a retired URL is stored in `~/.bard/config.json`, the CLI automatically migrates to the current live backend. An explicit `BARD_API` override is never replaced silently and returns the HTTP/network error with a corrective hint.
+
 ### Recovery
 
 | Command | Description |

@@ -24,7 +24,7 @@ import os from 'os';
 
 const CONFIG_DIR = path.join(os.homedir(), '.bard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-const DEFAULT_API = 'https://bard-production-e88b.up.railway.app';
+const DEFAULT_API = process.env.BARD_DEFAULT_API || 'https://bard-production-e88b.up.railway.app';
 const DEFAULT_MCP = 'https://mcp-production-8d2e.up.railway.app';
 
 // ── Config helpers ──
@@ -44,7 +44,7 @@ function saveConfig(config) {
 }
 
 function getApiUrl() {
-  return process.env.BARD_API || loadConfig().apiUrl || DEFAULT_API;
+  return (process.env.BARD_API || loadConfig().apiUrl || DEFAULT_API).replace(/\/$/, '');
 }
 
 function getToken() {
@@ -54,13 +54,83 @@ function getToken() {
   return config.token || null;
 }
 
-async function apiFetch(path, opts = {}) {
-  const url = `${getApiUrl()}${path}`;
+async function apiFetch(path, opts = {}, baseUrl = getApiUrl()) {
+  const url = `${baseUrl.replace(/\/$/, '')}${path}`;
   const token = getToken();
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const res = await fetch(url, { ...opts, headers });
   return res;
+}
+
+async function responseData(res) {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text.slice(0, 500) };
+  }
+}
+
+function responseError(res, data, fallback) {
+  return data?.error
+    || data?.message
+    || data?.detail
+    || data?.raw
+    || `${fallback} (HTTP ${res.status})`;
+}
+
+async function probeBackend(url) {
+  try {
+    const res = await fetch(`${url.replace(/\/$/, '')}/api/health`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    const data = await responseData(res);
+    return {
+      ok: res.ok && data?.status === 'ok',
+      status: res.status,
+      message: responseError(res, data, 'Health check failed'),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      message: err instanceof Error ? err.message : 'Network request failed',
+    };
+  }
+}
+
+async function resolveAuthApiUrl() {
+  const config = loadConfig();
+  const configuredUrl = getApiUrl();
+  const source = process.env.BARD_API
+    ? 'BARD_API'
+    : config.apiUrl ? '~/.bard/config.json' : 'CLI default';
+  const health = await probeBackend(configuredUrl);
+  if (health.ok) return configuredUrl;
+
+  if (!process.env.BARD_API && config.apiUrl && configuredUrl !== DEFAULT_API) {
+    const defaultHealth = await probeBackend(DEFAULT_API);
+    if (defaultHealth.ok) {
+      config.apiUrl = DEFAULT_API;
+      saveConfig(config);
+      console.log(`  ⚠ Saved backend is unavailable: ${configuredUrl}`);
+      console.log(`    ${health.status ? `HTTP ${health.status}: ` : ''}${health.message}`);
+      console.log(`  ✓ Switched to current BARD backend: ${DEFAULT_API}\n`);
+      return DEFAULT_API;
+    }
+  }
+
+  const resetHint = source === 'BARD_API'
+    ? 'Unset BARD_API or set it to a healthy BARD backend.'
+    : `Run: npx @chiefmmorgs/bard-cli use --default`;
+  throw new Error(
+    `Backend unavailable: ${configuredUrl}\n`
+    + `  Source: ${source}\n`
+    + `  ${health.status ? `HTTP ${health.status}: ` : ''}${health.message}\n`
+    + `  ${resetHint}`
+  );
 }
 
 // ── Commands ──
@@ -427,7 +497,13 @@ async function cmdAuthTurnkey() {
   // agent row not found) — exactly the failure mode docs/onboarding-recovery.md
   // exists to clean up. Stamp it now so every later command goes to the same
   // backend that created the row.
-  const apiUrl = getApiUrl();
+  let apiUrl;
+  try {
+    apiUrl = await resolveAuthApiUrl();
+  } catch (err) {
+    console.error(`\n  ✗ ${err.message}\n`);
+    process.exit(1);
+  }
   console.log(`\n  ╔═══════════════════════════════════════╗`);
   console.log(`  ║   BARD Agent Setup                     ║`);
   console.log(`  ╚═══════════════════════════════════════╝\n`);
@@ -437,18 +513,31 @@ async function cmdAuthTurnkey() {
 
   // Step 1: Register agent (the backend creates the agent with a placeholder key)
   console.log('  [1/3] Registering agent...');
-  const regRes = await apiFetch('/api/agents/register', {
-    method: 'POST',
-    body: JSON.stringify({
-      ownerWallet: '0x0000000000000000000000000000000000000000',
-      agentName: name,
-      agentPublicKey: 'turnkey-pending-' + Date.now(),
-      agentType: type,
-      description: `Managed-wallet ${type} agent`,
-    }),
-  });
-  const regData = await regRes.json();
-  if (!regRes.ok) { console.error('  ✗ Registration failed:', regData.error); process.exit(1); }
+  let regRes;
+  try {
+    regRes = await apiFetch('/api/agents/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        ownerWallet: '0x0000000000000000000000000000000000000000',
+        agentName: name,
+        agentPublicKey: 'turnkey-pending-' + Date.now(),
+        agentType: type,
+        description: `Managed-wallet ${type} agent`,
+      }),
+    }, apiUrl);
+  } catch (err) {
+    console.error(`  ✗ Registration request failed: ${err.message}`);
+    process.exit(1);
+  }
+  const regData = await responseData(regRes);
+  if (!regRes.ok) {
+    console.error(`  ✗ Registration failed: ${responseError(regRes, regData, 'Unexpected backend response')}`);
+    process.exit(1);
+  }
+  if (!regData.token || !(regData.agent?.id || regData.agentId)) {
+    console.error('  ✗ Registration failed: backend response did not include an agent ID and token');
+    process.exit(1);
+  }
 
   const agentId = regData.agent?.id || regData.agentId;
   const token = regData.token;
