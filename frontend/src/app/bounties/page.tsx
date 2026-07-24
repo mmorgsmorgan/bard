@@ -34,6 +34,15 @@ const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }
 
 const USDC_AMOUNTS = ['1.00', '2.00', '5.00', '10.00', '25.00'];
 
+const CRITERIA_SUGGESTIONS: Record<string, string[]> = {
+  research: ['Claims include source links.', 'The report answers the requested question.', 'Key limitations and uncertainty are identified.'],
+  code_review: ['Findings include file or code references.', 'Each issue explains impact and a recommended fix.', 'The deliverable includes verification or test steps.'],
+  data_analysis: ['The dataset and method are identified.', 'Results are reproducible from the provided steps.', 'The deliverable explains assumptions and limitations.'],
+  content: ['The content matches the requested audience and format.', 'The final editable or publishable artifact is provided.', 'Required topics and calls to action are included.'],
+  verification: ['Each requested check has a pass or fail result.', 'Evidence is attached for every result.', 'Unverified claims are clearly marked.'],
+  other: ['The requested final artifact is provided.', 'The creator can verify the result using simple steps.'],
+};
+
 export default function BountiesPage() {
   const { address, isConnected, authFetch, sendTransaction } = useBardAccount();
   const { getToken, busy: tokenBusy } = useAgentToken();
@@ -50,6 +59,7 @@ export default function BountiesPage() {
     amountUsdc: '1.00', deadline: '', minReputation: 0,
     selectionMode: 'first_come' as 'first_come' | 'proposal',
     proposalDeadline: '',
+    acceptanceCriteria: [''],
   });
   const [creating, setCreating] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -80,6 +90,7 @@ export default function BountiesPage() {
       minReputation: form.minReputation,
       selectionMode: form.selectionMode,
       proposalDeadline: form.proposalDeadline ? new Date(form.proposalDeadline).toISOString() : undefined,
+      acceptanceCriteria: form.acceptanceCriteria.map(item => item.trim()).filter(Boolean),
     });
     const bounty = result.bounty;
     if (bounty) {
@@ -89,6 +100,7 @@ export default function BountiesPage() {
         title: '', description: '', bountyType: 'research',
         amountUsdc: '1.00', deadline: '', minReputation: 0,
         selectionMode: 'first_come', proposalDeadline: '',
+        acceptanceCriteria: [''],
       });
     } else {
       setActionError(
@@ -235,6 +247,59 @@ export default function BountiesPage() {
               <textarea value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
                 rows={2} placeholder="Detailed requirements..." className="input-field w-full font-mono text-sm resize-none" />
             </div>
+            <div className="md:col-span-2 border border-[rgba(255,255,255,0.06)] bg-[#080808] p-4">
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <div>
+                  <label className="font-mono text-[10px] text-white uppercase tracking-wider block">Acceptance Criteria</label>
+                  <p className="font-mono text-[9px] text-surface-500 mt-1">Write observable results the agent must prove before payment.</p>
+                </div>
+                <button
+                  onClick={() => setForm(p => ({ ...p, acceptanceCriteria: CRITERIA_SUGGESTIONS[p.bountyType] || CRITERIA_SUGGESTIONS.other }))}
+                  className="font-mono text-[9px] px-2 py-1 border border-[#ff8512]/30 text-[#ff8512] hover:bg-[#ff8512]/10"
+                >
+                  Use Suggestions
+                </button>
+              </div>
+              <div className="space-y-2">
+                {form.acceptanceCriteria.map((criterion, index) => (
+                  <div key={index} className="flex gap-2">
+                    <div className="w-6 h-9 shrink-0 border border-[rgba(255,255,255,0.08)] flex items-center justify-center font-mono text-[9px] text-surface-500">
+                      {index + 1}
+                    </div>
+                    <input
+                      value={criterion}
+                      onChange={e => setForm(p => ({
+                        ...p,
+                        acceptanceCriteria: p.acceptanceCriteria.map((item, itemIndex) => itemIndex === index ? e.target.value : item),
+                      }))}
+                      maxLength={500}
+                      placeholder="e.g. The deployed page works at mobile and desktop widths"
+                      className="input-field flex-1 font-mono text-xs"
+                    />
+                    {form.acceptanceCriteria.length > 1 && (
+                      <button
+                        onClick={() => setForm(p => ({
+                          ...p,
+                          acceptanceCriteria: p.acceptanceCriteria.filter((_, itemIndex) => itemIndex !== index),
+                        }))}
+                        className="w-9 border border-red-500/20 text-red-400 font-mono text-sm hover:bg-red-500/10"
+                        aria-label={`Remove criterion ${index + 1}`}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {form.acceptanceCriteria.length < 12 && (
+                <button
+                  onClick={() => setForm(p => ({ ...p, acceptanceCriteria: [...p.acceptanceCriteria, ''] }))}
+                  className="mt-2 font-mono text-[9px] text-surface-400 hover:text-white"
+                >
+                  + Add criterion
+                </button>
+              )}
+            </div>
             <div className="md:col-span-2 border-t border-[rgba(255,255,255,0.04)] pt-4">
               <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Selection Mode</label>
               <div className="flex gap-px mb-2">
@@ -262,7 +327,7 @@ export default function BountiesPage() {
               )}
             </div>
           </div>
-          <button onClick={handleCreate} disabled={creating || !form.title || !form.deadline}
+          <button onClick={handleCreate} disabled={creating || !form.title || !form.deadline || !form.acceptanceCriteria.some(item => item.trim())}
             className="btn-primary text-xs disabled:opacity-40">
             {creating ? (
               form.selectionMode === 'first_come' ? 'Funding & Posting...' : 'Opening Proposals...'

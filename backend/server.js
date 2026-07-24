@@ -4630,6 +4630,133 @@ async function recordBountyRefundTransaction(db, {
 
 const BOUNTY_TYPES = ['research', 'code_review', 'data_analysis', 'content', 'verification', 'other'];
 
+function normalizeAcceptanceCriteria(value, fallbackText) {
+  const raw = Array.isArray(value) ? value : [];
+  const criteria = raw
+    .slice(0, 12)
+    .map((item, index) => {
+      const text = String(typeof item === 'string' ? item : item?.text || '').trim().slice(0, 500);
+      if (!text) return null;
+      const requestedId = typeof item === 'object' ? String(item?.id || '') : '';
+      const id = /^[a-zA-Z0-9_-]{1,80}$/.test(requestedId)
+        ? requestedId
+        : `criterion-${index + 1}`;
+      return { id, text };
+    })
+    .filter(Boolean);
+
+  if (criteria.length > 0) return criteria;
+  return [{
+    id: 'criterion-1',
+    text: String(fallbackText || 'Deliver the requested work').trim().slice(0, 500),
+  }];
+}
+
+function parseStoredJson(value, fallback) {
+  if (value && typeof value === 'object') return value;
+  try {
+    return JSON.parse(value || '');
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeEvidenceLinks(value) {
+  return (Array.isArray(value) ? value : [])
+    .slice(0, 10)
+    .map(link => String(link || '').trim().slice(0, 2000))
+    .filter(Boolean);
+}
+
+function normalizeDeliverablePackage(body, bounty) {
+  const content = String(body.content || '').trim();
+  if (!content) {
+    throw Object.assign(new Error('content required'), { status: 400 });
+  }
+  if (content.length > 1024 * 1024) {
+    throw Object.assign(new Error('Deliverable too large (max 1MB)'), { status: 400 });
+  }
+
+  const criteria = normalizeAcceptanceCriteria(
+    parseStoredJson(bounty.acceptance_criteria, []),
+    bounty.description || bounty.title
+  );
+  const summary = String(body.summary || content.slice(0, 600)).trim().slice(0, 2000);
+  const instructions = String(body.testInstructions || body.instructions || '').trim().slice(0, 5000);
+  const evidence = (Array.isArray(body.evidence) ? body.evidence : [])
+    .slice(0, 24)
+    .map(item => ({
+      criterionId: String(item?.criterionId || '').trim().slice(0, 80),
+      proof: String(item?.proof || item?.evidence || '').trim().slice(0, 4000),
+      links: normalizeEvidenceLinks(item?.links),
+    }))
+    .filter(item => item.criterionId || item.proof || item.links.length > 0);
+  const artifacts = (Array.isArray(body.artifacts) ? body.artifacts : [])
+    .slice(0, 20)
+    .map(item => ({
+      label: String(item?.label || 'Artifact').trim().slice(0, 160),
+      url: String(item?.url || '').trim().slice(0, 2000),
+      type: String(item?.type || 'link').trim().slice(0, 40),
+    }))
+    .filter(item => item.url);
+
+  const allLinks = [
+    ...evidence.flatMap(item => item.links.map(url => ({ url, source: 'evidence' }))),
+    ...artifacts.map(item => ({ url: item.url, source: 'artifact' })),
+  ];
+  const linkChecks = allLinks.map(({ url, source }) => {
+    try {
+      const parsed = new URL(url);
+      return {
+        url,
+        source,
+        valid: parsed.protocol === 'https:' || parsed.protocol === 'http:',
+      };
+    } catch {
+      return { url, source, valid: false };
+    }
+  });
+  const criterionChecks = criteria.map(criterion => {
+    const matches = evidence.filter(item => item.criterionId === criterion.id);
+    return {
+      criterionId: criterion.id,
+      text: criterion.text,
+      covered: matches.some(item => Boolean(item.proof || item.links.length)),
+      evidenceCount: matches.length,
+    };
+  });
+  const coveredCriteria = criterionChecks.filter(item => item.covered).length;
+  const invalidLinks = linkChecks.filter(item => !item.valid).length;
+  const checks = {
+    criteriaCovered: coveredCriteria,
+    criteriaTotal: criteria.length,
+    allCriteriaCovered: coveredCriteria === criteria.length,
+    instructionsProvided: Boolean(instructions),
+    artifactCount: artifacts.length,
+    linkCount: linkChecks.length,
+    invalidLinks,
+  };
+  const verificationReport = {
+    status: checks.allCriteriaCovered && invalidLinks === 0 ? 'ready_for_human_review' : 'needs_attention',
+    generatedAt: new Date().toISOString(),
+    checks,
+    criteria: criterionChecks,
+    links: linkChecks,
+    note: 'BARD validates package completeness and link format. The human reviewer must still inspect the actual work.',
+  };
+  const canonicalPackage = JSON.stringify({ content, summary, instructions, evidence, artifacts });
+
+  return {
+    content,
+    summary,
+    instructions,
+    evidence,
+    artifacts,
+    verificationReport,
+    serverHash: '0x' + createHash('sha256').update(canonicalPackage).digest('hex'),
+  };
+}
+
 function normalizeBountyInput(body = {}) {
   const title = String(body.title || '').trim();
   const description = String(body.description || '').trim();
@@ -4639,6 +4766,10 @@ function normalizeBountyInput(body = {}) {
   const deadlineMs = Date.parse(body.deadline);
   const proposalDeadlineMs = body.proposalDeadline ? Date.parse(body.proposalDeadline) : null;
   const minReputation = Math.max(0, Math.min(100, Number.parseInt(body.minReputation, 10) || 0));
+  const acceptanceCriteria = normalizeAcceptanceCriteria(
+    body.acceptanceCriteria,
+    description || title
+  );
 
   if (!title || title.length > 200) {
     throw Object.assign(new Error('Bounty title must be 1-200 characters'), { status: 400 });
@@ -4671,6 +4802,7 @@ function normalizeBountyInput(body = {}) {
     amountUsdc,
     deadline: new Date(deadlineMs).toISOString(),
     minReputation,
+    acceptanceCriteria,
     selectionMode,
     proposalDeadline: selectionMode === 'proposal' && proposalDeadlineMs !== null
       ? new Date(proposalDeadlineMs).toISOString()
@@ -4690,6 +4822,7 @@ async function insertManagedBounty(wallet, input, status, escrowStatus = 'none')
     amount_usdc: String(input.amountUsdc),
     deadline: input.deadline,
     min_reputation: input.minReputation,
+    acceptance_criteria: JSON.stringify(input.acceptanceCriteria),
     created_at: now,
     updated_at: now,
     status,
@@ -6525,13 +6658,24 @@ app.post('/api/bounties/:id/claim', requireAuth, async (req, res) => {
 
       // If sync response, auto-submit deliverable
       if (swarmResult.status === 'completed' && swarmResult.deliverable) {
-        const hash = '0x' + createHash('sha256').update(swarmResult.deliverable).digest('hex');
+        const deliverable = normalizeDeliverablePackage(
+          {
+            content: swarmResult.deliverable,
+            summary: `Swarm agent ${agent.agent_name} completed the requested work.`,
+          },
+          bounty
+        );
         await stmts.submitBountyDeliverable({
-          deliverable_hash: hash,
-          deliverable_content: swarmResult.deliverable,
+          deliverable_hash: deliverable.serverHash,
+          deliverable_content: deliverable.content,
+          deliverable_summary: deliverable.summary,
+          deliverable_evidence: JSON.stringify(deliverable.evidence),
+          deliverable_instructions: deliverable.instructions,
+          deliverable_artifacts: JSON.stringify(deliverable.artifacts),
+          verification_report: JSON.stringify(deliverable.verificationReport),
           submitted_at: now,
           updated_at: now,
-          id: req.params.id
+          id: req.params.id,
         });
         await logEscrowEvent(req.params.id, 'submitted', agent.owner_wallet, 'agent', `Swarm deliverable auto-submitted`, '');
         await createNotification({
@@ -6567,11 +6711,7 @@ app.post('/api/bounties/:id/claim', requireAuth, async (req, res) => {
 app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
   // Actor is the authenticated agent.
   const agentId = req.auth.agentId;
-  const { content, proofHash } = req.body;
-  if (!content) return res.status(400).json({ error: 'content required' });
-
-  // Size limit: max 1MB deliverable
-  if (content.length > 1024 * 1024) return res.status(400).json({ error: 'Deliverable too large (max 1MB)' });
+  const { proofHash } = req.body;
   if (!(await checkRateLimit(agentId, 'escrow_deliver'))) return res.status(429).json({ error: 'Rate limit exceeded' });
 
   const bounty = await stmts.getBountyById(req.params.id);
@@ -6580,8 +6720,17 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
   if (!['claimed', 'submitted'].includes(bounty.escrow_status)) return res.status(409).json({ error: `Cannot submit in state: ${bounty.escrow_status}` });
 
   const agent = await stmts.getAgentById(agentId);
+  let deliverable;
+  try {
+    deliverable = normalizeDeliverablePackage(req.body, bounty);
+  } catch (error) {
+    return res.status(error.status || 400).json({ error: error.message });
+  }
+  if (proofHash && !/^0x[0-9a-fA-F]{64}$/.test(String(proofHash))) {
+    return res.status(400).json({ error: 'proofHash must be a 32-byte hex value' });
+  }
 
-  const hash = proofHash || ('0x' + createHash('sha256').update(content).digest('hex'));
+  const hash = proofHash || deliverable.serverHash;
   const now = new Date().toISOString();
 
   // On-chain: record the deliverable on the escrow contract (Funded → Submitted)
@@ -6615,7 +6764,18 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
     }
   }
 
-  await stmts.submitBountyDeliverable({ deliverable_hash: hash, deliverable_content: content, submitted_at: now, updated_at: now, id: req.params.id });
+  await stmts.submitBountyDeliverable({
+    deliverable_hash: hash,
+    deliverable_content: deliverable.content,
+    deliverable_summary: deliverable.summary,
+    deliverable_evidence: JSON.stringify(deliverable.evidence),
+    deliverable_instructions: deliverable.instructions,
+    deliverable_artifacts: JSON.stringify(deliverable.artifacts),
+    verification_report: JSON.stringify(deliverable.verificationReport),
+    submitted_at: now,
+    updated_at: now,
+    id: req.params.id,
+  });
   await logEscrowEvent(req.params.id, 'submitted', bounty.provider_wallet, 'agent', `Deliverable submitted (hash: ${hash.slice(0, 16)}...)${submitTx ? ` [on-chain ${submitTx}]` : ''}`, submitTx);
 
   await createNotification({ wallet: bounty.creator_wallet, type: 'system', title: 'Deliverable Submitted', message: `Agent submitted work for "${bounty.title}". Review it now.`, from: bounty.provider_wallet });
@@ -6624,12 +6784,17 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
   res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
 });
 
-async function releaseAgentBountyOnCreatorApproval({
+async function releaseBountyOnCreatorApproval({
   bountyId,
-  creatorAgent,
+  creatorAgent = null,
+  creatorHuman = null,
   reason,
 }) {
-  const creatorWallet = creatorAgent.turnkey_address || creatorAgent.owner_wallet;
+  const creatorWallet = creatorHuman?.wallet_address
+    || creatorAgent?.turnkey_address
+    || creatorAgent?.owner_wallet;
+  const reviewerType = creatorHuman ? 'creator_human' : 'creator_agent';
+  const actorType = creatorHuman ? 'human' : 'agent';
   const now = new Date().toISOString();
   const client = await pool.connect();
   let bounty;
@@ -6645,9 +6810,12 @@ async function releaseAgentBountyOnCreatorApproval({
     if (!bounty) {
       throw Object.assign(new Error('Bounty not found'), { status: 404 });
     }
-    if (!agentControlsBounty(creatorAgent, bounty)) {
+    const controlsBounty = creatorHuman
+      ? bounty.creator_wallet?.toLowerCase() === creatorWallet?.toLowerCase()
+      : agentControlsBounty(creatorAgent, bounty);
+    if (!controlsBounty) {
       throw Object.assign(
-        new Error('Only the authenticated creator agent can review this bounty'),
+        new Error('Only the authenticated bounty creator can review this bounty'),
         { status: 403 }
       );
     }
@@ -6718,7 +6886,7 @@ async function releaseAgentBountyOnCreatorApproval({
           if (settled.paidToProvider > 0) agentEarnings = settled.paidToProvider;
           if (settled.feePaid > 0) platformFee = settled.feePaid;
         } catch (error) {
-          console.warn(`[Agent Bounty Release] settlement decode failed: ${error.message}`);
+          console.warn(`[Bounty Release] settlement decode failed: ${error.message}`);
         }
       } else if (Number(job.status) === 3 /* Completed */) {
         releaseTx = bounty.release_tx_hash || pendingSettlement;
@@ -6762,19 +6930,20 @@ async function releaseAgentBountyOnCreatorApproval({
           agentWallet: recipientWallet,
           amountUsd: agentEarnings,
           platformFeeUsd: platformFee,
-          approvedByAgentId: creatorAgent.id,
+          approvedByAgentId: creatorAgent?.id || null,
+          approvedByHumanId: creatorHuman?.id || null,
         },
       });
     }
 
     const decisionId = `vd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const reasoning = reason || 'Creator agent approved the deliverable';
+    const reasoning = reason || 'Creator approved the deliverable';
     const reasoningHash = '0x' + createHash('sha256').update(reasoning).digest('hex');
     await client.query(
       `INSERT INTO verification_decisions
          (id, bounty_id, verifier_wallet, verifier_type, decision, reasoning, reasoning_hash, stage, tx_hash, created_at)
-       VALUES ($1, $2, $3, 'creator_agent', 'approved', $4, $5, 1, $6, $7)`,
-      [decisionId, bountyId, creatorWallet, reasoning, reasoningHash, releaseTx, now]
+       VALUES ($1, $2, $3, $4, 'approved', $5, $6, 1, $7, $8)`,
+      [decisionId, bountyId, creatorWallet, reviewerType, reasoning, reasoningHash, releaseTx, now]
     );
     await client.query(
       `UPDATE bounties
@@ -6792,16 +6961,17 @@ async function releaseAgentBountyOnCreatorApproval({
       `INSERT INTO escrow_events
          (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
        VALUES
-         ($1, $2, 'client_approved', $3, 'agent', $4, '', $5),
-         ($6, $2, 'released', $3, 'agent', $7, $8, $5)`,
+         ($1, $2, 'client_approved', $3, $4, $5, '', $6),
+         ($7, $2, 'released', $3, $4, $8, $9, $6)`,
       [
         `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         bountyId,
         creatorWallet,
+        actorType,
         reasoning,
         now,
         `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-r`,
-        `${agentEarnings.toFixed(2)} USDC released after creator-agent approval (platform fee: ${platformFee.toFixed(2)} USDC)`,
+        `${agentEarnings.toFixed(2)} USDC released after creator approval (platform fee: ${platformFee.toFixed(2)} USDC)`,
         releaseTx,
       ]
     );
@@ -6829,7 +6999,7 @@ async function releaseAgentBountyOnCreatorApproval({
           bountyId,
           'settlement_pending',
           creatorWallet,
-          'agent',
+          actorType,
           'Creator-approved settlement was broadcast and is awaiting confirmation',
           error.txHash
         );
@@ -6853,7 +7023,8 @@ async function releaseAgentBountyOnCreatorApproval({
   );
   emitFeedEvent('escrow:released', {
     bountyId,
-    approvedByAgentId: creatorAgent.id,
+    approvedByAgentId: creatorAgent?.id || null,
+    approvedByHumanId: creatorHuman?.id || null,
     releaseTxHash: releaseTx,
   });
   return { bounty: await stmts.getBountyById(bountyId), txHash: releaseTx };
@@ -6932,7 +7103,7 @@ app.post('/api/bounties/:id/agent-review', requireAuth, async (req, res) => {
   }
 
   try {
-    const result = await releaseAgentBountyOnCreatorApproval({
+    const result = await releaseBountyOnCreatorApproval({
       bountyId: bounty.id,
       creatorAgent,
       reason,
@@ -6964,7 +7135,8 @@ app.post('/api/bounties/:id/agent-review', requireAuth, async (req, res) => {
 // POST /api/human/bounties/:id/review — Authenticated human creator reviews work.
 app.post('/api/human/bounties/:id/review', requireHuman, async (req, res) => {
   const clientWallet = req.human.wallet_address;
-  const { decision, reason } = req.body;
+  const decision = String(req.body?.decision || '');
+  const reason = String(req.body?.reason || '').trim().slice(0, 2000);
   if (!decision) return res.status(400).json({ error: 'decision (approved/rejected) required' });
   if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'decision must be approved or rejected' });
   if (!(await checkRateLimit(clientWallet, 'escrow_review'))) return res.status(429).json({ error: 'Rate limit exceeded' });
@@ -6974,28 +7146,116 @@ app.post('/api/human/bounties/:id/review', requireHuman, async (req, res) => {
   if (bounty.creator_wallet.toLowerCase() !== clientWallet.toLowerCase()) return res.status(403).json({ error: 'Only bounty creator can review' });
   if (bounty.escrow_status !== 'submitted') return res.status(409).json({ error: 'No deliverable to review' });
 
-  const now = new Date().toISOString();
-
   if (decision === 'approved') {
-    await stmts.clientReviewBounty({ client_decision: 'approved', client_decision_at: now, escrow_status: 'client_approved', updated_at: now, id: req.params.id });
-    await logEscrowEvent(req.params.id, 'client_approved', clientWallet, 'human', reason || 'Client approved deliverable', '');
-    await createNotification({ agentId: bounty.provider_agent_id, type: 'system', title: 'Client Approved', message: `Client approved your deliverable for "${bounty.title}". Awaiting platform verification.`, from: clientWallet });
-  } else {
-    // Rejection — allow 1 revision
-    if ((bounty.revision_count || 0) >= 1) {
-      // Already revised once — escalate to platform
-      await stmts.clientReviewBounty({ client_decision: 'rejected', client_decision_at: now, escrow_status: 'disputed', updated_at: now, id: req.params.id });
-      await logEscrowEvent(req.params.id, 'disputed', clientWallet, 'human', `Client rejected after revision: ${reason || 'No reason'}`, '');
-      await createNotification({ agentId: bounty.provider_agent_id, type: 'system', title: 'Escalated to Platform', message: `Client rejected your revision for "${bounty.title}". Platform will decide.`, from: clientWallet });
-    } else {
-      await stmts.incrementBountyRevision({ updated_at: now, id: req.params.id });
-      await logEscrowEvent(req.params.id, 'client_rejected', clientWallet, 'human', `Revision requested: ${reason || 'No reason'}`, '');
-      await createNotification({ agentId: bounty.provider_agent_id, type: 'system', title: 'Revision Requested', message: `Client requested revision for "${bounty.title}": ${reason || 'No details'}`, from: clientWallet });
+    try {
+      const result = await releaseBountyOnCreatorApproval({
+        bountyId: bounty.id,
+        creatorHuman: req.human,
+        reason,
+      });
+      return res.json({
+        success: true,
+        paid: true,
+        txHash: result.txHash || result.bounty?.release_tx_hash || null,
+        message: result.reconciled
+          ? 'Bounty payment was already completed.'
+          : 'Deliverable approved and payment released to the provider agent.',
+        bounty: result.bounty,
+      });
+    } catch (error) {
+      if (error.txHash) {
+        return res.status(202).json({
+          success: true,
+          pending: true,
+          txHash: error.txHash,
+          onchainJobId: bounty.onchain_job_id ? String(bounty.onchain_job_id) : null,
+          message: 'Payment was broadcast and is awaiting confirmation. Retry this approval to reconcile it.',
+          details: error.message,
+        });
+      }
+      return res.status(error.status || 409).json({ error: error.message });
     }
+  }
+
+  if (!reason) {
+    return res.status(400).json({ error: 'A revision reason is required when rejecting work' });
+  }
+
+  const now = new Date().toISOString();
+  // Rejection — allow 1 revision
+  if ((bounty.revision_count || 0) >= 1) {
+    // Already revised once — escalate to platform
+    await stmts.clientReviewBounty({ client_decision: 'rejected', client_decision_at: now, escrow_status: 'disputed', updated_at: now, id: req.params.id });
+    await logEscrowEvent(req.params.id, 'disputed', clientWallet, 'human', `Client rejected after revision: ${reason}`, '');
+    await createNotification({ agentId: bounty.provider_agent_id, type: 'system', title: 'Escalated to Platform', message: `Client rejected your revision for "${bounty.title}". Platform will decide.`, from: clientWallet });
+  } else {
+    await stmts.incrementBountyRevision({ updated_at: now, id: req.params.id });
+    await logEscrowEvent(req.params.id, 'client_rejected', clientWallet, 'human', `Revision requested: ${reason}`, '');
+    await createNotification({ agentId: bounty.provider_agent_id, type: 'system', title: 'Revision Requested', message: `Client requested revision for "${bounty.title}": ${reason}`, from: clientWallet });
   }
 
   emitFeedEvent('escrow:reviewed', { bountyId: req.params.id, decision });
   res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
+});
+
+// POST /api/human/bounties/:id/request-verification — Ask an independent
+// platform verifier to decide a submitted bounty when the creator lacks the
+// expertise to evaluate it directly.
+app.post('/api/human/bounties/:id/request-verification', requireHuman, async (req, res) => {
+  const clientWallet = req.human.wallet_address;
+  const note = String(req.body?.note || '').trim().slice(0, 2000);
+  if (!(await checkRateLimit(clientWallet, 'escrow_review'))) {
+    return res.status(429).json({ error: 'Rate limit exceeded' });
+  }
+
+  const bounty = await stmts.getBountyById(req.params.id);
+  if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
+  if (bounty.creator_wallet.toLowerCase() !== clientWallet.toLowerCase()) {
+    return res.status(403).json({ error: 'Only bounty creator can request verification' });
+  }
+  if (bounty.escrow_status !== 'submitted') {
+    return res.status(409).json({ error: 'Independent review is only available for submitted work' });
+  }
+
+  const now = new Date().toISOString();
+  const requested = await pool.query(
+    `UPDATE bounties
+        SET verification_requested_at = COALESCE(verification_requested_at, $1),
+            verification_request_note = $2,
+            updated_at = $1
+      WHERE id = $3 AND escrow_status = 'submitted'
+      RETURNING *`,
+    [now, note, bounty.id]
+  );
+  if (!requested.rows[0]) {
+    return res.status(409).json({ error: 'The bounty is no longer awaiting review' });
+  }
+  await logEscrowEvent(
+    bounty.id,
+    'independent_review_requested',
+    clientWallet,
+    'human',
+    note || 'Creator requested independent review',
+    ''
+  );
+  await Promise.all([
+    runBestEffort(`independent review operator notification for ${bounty.id}`, () => createNotification({
+      wallet: PLATFORM_OWNER_WALLET,
+      type: 'system',
+      title: 'Independent Bounty Review Requested',
+      message: `Review requested for "${bounty.title}". ${note || 'No additional note.'}`,
+      from: clientWallet,
+    })),
+    runBestEffort(`independent review agent notification for ${bounty.id}`, () => createNotification({
+      agentId: bounty.provider_agent_id,
+      type: 'system',
+      title: 'Independent Review Requested',
+      message: `The creator requested independent verification for "${bounty.title}". Escrow remains locked pending a decision.`,
+      from: clientWallet,
+    })),
+  ]);
+  emitFeedEvent('escrow:verification_requested', { bountyId: bounty.id });
+  res.json({ success: true, bounty: requested.rows[0] });
 });
 
 // ══════════════════════════════════════════════════════
@@ -7359,7 +7619,8 @@ app.post('/api/bounties/:id/platform-verify', requireTrustedServiceOrOperator, a
 
   const bounty = await stmts.getBountyById(req.params.id);
   if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-  if (!['client_approved', 'disputed'].includes(bounty.escrow_status)) {
+  const independentReview = bounty.escrow_status === 'submitted' && bounty.verification_requested_at;
+  if (!['client_approved', 'disputed'].includes(bounty.escrow_status) && !independentReview) {
     return res.status(409).json({ error: `Cannot verify in state: ${bounty.escrow_status}` });
   }
 
@@ -7373,8 +7634,12 @@ app.post('/api/bounties/:id/platform-verify', requireTrustedServiceOrOperator, a
     await client.query('BEGIN');
 
     // Re-check state inside transaction to prevent race conditions
-    const fresh = (await client.query('SELECT * FROM bounties WHERE id = $1', [req.params.id])).rows[0];
-    if (!fresh || !['client_approved', 'disputed'].includes(fresh.escrow_status)) {
+    const fresh = (await client.query(
+      'SELECT * FROM bounties WHERE id = $1 FOR UPDATE',
+      [req.params.id]
+    )).rows[0];
+    const freshIndependentReview = fresh?.escrow_status === 'submitted' && fresh.verification_requested_at;
+    if (!fresh || (!['client_approved', 'disputed'].includes(fresh.escrow_status) && !freshIndependentReview)) {
       throw new Error(`Race condition: bounty now in state ${fresh ? fresh.escrow_status : 'missing'}`);
     }
 

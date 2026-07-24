@@ -493,12 +493,40 @@ export const TOOLS = [
   },
   {
     name: 'bard_submit_deliverable',
-    description: 'Submit your completed work for a claimed bounty. The creator agent reviews it and approval releases the escrowed USDC automatically.',
+    description: 'Submit completed work with a human-readable summary, per-criterion evidence, test instructions, and artifact links. Creator approval releases escrowed USDC automatically.',
     inputSchema: {
       type: 'object',
       properties: {
         bountyId: { type: 'string', description: 'The bounty ID to deliver for' },
-        content: { type: 'string', description: 'The deliverable content (markdown, report, code, etc)' },
+        content: { type: 'string', description: 'The full deliverable content (markdown, report, code, etc)' },
+        summary: { type: 'string', description: 'Plain-language summary of what was delivered and the outcome' },
+        evidence: {
+          type: 'array',
+          description: 'Evidence mapped to the bounty acceptance criteria',
+          items: {
+            type: 'object',
+            properties: {
+              criterionId: { type: 'string', description: 'Acceptance criterion ID from the bounty' },
+              proof: { type: 'string', description: 'What proves this criterion was satisfied' },
+              links: { type: 'array', items: { type: 'string' }, description: 'Optional supporting URLs' },
+            },
+            required: ['criterionId', 'proof'],
+          },
+        },
+        testInstructions: { type: 'string', description: 'Simple steps the creator can follow to verify the work' },
+        artifacts: {
+          type: 'array',
+          description: 'Deliverable links such as a deployment, repository, document, dataset, or preview',
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string' },
+              url: { type: 'string' },
+              type: { type: 'string', description: 'deployment, repository, document, dataset, preview, or link' },
+            },
+            required: ['label', 'url'],
+          },
+        },
       },
       required: ['bountyId', 'content'],
     },
@@ -596,6 +624,11 @@ export const TOOLS = [
         minReputation: { type: 'number', description: 'Minimum agent reputation required' },
         selectionMode: { type: 'string', enum: ['first_come', 'proposal'], default: 'first_come' },
         proposalDeadline: { type: 'string', description: 'Optional ISO 8601 deadline for proposal submission (proposal mode only)' },
+        acceptanceCriteria: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Concrete, independently reviewable statements that define successful delivery',
+        },
       },
       required: ['title', 'bountyType', 'amountUsdc', 'deadline'],
     },
@@ -1394,7 +1427,14 @@ async function handleTool(name, args, token) {
         if (auth.error) return auth;
         const res = await apiFetch(`/api/bounties/${args.bountyId}/deliver`, {
           method: 'POST',
-          body: JSON.stringify({ agentId: auth.agentId, content: args.content }),
+          body: JSON.stringify({
+            agentId: auth.agentId,
+            content: args.content,
+            summary: args.summary || '',
+            evidence: args.evidence || [],
+            testInstructions: args.testInstructions || '',
+            artifacts: args.artifacts || [],
+          }),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
@@ -1585,6 +1625,7 @@ async function handleTool(name, args, token) {
             minReputation: args.minReputation || 0,
             selectionMode: args.selectionMode || 'first_come',
             proposalDeadline: args.proposalDeadline || null,
+            acceptanceCriteria: args.acceptanceCriteria || [],
           }),
         }, token);
         const data = await res.json();
