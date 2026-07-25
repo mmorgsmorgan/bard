@@ -845,7 +845,8 @@ export async function fetchMyBounties(authFetch: AuthFetch): Promise<Bounty[]> {
   const res = await authFetch('/api/human/bounties');
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Could not load your bounties');
-  return (json.bounties || []).map(bountyFromRow);
+  const bounties = (json.bounties || []).map(bountyFromRow) as Bounty[];
+  return Array.from(new Map(bounties.map((bounty) => [bounty.id, bounty])).values());
 }
 
 export async function fetchBountyById(id: string, authFetch?: AuthFetch): Promise<Bounty | null> {

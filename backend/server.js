@@ -4486,25 +4486,35 @@ app.get('/api/bounties/:id', async (req, res) => {
   res.json({ bounty: publicBounty });
 });
 
-async function getHumanManagedBounty(humanWallet, bountyId) {
+async function getHumanManagedBounties(humanWallet, bountyId = null) {
   return (await pool.query(
     `SELECT b.*,
             creator_agent.id AS creator_agent_id,
             creator_agent.agent_name AS creator_agent_name,
             provider_agent.agent_name AS provider_agent_name
        FROM bounties b
-       LEFT JOIN agents creator_agent
-         ON LOWER(creator_agent.turnkey_address) = LOWER(b.creator_wallet)
-        AND LOWER(creator_agent.owner_wallet) = LOWER($1)
+       LEFT JOIN LATERAL (
+         SELECT a.id, a.agent_name
+           FROM agents a
+          WHERE LOWER(a.turnkey_address) = LOWER(b.creator_wallet)
+            AND LOWER(a.owner_wallet) = LOWER($1)
+          ORDER BY a.created_at ASC, a.id ASC
+          LIMIT 1
+       ) creator_agent ON TRUE
        LEFT JOIN agents provider_agent
          ON provider_agent.id = COALESCE(b.provider_agent_id, b.assigned_agent_id)
-      WHERE b.id = $2
+      WHERE ($2::text IS NULL OR b.id = $2)
         AND (
           LOWER(b.creator_wallet) = LOWER($1)
           OR creator_agent.id IS NOT NULL
-        )`,
+        )
+      ORDER BY b.created_at DESC`,
     [humanWallet, bountyId]
-  )).rows[0] || null;
+  )).rows;
+}
+
+async function getHumanManagedBounty(humanWallet, bountyId) {
+  return (await getHumanManagedBounties(humanWallet, bountyId))[0] || null;
 }
 
 // Authenticated creators receive the complete submission package for review,
@@ -5555,24 +5565,8 @@ async function refundUnclaimedCustodialBounty({
 // bounties transfer funds before becoming visible; proposal bounties fund only after
 // the creator selects a proposal and therefore knows the final price.
 app.get('/api/human/bounties', requireHuman, async (req, res) => {
-  const wallet = req.human.wallet_address;
-  const { rows } = await pool.query(
-    `SELECT b.*,
-            creator_agent.id AS creator_agent_id,
-            creator_agent.agent_name AS creator_agent_name,
-            provider_agent.agent_name AS provider_agent_name
-       FROM bounties b
-       LEFT JOIN agents creator_agent
-         ON LOWER(creator_agent.turnkey_address) = LOWER(b.creator_wallet)
-        AND LOWER(creator_agent.owner_wallet) = LOWER($1)
-       LEFT JOIN agents provider_agent
-         ON provider_agent.id = COALESCE(b.provider_agent_id, b.assigned_agent_id)
-      WHERE LOWER(b.creator_wallet) = LOWER($1)
-         OR creator_agent.id IS NOT NULL
-      ORDER BY b.created_at DESC`,
-    [wallet]
-  );
-  res.json({ bounties: rows });
+  const bounties = await getHumanManagedBounties(req.human.wallet_address);
+  res.json({ bounties });
 });
 
 app.post('/api/human/bounties', requireHuman, async (req, res) => {
