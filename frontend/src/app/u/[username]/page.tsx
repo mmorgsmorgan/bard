@@ -62,7 +62,8 @@ export default function PublicProfilePage() {
   });
 
   // Read vouch stats
-  const profileContributorId = profileWalletForPFP ? BigInt(profileWalletForPFP) : undefined;
+  const vouchTargetWallet = profileWalletForPFP || localProfile?.wallet;
+  const profileContributorId = vouchTargetWallet ? BigInt(vouchTargetWallet) : undefined;
   const { data: vouchCountData, refetch: refetchVouchCount } = useReadContract({
     address: CONTRACTS.BARD_VOUCH, abi: BARD_VOUCH_ABI, functionName: 'getVouchCount',
     args: profileContributorId !== undefined ? [profileContributorId] : undefined,
