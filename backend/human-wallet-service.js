@@ -452,6 +452,31 @@ async function readContributorVouches(contributorId) {
   );
 }
 
+export function summarizeContributorVouches(vouches) {
+  const activeVouches = vouches.filter((vouch) => Boolean(vouch.active) && !vouch.withdrawn);
+  const activeStaked = activeVouches.reduce(
+    (total, vouch) => total + BigInt(vouch.stakedAmount),
+    0n,
+  );
+  return {
+    count: vouches.length,
+    activeCount: activeVouches.length,
+    activeStakedUsdc: formatUnits(activeStaked, 6),
+  };
+}
+
+export async function getContributorVouchSummary(contributorWallet) {
+  if (!validAddress(contributorWallet)) {
+    throw Object.assign(new Error('Valid contributor wallet required'), { status: 400 });
+  }
+  const contributorId = BigInt(contributorWallet);
+  const vouches = await readContributorVouches(contributorId);
+  return {
+    contributorId: contributorId.toString(),
+    ...summarizeContributorVouches(vouches),
+  };
+}
+
 export function normalizeHumanVouchRows(address, grouped, now = Math.floor(Date.now() / 1000)) {
   const normalizedAddress = address.toLowerCase();
   const vouches = grouped.flatMap(({ contributorId, vouches: rows }) => (

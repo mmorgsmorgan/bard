@@ -36,6 +36,7 @@ import {
   createHumanVouch,
   createOrUpdateHumanProfile,
   fundManagedEscrow,
+  getContributorVouchSummary,
   humanWalletBalance,
   listHumanVouches,
   prepareHumanProfileTransaction,
@@ -1250,6 +1251,15 @@ app.get('/api/profiles/username/:username', async (req, res) => {
 app.get('/api/profiles', async (req, res) => {
   const rows = await stmts.getAllProfiles();
   res.json({ profiles: rows.map(profileToJSON) });
+});
+
+app.get('/api/vouches/contributor/:wallet', async (req, res) => {
+  try {
+    const summary = await getContributorVouchSummary(req.params.wallet);
+    res.json({ summary });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════

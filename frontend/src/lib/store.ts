@@ -49,6 +49,13 @@ export interface StoredProfile {
   createdAt: string;
 }
 
+export interface ContributorVouchSummary {
+  contributorId: string;
+  count: number;
+  activeCount: number;
+  activeStakedUsdc: string;
+}
+
 export interface StoredProof {
   id: string;
   title: string;
@@ -403,6 +410,18 @@ export async function fetchProfileByUsername(username: string): Promise<StoredPr
     }
     return data.profile || null;
   } catch { return _profileCache[`u:${username}`] || null; }
+}
+
+export async function fetchContributorVouchSummary(
+  wallet: string,
+): Promise<ContributorVouchSummary | null> {
+  try {
+    const res = await fetch(`${API}/api/vouches/contributor/${wallet}`);
+    const data = await res.json();
+    return res.ok ? data.summary || null : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchAllProfiles(): Promise<StoredProfile[]> {

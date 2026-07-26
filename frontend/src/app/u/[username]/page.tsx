@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import { useReadContract } from 'wagmi';
 import { CONTRACTS, VOUCH_TIERS } from '@/lib/config';
 import { BARD_PROFILE_ABI, BARD_VOUCH_ABI, BARD_AGENT_ABI } from '@/lib/abi';
-import { fetchProfileByUsername, fetchProofsByWallet, fetchPortfolioByWallet, fetchAgentsByOwner, type StoredProfile, type StoredProof, type PortfolioItem, type Agent } from '@/lib/store';
+import { fetchProfileByUsername, fetchContributorVouchSummary, fetchProofsByWallet, fetchPortfolioByWallet, fetchAgentsByOwner, type StoredProfile, type StoredProof, type PortfolioItem, type Agent, type ContributorVouchSummary } from '@/lib/store';
 import Link from 'next/link';
 import { GitHubIcon, DiscordIcon, FarcasterIcon, XIcon, LinkedInIcon } from '@/components/SocialIcons';
 import { Headline } from '@/components/Editorial';
@@ -28,6 +28,7 @@ export default function PublicProfilePage() {
   const [proofs, setProofs] = useState<StoredProof[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
   const [linkedAgents, setLinkedAgents] = useState<Agent[]>([]);
+  const [publicVouchSummary, setPublicVouchSummary] = useState<ContributorVouchSummary | null>(null);
   const [expandedItem, setExpandedItem] = useState<PortfolioItem | null>(null);
   const [showVouchModal, setShowVouchModal] = useState(false);
   const [showVouchersModal, setShowVouchersModal] = useState(false);
@@ -74,8 +75,10 @@ export default function PublicProfilePage() {
     args: profileContributorId !== undefined ? [profileContributorId] : undefined,
     query: { enabled: profileContributorId !== undefined },
   });
-  const vouchCount = vouchCountData ? Number(vouchCountData) : 0;
-  const totalStaked = totalStakedData ? Number(totalStakedData) / 1_000_000 : 0;
+  const vouchCount = publicVouchSummary?.count ?? (vouchCountData ? Number(vouchCountData) : 0);
+  const totalStaked = publicVouchSummary
+    ? Number(publicVouchSummary.activeStakedUsdc)
+    : (totalStakedData ? Number(totalStakedData) / 1_000_000 : 0);
 
   useEffect(() => {
     fetchProfileByUsername(username).then(p => {
@@ -87,6 +90,11 @@ export default function PublicProfilePage() {
       setLoaded(true);
     });
   }, [username]);
+
+  useEffect(() => {
+    if (!vouchTargetWallet) return;
+    fetchContributorVouchSummary(vouchTargetWallet).then(setPublicVouchSummary);
+  }, [vouchTargetWallet]);
 
   // Fetch linked agents when wallet is known
   useEffect(() => {
@@ -196,7 +204,12 @@ export default function PublicProfilePage() {
       setPendingVouchTxHash('');
       setVouchStatus('');
       setVouchStep('done');
-      await Promise.all([refetchVouchCount(), refetchTotalStaked()]);
+      const [, , summary] = await Promise.all([
+        refetchVouchCount(),
+        refetchTotalStaked(),
+        vouchTargetWallet ? fetchContributorVouchSummary(vouchTargetWallet) : null,
+      ]);
+      if (summary) setPublicVouchSummary(summary);
     } catch (cause) {
       setVouchStep('error');
       setVouchStatus('');
