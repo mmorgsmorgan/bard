@@ -8,10 +8,23 @@ import { useReadContract } from 'wagmi';
 import { formatUnits } from 'viem';
 import { CONTRACTS } from '@/lib/config';
 import { BARD_PROFILE_ABI } from '@/lib/abi';
-import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, fetchNotificationsByWallet } from '@/lib/store';
+import {
+  fetchHumanVouches,
+  fetchProfileByWallet,
+  fetchProofsByWallet,
+  fetchPortfolioByWallet,
+  fetchNotificationsByWallet,
+} from '@/lib/store';
 import { PageHeader, Em } from '@/components/Editorial';
 import { useBardAccount } from '@/components/BardAccountProvider';
-import type { StoredProfile, StoredProof, PortfolioItem, Notification } from '@/lib/store';
+import type {
+  StoredProfile,
+  StoredProof,
+  PortfolioItem,
+  Notification,
+  HumanVouch,
+  HumanVouchSummary,
+} from '@/lib/store';
 
 type WalletBalance = {
   address: string;
@@ -20,6 +33,8 @@ type WalletBalance = {
   nativeGasBalanceWei: string;
   explorer: string;
 };
+
+const VOUCH_TIER_NAMES = ['Micro', 'Standard', 'Endorsed', 'Founder'];
 
 export default function DashboardPage() {
   const {
@@ -30,12 +45,24 @@ export default function DashboardPage() {
     login,
     refreshAccount,
     authFetch,
+    sendTransaction,
   } = useBardAccount();
   const [profile, setProfile] = useState<StoredProfile | null>(null);
   const [proofs, setProofs] = useState<StoredProof[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
+  const [vouches, setVouches] = useState<HumanVouch[]>([]);
+  const [vouchSummary, setVouchSummary] = useState<HumanVouchSummary>({
+    count: 0,
+    activeCount: 0,
+    withdrawnCount: 0,
+    totalVouchedUsdc: '0',
+    activeStakedUsdc: '0',
+    withdrawableUsdc: '0',
+  });
+  const [withdrawingVouch, setWithdrawingVouch] = useState('');
+  const [vouchMessage, setVouchMessage] = useState('');
   const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(true);
   const [showKeyExport, setShowKeyExport] = useState(false);
@@ -93,18 +120,21 @@ export default function DashboardPage() {
       fetchProofsByWallet(address),
       fetchPortfolioByWallet(address),
       fetchNotificationsByWallet(address, authFetch),
+      fetchHumanVouches(authFetch),
       authFetch('/api/human/wallet').then(async (response) => {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || 'Could not load wallet');
         return data as WalletBalance;
       }),
     ])
-      .then(([p, pr, po, n, wallet]) => {
+      .then(([p, pr, po, n, vouchData, wallet]) => {
         if (cancelled) return;
         setProfile(p);
         setProofs(pr);
         setPortfolio(po);
         setNotifications(n);
+        setVouches(vouchData.vouches);
+        setVouchSummary(vouchData.summary);
         setWalletBalance(wallet);
       })
       .catch((cause) => {
@@ -241,6 +271,39 @@ export default function DashboardPage() {
     }
   }
 
+  async function handleWithdrawVouch(vouch: HumanVouch) {
+    const key = `${vouch.contributorId}:${vouch.vouchIndex}`;
+    setWithdrawingVouch(key);
+    setVouchMessage('');
+    try {
+      const path = `/api/human/vouches/${vouch.contributorId}/${vouch.vouchIndex}/withdraw`;
+      let response = await authFetch(path, { method: 'POST' });
+      let data = await response.json() as {
+        error?: string;
+        signatureRequired?: boolean;
+        transaction?: Parameters<typeof sendTransaction>[0];
+      };
+      if (response.status === 202 && data.signatureRequired && data.transaction) {
+        const txHash = await sendTransaction(data.transaction);
+        response = await authFetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ txHash }),
+        });
+        data = await response.json();
+      }
+      if (!response.ok) throw new Error(data.error || 'Could not withdraw vouch stake');
+      const refreshed = await fetchHumanVouches(authFetch);
+      setVouches(refreshed.vouches);
+      setVouchSummary(refreshed.summary);
+      setVouchMessage(`${Number(vouch.amountUsdc).toFixed(2)} USDC returned to your wallet.`);
+    } catch (cause) {
+      setVouchMessage(cause instanceof Error ? cause.message : 'Could not withdraw vouch stake');
+    } finally {
+      setWithdrawingVouch('');
+    }
+  }
+
   const validatedProofs = proofs.filter((p) => p.status === 'validated').length;
   const trustScore = Math.min(100, validatedProofs * 15 + proofs.length * 5 + portfolio.length * 3);
   const unread = notifications.filter((n) => !n.read).length;
@@ -303,11 +366,17 @@ export default function DashboardPage() {
       )}
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-px mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-px mb-6">
         {[
           { label: 'Trust Score', value: trustScore, color: trustScore >= 40 ? 'text-[#ff8512]' : 'text-surface-400' },
           { label: 'Proofs', value: proofs.length, sub: validatedProofs > 0 ? `${validatedProofs} validated` : undefined },
           { label: 'Portfolio', value: portfolio.length },
+          {
+            label: 'Vouches Staked',
+            value: Number(vouchSummary.activeStakedUsdc).toFixed(2),
+            sub: `${vouchSummary.activeCount} active`,
+            color: Number(vouchSummary.activeStakedUsdc) > 0 ? 'text-[#ff8512]' : 'text-surface-500',
+          },
           { label: 'Unread', value: unread, color: unread > 0 ? 'text-[#ff8512]' : 'text-surface-500' },
         ].map(({ label, value, color, sub }) => (
           <div key={label} className="bg-[#0c0c0c] border border-[rgba(255,255,255,0.04)] p-5 text-center">
@@ -434,6 +503,119 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Vouches Given */}
+      <div className="bg-[#0c0c0c] border border-[rgba(255,255,255,0.04)] p-5 mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-5">
+          <div>
+            <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase">Your Vouches</div>
+            <p className="font-mono text-[10px] text-surface-600 mt-1">
+              Stakes remain yours and can be withdrawn after their 30-day lock expires.
+            </p>
+          </div>
+          <div className="grid grid-cols-3 gap-px bg-[rgba(255,255,255,0.04)] min-w-[280px]">
+            <div className="bg-[#080808] p-3 text-center">
+              <div className="font-mono text-sm text-white">{Number(vouchSummary.totalVouchedUsdc).toFixed(2)}</div>
+              <div className="font-mono text-[8px] text-surface-600 uppercase mt-1">Total Vouched</div>
+            </div>
+            <div className="bg-[#080808] p-3 text-center">
+              <div className="font-mono text-sm text-[#ff8512]">{Number(vouchSummary.activeStakedUsdc).toFixed(2)}</div>
+              <div className="font-mono text-[8px] text-surface-600 uppercase mt-1">Still Staked</div>
+            </div>
+            <div className="bg-[#080808] p-3 text-center">
+              <div className="font-mono text-sm text-emerald-400">{Number(vouchSummary.withdrawableUsdc).toFixed(2)}</div>
+              <div className="font-mono text-[8px] text-surface-600 uppercase mt-1">Ready</div>
+            </div>
+          </div>
+        </div>
+
+        {vouchMessage && (
+          <div className="mb-4 border border-[rgba(255,133,18,0.25)] bg-[rgba(255,133,18,0.05)] p-3 font-mono text-xs text-surface-300">
+            {vouchMessage}
+          </div>
+        )}
+
+        {vouches.length === 0 ? (
+          <div className="border border-[rgba(255,255,255,0.04)] bg-[#080808] p-8 text-center font-mono text-xs text-surface-600">
+            You have not staked any vouches yet.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {vouches.map((vouch) => {
+              const key = `${vouch.contributorId}:${vouch.vouchIndex}`;
+              const targetLabel = vouch.contributorName
+                || `${vouch.contributorWallet.slice(0, 8)}...${vouch.contributorWallet.slice(-6)}`;
+              const targetHref = vouch.contributorAgentId
+                ? `/agents/${vouch.contributorAgentId}`
+                : vouch.contributorUsername
+                  ? `/u/${vouch.contributorUsername}`
+                  : null;
+              const unlockDate = new Date(vouch.lockExpiry * 1000);
+              return (
+                <div
+                  key={key}
+                  className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_150px_220px] gap-4 border border-[rgba(255,255,255,0.04)] bg-[#080808] p-4"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {targetHref ? (
+                        <Link href={targetHref} className="font-mono text-sm text-white hover:text-[#ff8512]">
+                          {targetLabel}
+                        </Link>
+                      ) : (
+                        <span className="font-mono text-sm text-white">{targetLabel}</span>
+                      )}
+                      <span className="font-mono text-[9px] uppercase text-surface-500">
+                        {VOUCH_TIER_NAMES[vouch.tier] || `Tier ${vouch.tier}`}
+                      </span>
+                      <span className={`font-mono text-[9px] uppercase ${
+                        vouch.withdrawn
+                          ? 'text-surface-600'
+                          : vouch.canWithdraw
+                            ? 'text-emerald-400'
+                            : 'text-amber-400'
+                      }`}>
+                        {vouch.withdrawn ? 'Withdrawn' : vouch.canWithdraw ? 'Ready to withdraw' : 'Locked'}
+                      </span>
+                    </div>
+                    <p className="font-mono text-[10px] text-surface-500 mt-2 line-clamp-2">
+                      {vouch.statement}
+                    </p>
+                    <div className="font-mono text-[9px] text-surface-600 mt-2">
+                      {vouch.ecosystem} · Score {vouch.score}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="font-mono text-lg text-[#ff8512]">{Number(vouch.amountUsdc).toFixed(2)} USDC</div>
+                    <div className="font-mono text-[9px] text-surface-600 uppercase">Your stake</div>
+                  </div>
+                  <div className="md:text-right">
+                    {vouch.withdrawn ? (
+                      <div className="font-mono text-[10px] text-surface-500">Funds returned</div>
+                    ) : vouch.canWithdraw ? (
+                      <button
+                        type="button"
+                        onClick={() => handleWithdrawVouch(vouch)}
+                        disabled={withdrawingVouch === key}
+                        className="btn-primary text-xs px-4 py-2 disabled:opacity-40"
+                      >
+                        {withdrawingVouch === key ? 'Withdrawing...' : `Withdraw ${Number(vouch.amountUsdc).toFixed(2)} USDC`}
+                      </button>
+                    ) : (
+                      <>
+                        <div className="font-mono text-[9px] text-surface-600 uppercase">Unlocks</div>
+                        <div className="font-mono text-[10px] text-surface-300 mt-1">
+                          {unlockDate.toLocaleString()}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Quick Actions */}

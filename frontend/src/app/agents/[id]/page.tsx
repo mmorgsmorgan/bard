@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import { useReadContract } from 'wagmi';
+import { formatUnits } from 'viem';
 import {
   fetchAgentById, fetchContributionsByAgent, endorseContribution,
   fetchAgentsByOwner, agentVerifyContribution, fetchVerificationStats,
@@ -13,6 +15,8 @@ import { Headline } from '@/components/Editorial';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import { useAgentToken } from '@/lib/useAgentToken';
 import { VouchAction } from '@/components/VouchAction';
+import { CONTRACTS } from '@/lib/config';
+import { BARD_VOUCH_ABI } from '@/lib/abi';
 
 const CONTRIBUTION_TYPES: Record<string, { label: string; color: string }> = {
   research: { label: 'Research', color: 'text-purple-400 border-purple-500/20' },
@@ -56,6 +60,21 @@ export default function AgentDetailPage() {
   const [workStats, setWorkStats] = useState<any>(null);
   const [verifStats, setVerifStats] = useState<VerificationStats | null>(null);
   const [myAgents, setMyAgents] = useState<Agent[]>([]);
+  const agentContributorId = agent?.turnkeyAddress ? BigInt(agent.turnkeyAddress) : undefined;
+  const { data: activeVouchCount } = useReadContract({
+    address: CONTRACTS.BARD_VOUCH,
+    abi: BARD_VOUCH_ABI,
+    functionName: 'getActiveVouchCount',
+    args: agentContributorId !== undefined ? [agentContributorId] : undefined,
+    query: { enabled: agentContributorId !== undefined },
+  });
+  const { data: agentVouchStake } = useReadContract({
+    address: CONTRACTS.BARD_VOUCH,
+    abi: BARD_VOUCH_ABI,
+    functionName: 'totalStakedForContributor',
+    args: agentContributorId !== undefined ? [agentContributorId] : undefined,
+    query: { enabled: agentContributorId !== undefined },
+  });
 
   useEffect(() => {
     if (!agentId) return;
@@ -288,6 +307,13 @@ export default function AgentDetailPage() {
                 <div className="w-2 h-2 bg-cyan-500" />
                 <span className="font-mono text-xs text-cyan-400">Provisioned</span>
                 <span className="font-mono text-[10px] text-surface-400 break-all">{agent.turnkeyAddress}</span>
+              </div>
+              <div className="font-mono text-[10px] text-surface-500 mt-2">
+                {Number(activeVouchCount || 0)} active vouch{Number(activeVouchCount || 0) === 1 ? '' : 'es'}
+                {' · '}
+                <span className="text-[#ff8512]">
+                  {formatUnits(agentVouchStake || BigInt(0), 6)} USDC staked
+                </span>
               </div>
             </div>
             <VouchAction

@@ -1,4 +1,4 @@
-import { encodeFunctionData, parseUnits } from 'viem';
+import { encodeFunctionData, formatUnits, parseUnits } from 'viem';
 import * as onchainEscrow from './escrow-service.js';
 import {
   BARD_PROFILE_ADDRESS,
@@ -6,6 +6,7 @@ import {
   buildCreateProfileCalldata,
   buildUpdateProfileCalldata,
   buildVouchCalldata,
+  buildWithdrawStakeCalldata,
 } from './bard-writes-client.js';
 
 const USDC_ADDRESS =
@@ -43,6 +44,41 @@ const BARD_PROFILE_READ_ABI = [{
   inputs: [{ name: 'wallet', type: 'address' }],
   outputs: [{ name: '', type: 'bool' }],
 }];
+
+const BARD_VOUCH_READ_ABI = [
+  {
+    type: 'function',
+    name: 'getVoucherContributors',
+    stateMutability: 'view',
+    inputs: [{ name: 'voucher', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256[]' }],
+  },
+  {
+    type: 'function',
+    name: 'getVouches',
+    stateMutability: 'view',
+    inputs: [{ name: 'contributorId', type: 'uint256' }],
+    outputs: [{
+      name: '',
+      type: 'tuple[]',
+      components: [
+        { name: 'voucher', type: 'address' },
+        { name: 'contributorId', type: 'uint256' },
+        { name: 'stakedAmount', type: 'uint256' },
+        { name: 'influence', type: 'uint256' },
+        { name: 'tier', type: 'uint8' },
+        { name: 'statement', type: 'string' },
+        { name: 'ecosystem', type: 'string' },
+        { name: 'evidenceURI', type: 'string' },
+        { name: 'score', type: 'int128' },
+        { name: 'timestamp', type: 'uint256' },
+        { name: 'lockExpiry', type: 'uint256' },
+        { name: 'active', type: 'bool' },
+        { name: 'withdrawn', type: 'bool' },
+      ],
+    }],
+  },
+];
 
 const BARD_PROOF_ABI = [{
   type: 'function',
@@ -396,4 +432,103 @@ export async function createAgentVouch(address, input, agentName = 'agent') {
     `agent-vouch:${agentName}`
   );
   return { approveTxHash: approve.txHash, txHash: vouch.txHash };
+}
+
+export function contributorIdToWallet(contributorId) {
+  const hex = BigInt(contributorId).toString(16).padStart(40, '0');
+  return `0x${hex.slice(-40)}`;
+}
+
+async function readContributorVouches(contributorId) {
+  const { publicClient } = await import('./erc8183-client.js');
+  return onchainEscrow.withArcRpcRetry(
+    () => publicClient.readContract({
+      address: BARD_VOUCH_ADDRESS,
+      abi: BARD_VOUCH_READ_ABI,
+      functionName: 'getVouches',
+      args: [BigInt(contributorId)],
+    }),
+    { label: `vouches for contributor ${contributorId}` },
+  );
+}
+
+export function normalizeHumanVouchRows(address, grouped, now = Math.floor(Date.now() / 1000)) {
+  const normalizedAddress = address.toLowerCase();
+  const vouches = grouped.flatMap(({ contributorId, vouches: rows }) => (
+    rows.map((vouch, vouchIndex) => ({ vouch, vouchIndex }))
+      .filter(({ vouch }) => vouch.voucher.toLowerCase() === normalizedAddress)
+      .map(({ vouch, vouchIndex }) => {
+        const lockExpiry = Number(vouch.lockExpiry);
+        const active = Boolean(vouch.active) && !vouch.withdrawn;
+        return {
+          contributorId,
+          contributorWallet: contributorIdToWallet(contributorId),
+          vouchIndex,
+          voucher: vouch.voucher,
+          amountUsdc: formatUnits(vouch.stakedAmount, 6),
+          influence: vouch.influence.toString(),
+          tier: Number(vouch.tier),
+          statement: vouch.statement,
+          ecosystem: vouch.ecosystem,
+          evidenceURI: vouch.evidenceURI,
+          score: Number(vouch.score),
+          timestamp: Number(vouch.timestamp),
+          lockExpiry,
+          active,
+          withdrawn: Boolean(vouch.withdrawn),
+          canWithdraw: active && now >= lockExpiry,
+        };
+      })
+  ));
+  return vouches.sort((a, b) => b.timestamp - a.timestamp);
+}
+
+export async function listHumanVouches(address) {
+  if (!validAddress(address)) {
+    throw Object.assign(new Error('Valid voucher wallet required'), { status: 400 });
+  }
+  const { publicClient } = await import('./erc8183-client.js');
+  const contributorIds = await onchainEscrow.withArcRpcRetry(
+    () => publicClient.readContract({
+      address: BARD_VOUCH_ADDRESS,
+      abi: BARD_VOUCH_READ_ABI,
+      functionName: 'getVoucherContributors',
+      args: [address],
+    }),
+    { label: `vouch contributors for ${address}` },
+  );
+  const uniqueIds = [...new Set(contributorIds.map((id) => id.toString()))];
+  const grouped = await Promise.all(uniqueIds.map(async (contributorId) => ({
+    contributorId,
+    vouches: await readContributorVouches(contributorId),
+  })));
+  return normalizeHumanVouchRows(address, grouped);
+}
+
+export async function prepareHumanVouchWithdrawal(address, contributorId, vouchIndex) {
+  const rows = await readContributorVouches(contributorId);
+  const index = Number(vouchIndex);
+  const vouch = Number.isInteger(index) && index >= 0 ? rows[index] : null;
+  if (!vouch) {
+    throw Object.assign(new Error('Vouch not found'), { status: 404 });
+  }
+  if (vouch.voucher.toLowerCase() !== address.toLowerCase()) {
+    throw Object.assign(new Error('Only the voucher can withdraw this stake'), { status: 403 });
+  }
+  if (vouch.withdrawn || !vouch.active) {
+    throw Object.assign(new Error('This vouch stake has already been withdrawn'), { status: 409 });
+  }
+  const lockExpiry = Number(vouch.lockExpiry);
+  if (Math.floor(Date.now() / 1000) < lockExpiry) {
+    throw Object.assign(new Error('This vouch stake is still locked'), {
+      status: 409,
+      lockExpiry,
+    });
+  }
+  return buildWithdrawStakeCalldata({ contributorId, vouchIndex: index });
+}
+
+export async function withdrawHumanVouch(address, contributorId, vouchIndex) {
+  const transaction = await prepareHumanVouchWithdrawal(address, contributorId, vouchIndex);
+  return onchainEscrow.sendAs(address, transaction, 'human-vouch-withdraw');
 }

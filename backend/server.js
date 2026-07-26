@@ -37,12 +37,15 @@ import {
   createOrUpdateHumanProfile,
   fundManagedEscrow,
   humanWalletBalance,
+  listHumanVouches,
   prepareHumanProfileTransaction,
   prepareHumanUsdcTransfer,
+  prepareHumanVouchWithdrawal,
   prepareHumanVouchTransactions,
   sendHumanUsdc,
   submitHumanProof,
   validateExternalTransactionDetails,
+  withdrawHumanVouch,
 } from './human-wallet-service.js';
 import * as onchainEscrow from './escrow-service.js';
 import { computeReputationScore } from './reputation-score.js';
@@ -1730,6 +1733,103 @@ app.post('/api/human/vouches', requireHuman, async (req, res) => {
     });
   } catch (error) {
     res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
+  }
+});
+
+app.get('/api/human/vouches', requireHuman, async (req, res) => {
+  try {
+    const vouches = await listHumanVouches(req.human.wallet_address);
+    const enriched = await Promise.all(vouches.map(async (vouch) => {
+      const [profile, agentResult] = await Promise.all([
+        stmts.getProfileByWallet(vouch.contributorWallet),
+        pool.query(
+          `SELECT id, agent_name
+             FROM agents
+            WHERE LOWER(turnkey_address) = LOWER($1)
+               OR LOWER(owner_wallet) = LOWER($1)
+            ORDER BY created_at ASC
+            LIMIT 1`,
+          [vouch.contributorWallet]
+        ),
+      ]);
+      const agent = agentResult.rows[0];
+      return {
+        ...vouch,
+        contributorName: agent?.agent_name || profile?.display_name || profile?.username || null,
+        contributorUsername: profile?.username || null,
+        contributorAgentId: agent?.id || null,
+      };
+    }));
+    const active = enriched.filter((vouch) => vouch.active);
+    const withdrawable = active.filter((vouch) => vouch.canWithdraw);
+    const sum = (rows) => rows.reduce((total, vouch) => total + Number(vouch.amountUsdc), 0);
+    res.json({
+      vouches: enriched,
+      summary: {
+        count: enriched.length,
+        activeCount: active.length,
+        withdrawnCount: enriched.filter((vouch) => vouch.withdrawn).length,
+        totalVouchedUsdc: sum(enriched).toFixed(6),
+        activeStakedUsdc: sum(active).toFixed(6),
+        withdrawableUsdc: sum(withdrawable).toFixed(6),
+      },
+    });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message });
+  }
+});
+
+app.post('/api/human/vouches/:contributorId/:vouchIndex/withdraw', requireHuman, async (req, res) => {
+  try {
+    const { contributorId, vouchIndex } = req.params;
+    const transaction = await prepareHumanVouchWithdrawal(
+      req.human.wallet_address,
+      contributorId,
+      vouchIndex
+    );
+    let txHash;
+    if (humanUsesExternalWallet(req)) {
+      const submittedTxHash = String(req.body?.txHash || '');
+      if (!submittedTxHash) {
+        return res.status(202).json({
+          signatureRequired: true,
+          walletType: 'external',
+          transaction: externalTransactionPayload(transaction),
+        });
+      }
+      const verification = await verifyExactExternalTransaction(
+        submittedTxHash,
+        req.human.wallet_address,
+        transaction.to,
+        transaction.data
+      );
+      if (!verification.valid) {
+        return res.status(409).json({
+          error: verification.error,
+          txHash: submittedTxHash,
+        });
+      }
+      await claimHumanTransaction(req, submittedTxHash.toLowerCase(), 'vouch_withdraw');
+      txHash = submittedTxHash.toLowerCase();
+    } else {
+      const result = await withdrawHumanVouch(
+        req.human.wallet_address,
+        contributorId,
+        vouchIndex
+      );
+      txHash = result.txHash;
+    }
+    res.json({
+      success: true,
+      txHash,
+      explorer: `https://testnet.arcscan.app/tx/${txHash}`,
+    });
+  } catch (error) {
+    res.status(error.status || 502).json({
+      error: error.message,
+      lockExpiry: error.lockExpiry || null,
+      txHash: error.txHash || null,
+    });
   }
 });
 

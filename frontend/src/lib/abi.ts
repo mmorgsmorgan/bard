@@ -188,6 +188,13 @@ export const BARD_VOUCH_ABI = [
     outputs: [{ name: '', type: 'uint256' }],
   },
   {
+    name: 'getActiveVouchCount',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'contributorId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
     name: 'getTotalInfluence',
     type: 'function',
     stateMutability: 'view',

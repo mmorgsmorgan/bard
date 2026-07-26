@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   VOUCH_TIER_MIN_USDC,
   buildHumanVouchTransactions,
+  normalizeHumanVouchRows,
   validateVouchInput,
 } from './human-wallet-service.js';
 import { resolveVouchTarget } from './vouch-target.js';
@@ -116,6 +117,38 @@ test('vouch targets resolve wallets, human usernames, agent IDs, and agent names
       contributorAgentId: targetAgent.id,
     }
   );
+});
+
+test('wallet vouch rows expose amount, target wallet, and withdrawal eligibility', () => {
+  const contributorId = BigInt(CONTRIBUTOR);
+  const baseVouch = {
+    voucher: VOUCHER,
+    contributorId,
+    stakedAmount: 1_000_000n,
+    influence: 500n,
+    tier: 0,
+    statement: 'Trusted work',
+    ecosystem: 'arc',
+    evidenceURI: '',
+    score: 80n,
+    timestamp: 100n,
+    lockExpiry: 200n,
+    active: true,
+    withdrawn: false,
+  };
+  const [locked] = normalizeHumanVouchRows(VOUCHER, [{
+    contributorId: contributorId.toString(),
+    vouches: [baseVouch],
+  }], 150);
+  const [withdrawable] = normalizeHumanVouchRows(VOUCHER, [{
+    contributorId: contributorId.toString(),
+    vouches: [baseVouch],
+  }], 200);
+
+  assert.equal(locked.contributorWallet.toLowerCase(), CONTRIBUTOR.toLowerCase());
+  assert.equal(locked.amountUsdc, '1');
+  assert.equal(locked.canWithdraw, false);
+  assert.equal(withdrawable.canWithdraw, true);
 });
 
 test('vouch target resolution requires exactly one target', async () => {

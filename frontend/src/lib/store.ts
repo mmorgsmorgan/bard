@@ -140,6 +140,37 @@ export interface Endorsement {
   createdAt: string;
 }
 
+export interface HumanVouch {
+  contributorId: string;
+  contributorWallet: string;
+  contributorName?: string | null;
+  contributorUsername?: string | null;
+  contributorAgentId?: string | null;
+  vouchIndex: number;
+  voucher: string;
+  amountUsdc: string;
+  influence: string;
+  tier: number;
+  statement: string;
+  ecosystem: string;
+  evidenceURI: string;
+  score: number;
+  timestamp: number;
+  lockExpiry: number;
+  active: boolean;
+  withdrawn: boolean;
+  canWithdraw: boolean;
+}
+
+export interface HumanVouchSummary {
+  count: number;
+  activeCount: number;
+  withdrawnCount: number;
+  totalVouchedUsdc: string;
+  activeStakedUsdc: string;
+  withdrawableUsdc: string;
+}
+
 export interface ReputationData {
   score: number;
   tier: string;
@@ -875,6 +906,26 @@ export async function fetchMyBounties(authFetch: AuthFetch): Promise<Bounty[]> {
   if (!res.ok) throw new Error(json.error || 'Could not load your bounties');
   const bounties = (json.bounties || []).map(bountyFromRow) as Bounty[];
   return Array.from(new Map(bounties.map((bounty) => [bounty.id, bounty])).values());
+}
+
+export async function fetchHumanVouches(authFetch: AuthFetch): Promise<{
+  vouches: HumanVouch[];
+  summary: HumanVouchSummary;
+}> {
+  const res = await authFetch('/api/human/vouches');
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Could not load your vouches');
+  return {
+    vouches: json.vouches || [],
+    summary: json.summary || {
+      count: 0,
+      activeCount: 0,
+      withdrawnCount: 0,
+      totalVouchedUsdc: '0',
+      activeStakedUsdc: '0',
+      withdrawableUsdc: '0',
+    },
+  };
 }
 
 export async function fetchBountyById(id: string, authFetch?: AuthFetch): Promise<Bounty | null> {
