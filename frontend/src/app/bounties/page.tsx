@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import {
   fetchBounties, createHumanBounty, claimFundedBounty, cancelHumanBounty,
@@ -420,41 +421,41 @@ export default function BountiesPage() {
                         </select>
                       )}
                       {bounty.selectionMode === 'proposal' && bounty.status === 'proposal_open' && (
-                        <a href={`/bounties/${bounty.id}`}
+                        <Link href={`/bounties/${bounty.id}`}
                           className="font-mono text-[10px] px-2 py-1 border border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/10 transition-colors text-center">
                           {isCreator ? 'View Proposals' : 'Submit Proposal'}
-                        </a>
+                        </Link>
                       )}
                       {bounty.selectionMode === 'proposal' && bounty.status === 'proposal_selected' && (
-                        <a href={`/bounties/${bounty.id}`}
+                        <Link href={`/bounties/${bounty.id}`}
                           className="font-mono text-[10px] px-2 py-1 border border-amber-500/30 text-amber-400 hover:bg-amber-500/10 transition-colors text-center">
                             {isCreator ? `Fund ${bounty.amountUsdc} USDC` : 'View Selection'}
-                        </a>
+                        </Link>
                       )}
                       {bounty.selectionMode === 'proposal' && (bounty.status === 'assigned' || bounty.status === 'submitted') && (
-                        <a href={`/bounties/${bounty.id}`}
+                        <Link href={`/bounties/${bounty.id}`}
                           className="font-mono text-[10px] px-2 py-1 border border-[rgba(255,255,255,0.1)] text-surface-300 hover:bg-surface-500/10 transition-colors text-center">
                           {bounty.status === 'submitted' && isCreator ? 'Review Submission' : 'Open Thread'}
-                        </a>
+                        </Link>
                       )}
                       {bounty.selectionMode === 'first_come' && bounty.status === 'submitted' && (
-                        <a href={`/bounties/${bounty.id}`}
+                        <Link href={`/bounties/${bounty.id}`}
                           className={`font-mono text-[10px] px-2 py-1 border transition-colors text-center ${
                             isCreator
                               ? 'border-[#ff8512]/40 bg-[#ff8512]/10 text-[#ff8512] hover:bg-[#ff8512]/20'
                               : 'border-[rgba(255,255,255,0.1)] text-surface-300 hover:bg-surface-500/10'
                           }`}>
                           {isCreator ? 'Review Submission' : 'View Submission Status'}
-                        </a>
+                        </Link>
                       )}
                       {!(
                         (bounty.selectionMode === 'proposal' && ['proposal_open', 'proposal_selected', 'assigned', 'submitted'].includes(bounty.status))
                         || (bounty.selectionMode === 'first_come' && bounty.status === 'submitted')
                       ) && (
-                        <a href={`/bounties/${bounty.id}`}
+                        <Link href={`/bounties/${bounty.id}`}
                           className="font-mono text-[10px] px-2 py-1 border border-[rgba(255,255,255,0.1)] text-surface-300 hover:bg-surface-500/10 transition-colors text-center">
                           View Details
-                        </a>
+                        </Link>
                       )}
                       {(['open', 'proposal_open', 'proposal_selected'] as const).includes(bounty.status as 'open' | 'proposal_open' | 'proposal_selected') && isCreator && (
                         <button onClick={() => handleCancel(bounty.id)}

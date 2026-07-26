@@ -15,7 +15,12 @@ import { useReadContract } from 'wagmi';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import { CONTRACTS } from './config';
 import { BARD_PROFILE_ABI } from './abi';
-import { fetchProfileByWallet, getProfileByWallet } from './store';
+import {
+  fetchProfileByWallet,
+  getProfileByWallet,
+  hasRememberedProfile,
+  rememberProfileWallet,
+} from './store';
 
 export function useHasProfile() {
   const { address, isConnected } = useBardAccount();
@@ -31,12 +36,18 @@ export function useHasProfile() {
   });
   const hasOnChain =
     onChainProfile && Array.isArray(onChainProfile) && onChainProfile[5] === true;
+  const hasCachedProfile = Boolean(address && hasRememberedProfile(address));
 
   useEffect(() => {
     let cancelled = false;
     if (!isConnected || !address) {
       setBackendHasProfile(null);
       setBackendResolved(false);
+      return;
+    }
+    if (hasRememberedProfile(address)) {
+      setBackendHasProfile(true);
+      setBackendResolved(true);
       return;
     }
     setBackendResolved(false);
@@ -49,8 +60,12 @@ export function useHasProfile() {
     };
   }, [isConnected, address]);
 
-  const hasProfile = !!hasOnChain || backendHasProfile === true;
-  const resolved = isConnected ? !chainLoading && backendResolved : true;
+  useEffect(() => {
+    if (address && hasOnChain) rememberProfileWallet(address);
+  }, [address, hasOnChain]);
+
+  const hasProfile = hasCachedProfile || !!hasOnChain || backendHasProfile === true;
+  const resolved = isConnected ? hasProfile || (!chainLoading && backendResolved) : true;
 
   return { hasProfile, resolved, isConnected };
 }

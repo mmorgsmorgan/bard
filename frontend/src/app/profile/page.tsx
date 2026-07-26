@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useReadContract } from 'wagmi';
 import { PROFILE_TYPES, CONTRACTS, CONTRIBUTION_TYPES } from '@/lib/config';
 import { BARD_PROFILE_ABI, BARD_PFP_ABI, BARD_PROOF_ABI, BARD_VOUCH_ABI, IDENTITY_REGISTRY_ABI } from '@/lib/abi';
-import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, savePortfolioItem, deletePortfolioItem, type StoredProfile, type StoredProof, type PortfolioItem } from '@/lib/store';
+import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, savePortfolioItem, deletePortfolioItem, rememberProfileWallet, type StoredProfile, type StoredProof, type PortfolioItem } from '@/lib/store';
 import Link from 'next/link';
 import { BardLogo } from '@/components/BardLogo';
 import { AgentAuth } from '@/components/AgentAuth';
@@ -262,6 +262,7 @@ export default function ProfilePage() {
       if (!response.ok || !data.profile) {
         throw new Error(data.error || 'Profile registration failed');
       }
+      rememberProfileWallet(data.profile.wallet);
       setExistingProfile(data.profile);
       setProfileTxHash(data.txHash || '');
       setProfileExplorer(data.explorer || '');
@@ -468,7 +469,7 @@ export default function ProfilePage() {
             </div>
             <p className="font-mono text-[10px] text-surface-500 leading-relaxed">
               Agents register via MCP — no wallet needed. After creating your human profile, you can link your agent to it.
-              See the <a href="/agents" className="text-[#ff8512] hover:underline">Agents page</a> for setup instructions.
+              See the <Link href="/agents" className="text-[#ff8512] hover:underline">Agents page</Link> for setup instructions.
             </p>
           </div>
         </div>
@@ -535,6 +536,7 @@ export default function ProfilePage() {
         if (!response.ok || !data.profile) {
           throw new Error(data.error || 'Profile update failed');
         }
+        rememberProfileWallet(data.profile.wallet);
         setExistingProfile(data.profile);
         setSaveMsg('Settings saved');
         setTimeout(() => setSaveMsg(''), 3000);

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useMemo } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import {
   fetchBountyById,
@@ -324,7 +325,7 @@ export default function BountyDetailPage() {
     return (
       <div className="max-w-5xl mx-auto px-6 py-16">
         <div className="font-mono text-xs text-red-400">Bounty not found.</div>
-        <a href="/bounties" className="btn-primary text-xs mt-4 inline-block">← Back to Bounties</a>
+        <Link href="/bounties" className="btn-primary text-xs mt-4 inline-block">← Back to Bounties</Link>
       </div>
     );
   }
@@ -335,7 +336,7 @@ export default function BountyDetailPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-12">
-      <a href="/bounties" className="font-mono text-[10px] text-surface-500 hover:text-white">← All Bounties</a>
+      <Link href="/bounties" className="font-mono text-[10px] text-surface-500 hover:text-white">← All Bounties</Link>
 
       {/* Bounty header */}
       <div className="mt-4 mb-8">

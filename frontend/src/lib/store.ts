@@ -286,6 +286,31 @@ let _profileCache: Record<string, StoredProfile> = {};
 let _proofCache: Record<string, StoredProof[]> = {};
 let _portfolioCache: Record<string, PortfolioItem[]> = {};
 let _notifCache: Record<string, Notification[]> = {};
+const PROFILE_ACCESS_KEY = 'bard_profile_wallets';
+
+export function hasRememberedProfile(wallet: string): boolean {
+  if (typeof window === 'undefined' || !wallet) return false;
+  try {
+    const wallets = JSON.parse(window.localStorage.getItem(PROFILE_ACCESS_KEY) || '[]');
+    return Array.isArray(wallets) && wallets.includes(wallet.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+export function rememberProfileWallet(wallet: string): void {
+  if (typeof window === 'undefined' || !wallet) return;
+  try {
+    const normalized = wallet.toLowerCase();
+    const stored = JSON.parse(window.localStorage.getItem(PROFILE_ACCESS_KEY) || '[]');
+    const wallets = Array.isArray(stored) ? stored.filter((item) => typeof item === 'string') : [];
+    if (!wallets.includes(normalized)) {
+      window.localStorage.setItem(PROFILE_ACCESS_KEY, JSON.stringify([...wallets, normalized]));
+    }
+  } catch {
+    // Live profile checks remain available when browser storage is unavailable.
+  }
+}
 
 // ══════════════════════════════════════════════════════
 // ── Profiles ──
@@ -312,6 +337,7 @@ export async function saveProfileAsync(authFetch: AuthFetch, profile: StoredProf
     });
     _profileCache[profile.wallet.toLowerCase()] = profile;
     _profileCache[`u:${profile.username}`] = profile;
+    rememberProfileWallet(profile.wallet);
   } catch (e) { console.error('saveProfile error:', e); }
 }
 
@@ -319,6 +345,7 @@ export async function saveProfileAsync(authFetch: AuthFetch, profile: StoredProf
 export function saveProfile(authFetch: AuthFetch, profile: StoredProfile): void {
   _profileCache[profile.wallet.toLowerCase()] = profile;
   _profileCache[`u:${profile.username}`] = profile;
+  rememberProfileWallet(profile.wallet);
   saveProfileAsync(authFetch, profile);
 }
 
@@ -329,6 +356,7 @@ export async function fetchProfileByWallet(wallet: string): Promise<StoredProfil
     if (data.profile) {
       _profileCache[wallet.toLowerCase()] = data.profile;
       _profileCache[`u:${data.profile.username}`] = data.profile;
+      rememberProfileWallet(wallet);
     }
     return data.profile || null;
   } catch { return _profileCache[wallet.toLowerCase()] || null; }

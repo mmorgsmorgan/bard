@@ -7,7 +7,12 @@ import { BardLogo } from './BardLogo';
 import { useBardAccount } from './BardAccountProvider';
 import { CONTRACTS } from '@/lib/config';
 import { BARD_PROFILE_ABI } from '@/lib/abi';
-import { fetchProfileByWallet, getProfileByWallet } from '@/lib/store';
+import {
+  fetchProfileByWallet,
+  getProfileByWallet,
+  hasRememberedProfile,
+  rememberProfileWallet,
+} from '@/lib/store';
 
 /**
  * AuthGate — the landing page is the entry layer.
@@ -49,6 +54,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   const hasOnChainProfile =
     onChainProfile && Array.isArray(onChainProfile) && onChainProfile[5] === true;
+  const hasCachedProfile = Boolean(address && hasRememberedProfile(address));
 
   // Backend/off-chain profile check (covers profiles not yet reflected on-chain).
   useEffect(() => {
@@ -56,6 +62,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     if (!isConnected || !address) {
       setBackendHasProfile(null);
       setProfileResolved(false);
+      return;
+    }
+    if (hasRememberedProfile(address)) {
+      setBackendHasProfile(true);
+      setProfileResolved(true);
       return;
     }
     setProfileResolved(false);
@@ -74,9 +85,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     };
   }, [isConnected, address]);
 
-  const hasProfile = hasOnChainProfile || backendHasProfile === true;
+  useEffect(() => {
+    if (address && hasOnChainProfile) rememberProfileWallet(address);
+  }, [address, hasOnChainProfile]);
+
+  const hasProfile = hasCachedProfile || hasOnChainProfile || backendHasProfile === true;
   // "resolved" = both signals in: on-chain read done AND backend check done.
-  const resolved = !profileLoading && profileResolved;
+  const resolved = hasProfile || (!profileLoading && profileResolved);
 
   // Redirect connected-but-profileless users into creation, from any gated page.
   useEffect(() => {
