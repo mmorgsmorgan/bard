@@ -26,13 +26,28 @@ export function MessageThread({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const pendingMessagesRef = useRef<BountyMessage[]>([]);
   const { authFetch } = useBardAccount();
 
   const me = (currentWallet || '').toLowerCase();
 
   async function load() {
-    const { messages } = await fetchBountyMessages(bountyId, proposalId, authFetch);
-    setMessages(messages);
+    const { messages: loadedMessages } = await fetchBountyMessages(
+      bountyId,
+      proposalId,
+      authFetch
+    );
+    const unmatchedPending = pendingMessagesRef.current.filter((pending) =>
+      !loadedMessages.some((message) =>
+        message.fromWallet.toLowerCase() === pending.fromWallet.toLowerCase()
+        && message.message === pending.message
+        && Math.abs(
+          new Date(message.createdAt).getTime()
+          - new Date(pending.createdAt).getTime()
+        ) < 30_000
+      )
+    );
+    setMessages([...loadedMessages, ...unmatchedPending]);
   }
 
   useEffect(() => {
@@ -52,21 +67,46 @@ export function MessageThread({
   }, [messages.length]);
 
   async function handleSend() {
-    if (!draft.trim()) return;
+    const message = draft.trim();
+    if (!message) return;
     if (draft.length > 4000) {
       setError('Message must be 4000 characters or less');
       return;
     }
+    const optimisticMessage: BountyMessage = {
+      id: `pending-${Date.now()}`,
+      bountyId,
+      proposalId,
+      fromWallet: currentWallet,
+      toWallet: '',
+      message,
+      read: true,
+      createdAt: new Date().toISOString(),
+    };
+
     setSending(true);
     setError(null);
+    setDraft('');
+    pendingMessagesRef.current = [
+      ...pendingMessagesRef.current,
+      optimisticMessage,
+    ];
+    setMessages((current) => [...current, optimisticMessage]);
+
     const ok = await sendBountyMessage(authFetch, bountyId, {
       proposalId,
-      message: draft.trim(),
+      message,
     });
+    pendingMessagesRef.current = pendingMessagesRef.current.filter(
+      (pending) => pending.id !== optimisticMessage.id
+    );
     if (ok) {
-      setDraft('');
       await load();
     } else {
+      setMessages((current) =>
+        current.filter((item) => item.id !== optimisticMessage.id)
+      );
+      setDraft((current) => current || message);
       setError('Failed to send message');
     }
     setSending(false);

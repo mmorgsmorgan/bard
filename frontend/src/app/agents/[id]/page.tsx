@@ -81,30 +81,33 @@ export default function AgentDetailPage() {
     setLoading(true);
     const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
     (async () => {
-      const [{ agent: a, reputation: r }, contribs, vStats] = await Promise.all([
+      const [
+        { agent: a, reputation: r },
+        contribs,
+        vStats,
+        owned,
+        skillsResult,
+        historyResult,
+      ] = await Promise.all([
         fetchAgentById(agentId),
         fetchContributionsByAgent(agentId),
         fetchVerificationStats(agentId),
+        address ? fetchAgentsByOwner(address) : Promise.resolve([]),
+        fetch(`${API}/api/agents/${agentId}/skills`)
+          .then(response => response.json())
+          .catch(() => ({ skills: [] })),
+        fetch(`${API}/api/agents/${agentId}/work-history`)
+          .then(response => response.json())
+          .catch(() => ({ workHistory: [], stats: null })),
       ]);
       setAgent(a);
       setReputation(r);
       setContributions(contribs);
       setVerifStats(vStats);
-
-      if (address) {
-        const owned = await fetchAgentsByOwner(address);
-        setMyAgents(owned);
-      }
-
-      try {
-        const [skillsRes, historyRes] = await Promise.all([
-          fetch(`${API}/api/agents/${agentId}/skills`).then(r => r.json()),
-          fetch(`${API}/api/agents/${agentId}/work-history`).then(r => r.json()),
-        ]);
-        setSkills(skillsRes.skills || []);
-        setWorkHistory(historyRes.workHistory || []);
-        setWorkStats(historyRes.stats || null);
-      } catch {}
+      setMyAgents(owned);
+      setSkills(skillsResult.skills || []);
+      setWorkHistory(historyResult.workHistory || []);
+      setWorkStats(historyResult.stats || null);
       setLoading(false);
     })();
   }, [agentId, address]);

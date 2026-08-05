@@ -84,11 +84,6 @@ export default function ProfilePage() {
     args: address ? [address] : undefined, query: { enabled: !!address && onChainExists === true },
   });
 
-  const { data: usernameIsTaken } = useReadContract({
-    address: CONTRACTS.BARD_PROFILE, abi: BARD_PROFILE_ABI, functionName: 'usernameExists',
-    args: username.length >= 3 ? [username] : undefined, query: { enabled: username.length >= 3 },
-  });
-
   // PFP reads
   const { data: existingPFP } = useReadContract({
     address: CONTRACTS.BARD_PFP, abi: BARD_PFP_ABI, functionName: 'getPFP',
@@ -216,8 +211,6 @@ export default function ProfilePage() {
       });
     }
   }, [onChainProfile, address]);
-
-  const isValidUsername = (name: string) => /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(name) && !name.includes('--');
 
   const handleSubmit = async () => {
     if (!isConnected || !address) return;
@@ -420,7 +413,7 @@ export default function ProfilePage() {
   };
 
   // ── Not connected (or Agent entry) ──
-  if (status === 'connecting') {
+  if (status === 'connecting' && !isConnected) {
     return <div className="min-h-[80vh]" />;
   }
 
@@ -1119,15 +1112,13 @@ export default function ProfilePage() {
             ))}
           </div>
 
-          <span className="label-mono block mb-2">Username</span>
-          <div className="relative mb-2">
-            <input type="text" value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} placeholder="your-name" className="input-field font-mono" maxLength={32} />
-          </div>
-          {username && !isValidUsername(username) && <p className="text-red-400 font-mono text-xs mb-6">3-32 chars · lowercase · no double hyphens</p>}
-          {username && isValidUsername(username) && usernameIsTaken && <p className="text-red-400 font-mono text-xs mb-6">✗ taken on-chain</p>}
-          {username && isValidUsername(username) && usernameIsTaken === false && <p className="text-emerald-500 font-mono text-xs mb-6">✓ available</p>}
-
-          <button onClick={() => setStep(2)} disabled={!isValidUsername(username) || usernameIsTaken === true} className="btn-primary w-full mt-4 text-xs">Continue</button>
+          <UsernameStep
+            initialUsername={username}
+            onContinue={(selectedUsername) => {
+              setUsername(selectedUsername);
+              setStep(2);
+            }}
+          />
         </div>
       )}
 
@@ -1253,5 +1244,92 @@ export default function ProfilePage() {
         </div>
       )}
     </div>
+  );
+}
+
+function isValidUsername(name: string) {
+  return /^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(name)
+    && !name.includes('--');
+}
+
+function UsernameStep({
+  initialUsername,
+  onContinue,
+}: {
+  initialUsername: string;
+  onContinue: (username: string) => void;
+}) {
+  const [candidate, setCandidate] = useState(initialUsername);
+  const [debouncedCandidate, setDebouncedCandidate] = useState('');
+  const valid = isValidUsername(candidate);
+
+  useEffect(() => {
+    if (!valid) {
+      setDebouncedCandidate('');
+      return;
+    }
+    const timer = window.setTimeout(() => setDebouncedCandidate(candidate), 450);
+    return () => window.clearTimeout(timer);
+  }, [candidate, valid]);
+
+  const {
+    data: usernameIsTaken,
+    isFetching,
+    error,
+  } = useReadContract({
+    address: CONTRACTS.BARD_PROFILE,
+    abi: BARD_PROFILE_ABI,
+    functionName: 'usernameExists',
+    args: debouncedCandidate ? [debouncedCandidate] : undefined,
+    query: { enabled: Boolean(debouncedCandidate) },
+  });
+
+  const currentResult = debouncedCandidate === candidate && !isFetching;
+  const available = valid && currentResult && usernameIsTaken === false;
+  const checking = valid && !currentResult;
+
+  return (
+    <>
+      <span className="label-mono block mb-2">Username</span>
+      <div className="relative mb-2">
+        <input
+          type="text"
+          value={candidate}
+          onChange={(event) => setCandidate(event.target.value.toLowerCase())}
+          placeholder="your-name"
+          className="input-field font-mono"
+          maxLength={32}
+        />
+      </div>
+      {candidate && !valid && (
+        <p className="text-red-400 font-mono text-xs mb-6">
+          3-32 chars · lowercase · no double hyphens
+        </p>
+      )}
+      {checking && (
+        <p className="text-surface-500 font-mono text-xs mb-6">
+          Checking availability...
+        </p>
+      )}
+      {valid && currentResult && usernameIsTaken === true && (
+        <p className="text-red-400 font-mono text-xs mb-6">✗ taken on-chain</p>
+      )}
+      {available && (
+        <p className="text-emerald-500 font-mono text-xs mb-6">✓ available</p>
+      )}
+      {valid && currentResult && error && (
+        <p className="text-red-400 font-mono text-xs mb-6">
+          Could not check availability. Try again.
+        </p>
+      )}
+
+      <button
+        onClick={() => onContinue(candidate)}
+        disabled={!available}
+        className="btn-primary w-full mt-4 text-xs"
+      >
+        Continue
+      </button>
+    </>
   );
 }

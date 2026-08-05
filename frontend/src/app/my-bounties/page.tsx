@@ -66,7 +66,7 @@ export default function MyBountiesPage() {
   const activeCount = bounties.filter((bounty) => matchesFilter(bounty, 'active')).length;
   const completedCount = bounties.filter((bounty) => matchesFilter(bounty, 'completed')).length;
 
-  if (status === 'connecting') return <div className="min-h-[70vh]" />;
+  if (status === 'connecting' && !isConnected) return <div className="min-h-[70vh]" />;
 
   if (!isConnected) {
     return (

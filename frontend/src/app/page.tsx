@@ -9,7 +9,7 @@
  * (#ff8512) is kept as the single warm accent so it still reads as BARD.
  *
  * Motion reuses the dot-portfolio engine already added to this project:
- * Lenis smooth-scroll (mount <SmoothScroll> in layout), GSAP ScrollTrigger
+ * Landing-only Lenis smooth-scroll, GSAP ScrollTrigger
  * reveals via <Reveal>, and anime.js count-ups via <AnimatedStat>. The dark
  * Three.js field is intentionally NOT used here — wrong register for this look.
  *

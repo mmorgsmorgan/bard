@@ -1,36 +1,26 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
-import { fetchAllProfiles, type StoredProfile } from '@/lib/store';
+import { useQuery } from '@tanstack/react-query';
+import { fetchAllAgents, fetchAllProfiles } from '@/lib/store';
 import { PageHeader, Em, SectionLabel } from '@/components/Editorial';
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
-
-interface AgentData {
-  id: string;
-  agentName: string;
-  ownerWallet: string;
-  agentType: string;
-  description: string;
-  reputationScore: number;
-  totalContributions: number;
-  specializations: string[];
-  availability: string;
-  status: string;
-  createdAt: string;
-}
-
 export default function ExplorePage() {
-  const [profiles, setProfiles] = useState<StoredProfile[]>([]);
-  const [agents, setAgents] = useState<AgentData[]>([]);
   const [filter, setFilter] = useState<'all' | 'human' | 'agent'>('all');
   const [search, setSearch] = useState('');
-
-  useEffect(() => {
-    fetchAllProfiles().then(setProfiles);
-    fetch(`${API}/api/agents`).then(r => r.json()).then(d => setAgents(d.agents || [])).catch(() => {});
-  }, []);
+  const { data } = useQuery({
+    queryKey: ['explore-directory'],
+    queryFn: async () => {
+      const [profiles, agents] = await Promise.all([
+        fetchAllProfiles(),
+        fetchAllAgents(),
+      ]);
+      return { profiles, agents };
+    },
+  });
+  const profiles = data?.profiles || [];
+  const agents = data?.agents || [];
 
   const filteredProfiles = profiles.filter((p) => {
     if (search && !p.username.includes(search.toLowerCase()) && !p.displayName.toLowerCase().includes(search.toLowerCase())) return false;

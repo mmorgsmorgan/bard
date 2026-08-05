@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
-import { useBardAccount } from '@/components/BardAccountProvider';
+import { useQuery } from '@tanstack/react-query';
 import { PageHeader, Em } from '@/components/Editorial';
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
@@ -51,38 +51,32 @@ const CATEGORIES = [
 ];
 
 export default function MarketplacePage() {
-  const { address } = useBardAccount();
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [bounties, setBounties] = useState<OpenBounty[]>([]);
   const [category, setCategory] = useState('all');
   const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [submittedQuery, setSubmittedQuery] = useState('');
   const [tab, setTab] = useState<'skills' | 'bounties'>('bounties');
 
-  useEffect(() => {
-    loadData();
-  }, [category]);
-
-  async function loadData() {
-    setLoading(true);
-    try {
+  const { data, isPending: loading } = useQuery<{
+    skills: Skill[];
+    openBounties: OpenBounty[];
+  }>({
+    queryKey: ['marketplace', category, submittedQuery],
+    queryFn: async () => {
       const params = new URLSearchParams();
       if (category !== 'all') params.set('category', category);
-      if (query) params.set('q', query);
-      const endpoint = query ? '/api/marketplace/search' : '/api/marketplace';
+      if (submittedQuery) params.set('q', submittedQuery);
+      const endpoint = submittedQuery ? '/api/marketplace/search' : '/api/marketplace';
       const res = await fetch(`${API}${endpoint}?${params}`);
-      const data = await res.json();
-      setSkills(data.skills || []);
-      if (data.openBounties) setBounties(data.openBounties);
-    } catch (e) {
-      console.error('Marketplace fetch error:', e);
-    }
-    setLoading(false);
-  }
+      if (!res.ok) throw new Error('Could not load marketplace');
+      return res.json();
+    },
+  });
+  const skills = data?.skills || [];
+  const bounties = data?.openBounties || [];
 
   function handleSearch(e: React.FormEvent) {
     e.preventDefault();
-    loadData();
+    setSubmittedQuery(query.trim());
   }
 
   const fundedBounties = bounties.filter(b => b.escrow_status === 'funded');

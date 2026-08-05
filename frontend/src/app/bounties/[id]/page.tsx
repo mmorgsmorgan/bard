@@ -70,22 +70,25 @@ export default function BountyDetailPage() {
 
   async function loadAll() {
     setLoading(true);
-    const b = await fetchBountyById(bountyId, authFetch);
+    const [b, proposalResult, agents] = await Promise.all([
+      fetchBountyById(bountyId, authFetch),
+      fetchBountyProposals(bountyId, authFetch),
+      address ? fetchAgentsByOwner(address) : Promise.resolve([]),
+    ]);
     setBounty(b);
+    setProposals(proposalResult.proposals);
+    setMyAgents(agents);
     if (b) {
       const walletIsCreator = Boolean(
         address && b.creatorWallet.toLowerCase() === address.toLowerCase()
       );
-      const [{ proposals, isCreator: proposalCreator }, agents] = await Promise.all([
-        fetchBountyProposals(bountyId, authFetch),
-        address ? fetchAgentsByOwner(address) : Promise.resolve([]),
-      ]);
-      setProposals(proposals);
-      setIsCreator(walletIsCreator || Boolean(b.creatorAgentId) || proposalCreator);
-      setMyAgents(agents);
+      setIsCreator(
+        walletIsCreator
+        || Boolean(b.creatorAgentId)
+        || proposalResult.isCreator
+      );
     } else {
       setIsCreator(false);
-      setProposals([]);
     }
     setLoading(false);
   }
@@ -124,17 +127,23 @@ export default function BountyDetailPage() {
       if (res.error) {
         setSubmitError(res.error);
       } else {
+        if (res.proposal) {
+          setProposals((current) => current.map((proposal) =>
+            proposal.id === res.proposal?.id ? res.proposal : proposal
+          ));
+        }
         setShowForm(false);
         setEditingProposalId(null);
-        await loadAll();
       }
     } else {
       const res = await submitBountyProposal(bounty.id, token, form);
       if (res.error) {
         setSubmitError(res.error);
       } else {
+        if (res.proposal) {
+          setProposals((current) => [...current, res.proposal as BountyProposal]);
+        }
         setShowForm(false);
-        await loadAll();
       }
     }
     setSubmitting(false);
@@ -157,7 +166,14 @@ export default function BountyDetailPage() {
     if (!token) return;
     setActionBusy(true);
     const ok = await withdrawBountyProposal(p.bountyId, p.id, token);
-    if (ok) await loadAll();
+    if (ok) {
+      const updatedAt = new Date().toISOString();
+      setProposals((current) => current.map((proposal) =>
+        proposal.id === p.id
+          ? { ...proposal, status: 'withdrawn', withdrawnAt: updatedAt, updatedAt }
+          : proposal
+      ));
+    }
     setActionBusy(false);
   }
 
@@ -170,6 +186,11 @@ export default function BountyDetailPage() {
     if (selection.error) {
       setActionError(selection.error);
     } else {
+      if (selection.bounty) setBounty(selection.bounty);
+      setProposals((current) => current.map((proposal) => ({
+        ...proposal,
+        status: proposal.id === p.id ? 'accepted' : 'rejected',
+      })));
       const funding = await fundHumanBounty(authFetch, sendTransaction, p.bountyId);
       if (funding.error) {
         setActionError(
@@ -178,7 +199,7 @@ export default function BountyDetailPage() {
             : `Proposal selected, but funding failed: ${funding.error}`
         );
       }
-      await loadAll();
+      if (funding.bounty) setBounty(funding.bounty);
     }
     setActionBusy(false);
   }
@@ -195,7 +216,7 @@ export default function BountyDetailPage() {
           : result.error
       );
     }
-    await loadAll();
+    if (result.bounty) setBounty(result.bounty);
     setActionBusy(false);
   }
 
@@ -217,7 +238,11 @@ export default function BountyDetailPage() {
         status: 'cancelled',
         escrowStatus: result.refunded ? 'refunded' : current.escrowStatus,
       } : current);
-      await loadAll();
+      setProposals((current) => current.map((proposal) =>
+        proposal.status === 'pending'
+          ? { ...proposal, status: 'rejected' }
+          : proposal
+      ));
     } else {
       setActionError(result.error || 'Bounty cancellation failed');
     }
@@ -230,8 +255,14 @@ export default function BountyDetailPage() {
     setActionError(null);
     setActionBusy(true);
     const result = await rejectHumanBountyProposal(authFetch, p.bountyId, p.id, reason);
-    if (result.ok) await loadAll();
-    else setActionError(result.error || 'Proposal rejection failed');
+    if (result.ok) {
+      const updatedAt = new Date().toISOString();
+      setProposals((current) => current.map((proposal) =>
+        proposal.id === p.id
+          ? { ...proposal, status: 'rejected', rejectionReason: reason, updatedAt }
+          : proposal
+      ));
+    } else setActionError(result.error || 'Proposal rejection failed');
     setActionBusy(false);
   }
 
@@ -286,7 +317,7 @@ export default function BountyDetailPage() {
       } else {
         setActionMessage('Revision requested. The agent can submit an updated proof package.');
       }
-      await loadAll();
+      if (result.bounty) setBounty(result.bounty);
     }
     setActionBusy(false);
   }

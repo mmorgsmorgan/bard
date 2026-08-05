@@ -157,7 +157,7 @@ export default function SendPage() {
     setPendingTxHash('');
   }
 
-  if (status === 'connecting') {
+  if (status === 'connecting' && !isConnected) {
     return <div className="min-h-screen" />;
   }
 

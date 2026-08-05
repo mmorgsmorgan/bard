@@ -26,18 +26,27 @@ export function NotificationBell() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, []);
 
-  // Poll notifications every 3s from backend
+  // Poll notifications every 30s from backend; pause while tab is hidden,
+  // refresh immediately when the tab regains focus.
   useEffect(() => {
     if (!address) return;
     const load = () => {
+      if (document.hidden) return;
       fetchNotificationsByWallet(address, authFetch).then(notifs => {
         setNotifications(notifs);
         setUnread(notifs.filter(n => !n.read).length);
       });
     };
     load();
-    const interval = setInterval(load, 3000);
-    return () => clearInterval(interval);
+    const interval = setInterval(load, 30000);
+    const onVisible = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [address, authFetch]);
 
   if (!isConnected) return null;

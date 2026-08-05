@@ -38,7 +38,7 @@ function ThemeToggle() {
 }
 
 export function Navbar() {
-  const { address, isConnected, login, logout } = useBardAccount();
+  const { address, isConnected, authReady, status, login, logout } = useBardAccount();
   const { hasProfile } = useHasProfile();
   const [showDropdown, setShowDropdown] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -209,6 +209,13 @@ export function Navbar() {
                   )}
                 </div>
               </div>
+            ) : !authReady || status === 'connecting' ? (
+              <span
+                className="hidden sm:inline font-mono text-[10px] uppercase tracking-wider px-3 py-2.5"
+                style={{ color: 'var(--faint)' }}
+              >
+                Restoring...
+              </span>
             ) : (
               <button onClick={login} className="btn-primary text-xs py-2.5 px-4 sm:px-5">
                 Sign in

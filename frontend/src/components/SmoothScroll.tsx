@@ -12,12 +12,15 @@
  */
 
 import { useEffect } from 'react';
+import { usePathname } from 'next/navigation';
 import type Lenis from 'lenis';
 import { ensureGsap, gsap, ScrollTrigger, prefersReducedMotion } from '@/lib/motion';
 
 export function SmoothScroll({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+
   useEffect(() => {
-    if (prefersReducedMotion()) return;
+    if (pathname !== '/' || prefersReducedMotion()) return;
 
     ensureGsap();
 
@@ -48,7 +51,7 @@ export function SmoothScroll({ children }: { children: React.ReactNode }) {
         lenis = null;
       }
     };
-  }, []);
+  }, [pathname]);
 
   return <>{children}</>;
 }

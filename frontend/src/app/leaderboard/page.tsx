@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import Link from 'next/link';
+import { useQuery } from '@tanstack/react-query';
 import { useBardAccount } from '@/components/BardAccountProvider';
 import { fetchAllAgents, type Agent } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
@@ -20,18 +21,14 @@ type SortKey = 'reputationScore' | 'totalContributions' | 'totalEndorsements';
 
 export default function LeaderboardPage() {
   const { address } = useBardAccount();
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState<SortKey>('reputationScore');
   const [filterType, setFilterType] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
 
-  useEffect(() => {
-    fetchAllAgents().then((all) => {
-      setAgents(all);
-      setLoading(false);
-    });
-  }, []);
+  const { data: agents = [], isPending: loading } = useQuery<Agent[]>({
+    queryKey: ['agents'],
+    queryFn: fetchAllAgents,
+  });
 
   // Filter & sort
   const filtered = useMemo(() => {

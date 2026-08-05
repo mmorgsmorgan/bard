@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { PrivyProvider } from '@privy-io/react-auth';
 import { createConfig, http, WagmiProvider } from 'wagmi';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -14,10 +15,19 @@ const config = createConfig({
   ssr: true,
 });
 
-const queryClient = new QueryClient();
 const privyAppId = process.env.NEXT_PUBLIC_PRIVY_APP_ID || '';
 
 export function Providers({ children }: { children: React.ReactNode }) {
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 60_000,
+        gcTime: 10 * 60_000,
+        refetchOnWindowFocus: false,
+        retry: 1,
+      },
+    },
+  }));
   if (!privyAppId) {
     throw new Error('NEXT_PUBLIC_PRIVY_APP_ID is required');
   }

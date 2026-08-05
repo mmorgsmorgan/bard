@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { GitHubIcon, DiscordIcon, FarcasterIcon, XIcon } from '@/components/SocialIcons';
 import { useLinkAccount } from '@privy-io/react-auth';
 import { useReadContract } from 'wagmi';
@@ -36,6 +37,25 @@ type WalletBalance = {
 
 const VOUCH_TIER_NAMES = ['Micro', 'Standard', 'Endorsed', 'Founder'];
 
+const EMPTY_VOUCH_SUMMARY: HumanVouchSummary = {
+  count: 0,
+  activeCount: 0,
+  withdrawnCount: 0,
+  totalVouchedUsdc: '0',
+  activeStakedUsdc: '0',
+  withdrawableUsdc: '0',
+};
+
+interface DashboardData {
+  profile: StoredProfile | null;
+  proofs: StoredProof[];
+  portfolio: PortfolioItem[];
+  notifications: Notification[];
+  vouches: HumanVouch[];
+  vouchSummary: HumanVouchSummary;
+  walletBalance: WalletBalance;
+}
+
 export default function DashboardPage() {
   const {
     account,
@@ -47,24 +67,9 @@ export default function DashboardPage() {
     authFetch,
     sendTransaction,
   } = useBardAccount();
-  const [profile, setProfile] = useState<StoredProfile | null>(null);
-  const [proofs, setProofs] = useState<StoredProof[]>([]);
-  const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
-  const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
-  const [vouches, setVouches] = useState<HumanVouch[]>([]);
-  const [vouchSummary, setVouchSummary] = useState<HumanVouchSummary>({
-    count: 0,
-    activeCount: 0,
-    withdrawnCount: 0,
-    totalVouchedUsdc: '0',
-    activeStakedUsdc: '0',
-    withdrawableUsdc: '0',
-  });
+  const queryClient = useQueryClient();
   const [withdrawingVouch, setWithdrawingVouch] = useState('');
   const [vouchMessage, setVouchMessage] = useState('');
-  const [loadError, setLoadError] = useState('');
-  const [loading, setLoading] = useState(true);
   const [showKeyExport, setShowKeyExport] = useState(false);
   const [exportStage, setExportStage] = useState<'request' | 'code' | 'revealed'>('request');
   const [exportCode, setExportCode] = useState('');
@@ -106,47 +111,46 @@ export default function DashboardPage() {
   const hasOnChain = onChainProfile && Array.isArray(onChainProfile) &&
     onChainProfile[0] !== '0x0000000000000000000000000000000000000000';
 
-  useEffect(() => {
-    if (!address || !isConnected) {
-      setLoading(false);
-      setWalletBalance(null);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    setLoadError('');
-    Promise.all([
-      fetchProfileByWallet(address),
-      fetchProofsByWallet(address),
-      fetchPortfolioByWallet(address),
-      fetchNotificationsByWallet(address, authFetch),
-      fetchHumanVouches(authFetch),
-      authFetch('/api/human/wallet').then(async (response) => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Could not load wallet');
-        return data as WalletBalance;
-      }),
-    ])
-      .then(([p, pr, po, n, vouchData, wallet]) => {
-        if (cancelled) return;
-        setProfile(p);
-        setProofs(pr);
-        setPortfolio(po);
-        setNotifications(n);
-        setVouches(vouchData.vouches);
-        setVouchSummary(vouchData.summary);
-        setWalletBalance(wallet);
-      })
-      .catch((cause) => {
-        if (!cancelled) setLoadError(cause instanceof Error ? cause.message : String(cause));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [address, isConnected, authFetch]);
+  const dashboardQuery = useQuery<DashboardData>({
+    queryKey: ['dashboard', address],
+    enabled: Boolean(address && isConnected),
+    queryFn: async () => {
+      if (!address) throw new Error('BARD login required');
+      const [profile, proofs, portfolio, notifications, vouchData, walletBalance] =
+        await Promise.all([
+          fetchProfileByWallet(address),
+          fetchProofsByWallet(address),
+          fetchPortfolioByWallet(address),
+          fetchNotificationsByWallet(address, authFetch),
+          fetchHumanVouches(authFetch),
+          authFetch('/api/human/wallet').then(async (response) => {
+            const wallet = await response.json();
+            if (!response.ok) throw new Error(wallet.error || 'Could not load wallet');
+            return wallet as WalletBalance;
+          }),
+        ]);
+      return {
+        profile,
+        proofs,
+        portfolio,
+        notifications,
+        vouches: vouchData.vouches,
+        vouchSummary: vouchData.summary,
+        walletBalance,
+      };
+    },
+  });
+  const profile = dashboardQuery.data?.profile || null;
+  const proofs = dashboardQuery.data?.proofs || [];
+  const portfolio = dashboardQuery.data?.portfolio || [];
+  const notifications = dashboardQuery.data?.notifications || [];
+  const vouches = dashboardQuery.data?.vouches || [];
+  const vouchSummary = dashboardQuery.data?.vouchSummary || EMPTY_VOUCH_SUMMARY;
+  const walletBalance = dashboardQuery.data?.walletBalance || null;
+  const loading = dashboardQuery.isPending && isConnected;
+  const loadError = dashboardQuery.error instanceof Error
+    ? dashboardQuery.error.message
+    : dashboardQuery.error ? String(dashboardQuery.error) : '';
 
   useEffect(() => {
     if (!showKeyExport) return;
@@ -294,8 +298,16 @@ export default function DashboardPage() {
       }
       if (!response.ok) throw new Error(data.error || 'Could not withdraw vouch stake');
       const refreshed = await fetchHumanVouches(authFetch);
-      setVouches(refreshed.vouches);
-      setVouchSummary(refreshed.summary);
+      if (address) {
+        queryClient.setQueryData<DashboardData>(
+          ['dashboard', address],
+          (current) => current ? {
+            ...current,
+            vouches: refreshed.vouches,
+            vouchSummary: refreshed.summary,
+          } : current
+        );
+      }
       setVouchMessage(`${Number(vouch.amountUsdc).toFixed(2)} USDC returned to your wallet.`);
     } catch (cause) {
       setVouchMessage(cause instanceof Error ? cause.message : 'Could not withdraw vouch stake');
@@ -313,7 +325,7 @@ export default function DashboardPage() {
       ? account.wallet
       : null;
 
-  if (status === 'connecting') {
+  if (status === 'connecting' && !isConnected) {
     return <div className="min-h-[80vh]" />;
   }
 

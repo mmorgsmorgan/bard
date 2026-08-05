@@ -136,6 +136,10 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
   const [status, setStatus] = useState<BardAccountStatus>('connecting');
   const [error, setError] = useState<string | null>(null);
   const pendingLoginRef = useRef(false);
+  const getAccessTokenRef = useRef(getAccessToken);
+  const privyLogoutRef = useRef(privyLogout);
+  getAccessTokenRef.current = getAccessToken;
+  privyLogoutRef.current = privyLogout;
   const { login: privyLogin } = useLogin({
     onComplete: (_user, _isNewUser, _wasAlreadyAuthenticated, loginMethod, loginAccount) => {
       pendingLoginRef.current = false;
@@ -177,8 +181,22 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
 
     if (!authenticated) {
       // Privy can briefly report signed-out while restoring its persisted
-      // session. Keep the BARD token so a later authenticated render can
-      // validate or renew it instead of forcing the user to start over.
+      // session. Give an existing BARD session a short grace window so that
+      // transient state never flashes the sign-in gate during a refresh.
+      if (storedToken()) {
+        setStatus('connecting');
+        setError(null);
+        const restoreGrace = window.setTimeout(() => {
+          if (cancelled) return;
+          setAccount(null);
+          setToken(null);
+          setStatus('disconnected');
+        }, 1500);
+        return () => {
+          cancelled = true;
+          window.clearTimeout(restoreGrace);
+        };
+      }
       setAccount(null);
       setToken(null);
       setStatus('disconnected');
@@ -191,7 +209,9 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
     Promise.resolve()
       .then(async (): Promise<BardSessionResponse> => {
         const context = loginContext || storedLoginContext();
-        const privyToken = await getPrivyAccessToken(getAccessToken);
+        const privyToken = await getPrivyAccessToken(
+          () => getAccessTokenRef.current()
+        );
         const previousToken = storedToken();
         if (!context) {
           if (previousToken) {
@@ -284,7 +304,7 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
           code === 'wallet_login_mismatch';
         if (resetPrivySession) {
           clearBardSession();
-          await privyLogout().catch(() => {});
+          await privyLogoutRef.current().catch(() => {});
         } else {
           // Keep the persisted BARD token on transient failures. It may still
           // be valid and can be retried on the next Privy/session refresh.
@@ -302,8 +322,6 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
   }, [
     ready,
     authenticated,
-    getAccessToken,
-    privyLogout,
     clearBardSession,
     loginContext,
   ]);
@@ -433,7 +451,10 @@ export function BardAccountProvider({ children }: { children: React.ReactNode })
   const value = useMemo<BardAccountContextValue>(() => ({
     account,
     address: account?.wallet.address,
-    isConnected: status === 'connected' && Boolean(account?.wallet.address),
+    // Session validation is a background refresh once an account is known.
+    // Keep the connected identity stable while it runs so client-side route
+    // changes never fall back to the sign-in gate.
+    isConnected: Boolean(account?.wallet.address),
     authReady: ready,
     status,
     token,

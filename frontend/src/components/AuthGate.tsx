@@ -111,6 +111,24 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     return <>{children}</>;
   }
 
+  // Privy and the BARD session restore asynchronously on a hard refresh. Do
+  // not present that transient state as if the user had disconnected.
+  if (!authReady || (status === 'connecting' && !isConnected)) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center animate-fade-in">
+          <div
+            className="w-8 h-8 border-2 rounded-full animate-spin mx-auto mb-4"
+            style={{ borderColor: 'var(--accent)', borderTopColor: 'transparent' }}
+          />
+          <p className="font-mono text-xs" style={{ color: 'var(--muted)' }}>
+            Restoring your session...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   // ── Interior route, not connected: connect prompt ──
   if (!isConnected) {
     return (
@@ -129,10 +147,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           {error && <p className="text-xs mb-4" style={{ color: 'var(--danger)' }}>{error}</p>}
           <button
             onClick={login}
-            disabled={authReady && status === 'connecting'}
             className="btn-primary w-full text-xs py-3.5"
           >
-            {authReady && status === 'connecting' ? 'Signing in...' : 'Continue with email or wallet'}
+            Continue with email or wallet
           </button>
         </div>
       </div>
