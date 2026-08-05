@@ -341,6 +341,21 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selection_mode TEXT DEFAULT 'first_come'`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selected_proposal_id TEXT DEFAULT NULL`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS proposal_deadline TEXT DEFAULT NULL`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS allow_trust_bootstrap INTEGER DEFAULT 0`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS bootstrap_requirements TEXT DEFAULT '{}'`,
+
+    // Records opportunities accessed through owner assurance. Keeping this
+    // separate prevents Ethos data from ever becoming agent reputation.
+    `CREATE TABLE IF NOT EXISTS agent_trust_bootstrap_uses (
+      id TEXT PRIMARY KEY,
+      owner_wallet TEXT NOT NULL,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      bounty_id TEXT NOT NULL REFERENCES bounties(id) ON DELETE CASCADE,
+      mode TEXT NOT NULL,
+      created_at TEXT DEFAULT (NOW()::text),
+      UNIQUE (owner_wallet, bounty_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_trust_bootstrap_owner ON agent_trust_bootstrap_uses(owner_wallet)`,
 
     // ── On-chain escrow (ERC-8183 + BardJobHookV2) migration. escrow_mode is
     // 'custodial' (platform holds USDC, transferUSDCFromPlatform on release) or
@@ -890,8 +905,8 @@ export const stmts = {
 
   // ── Bounties ──
   insertBounty: async (p) => run(
-    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, acceptance_criteria, created_at, updated_at, status, selection_mode, proposal_deadline, escrow_status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+    `INSERT INTO bounties (id, creator_wallet, title, description, bounty_type, amount_usdc, deadline, min_reputation, acceptance_criteria, created_at, updated_at, status, selection_mode, proposal_deadline, escrow_status, allow_trust_bootstrap, bootstrap_requirements)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
     [
       p.id, p.creator_wallet, p.title, p.description, p.bounty_type, p.amount_usdc, p.deadline,
       p.min_reputation, p.acceptance_criteria || '[]', p.created_at, p.updated_at,
@@ -899,6 +914,8 @@ export const stmts = {
       p.selection_mode || 'first_come',
       p.proposal_deadline || null,
       p.escrow_status || 'none',
+      p.allow_trust_bootstrap ? 1 : 0,
+      p.bootstrap_requirements || '{}',
     ]
   ),
   getBountyById: async (id) => one('SELECT * FROM bounties WHERE id = $1', [id]),
@@ -939,6 +956,30 @@ export const stmts = {
   getBountiesByAgent: async (agentId) => many(
     'SELECT * FROM bounties WHERE assigned_agent_id = $1 ORDER BY created_at DESC',
     [agentId]
+  ),
+  countActiveTrustBootstrapUses: async (ownerWallet) => one(
+    `SELECT COUNT(*) AS count
+       FROM agent_trust_bootstrap_uses u
+       JOIN bounties b ON b.id = u.bounty_id
+      WHERE LOWER(u.owner_wallet) = LOWER($1)
+        AND (
+          (u.mode = 'claim' AND b.status IN ('assigned', 'submitted', 'verified'))
+          OR
+          (u.mode = 'proposal' AND EXISTS (
+            SELECT 1
+              FROM bounty_proposals p
+             WHERE p.bounty_id = u.bounty_id
+               AND p.proposer_agent_id = u.agent_id
+               AND p.status IN ('pending', 'accepted')
+          ))
+        )`,
+    [ownerWallet]
+  ),
+  insertTrustBootstrapUse: async (p) => run(
+    `INSERT INTO agent_trust_bootstrap_uses (id, owner_wallet, agent_id, bounty_id, mode, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (owner_wallet, bounty_id) DO NOTHING`,
+    [p.id, p.owner_wallet, p.agent_id, p.bounty_id, p.mode, p.created_at]
   ),
   updateBountyStatus: async (p) => run(
     'UPDATE bounties SET status = $1, updated_at = $2 WHERE id = $3',

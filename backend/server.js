@@ -51,6 +51,7 @@ import {
 import * as onchainEscrow from './escrow-service.js';
 import { computeReputationScore } from './reputation-score.js';
 import { resolveVouchTarget } from './vouch-target.js';
+import { getOwnerAssurance, getUnavailableOwnerAssurance } from './ethos-service.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -112,6 +113,14 @@ function requireSwarmsWebhookSecret(_req, res, next) {
 // When > 0, agent registration for a real wallet would additionally require a
 // refundable USDC stake. Wired as a constant now; enforcement is future work.
 const REGISTRATION_STAKE = parseFloat(process.env.REGISTRATION_STAKE || '0');
+const MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER = Math.max(
+  1,
+  Number.parseInt(process.env.MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER || '3', 10) || 3,
+);
+const ETHOS_DISPLAY_WAIT_MS = Math.max(
+  50,
+  Number.parseInt(process.env.ETHOS_DISPLAY_WAIT_MS || '500', 10) || 500,
+);
 
 // ── Arc Testnet RPC for transaction verification ──
 const ARC_TESTNET_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
@@ -630,6 +639,7 @@ function agentToJSON(row) {
     lastActiveAt: row.last_active_at || null,
     totalEarnedUsdc: row.total_earned_usdc || 0,
     successRate: row.success_rate || 0,
+    isPlatformOwned: Boolean(row.is_platform_owned),
     // Turnkey wallet
     turnkeyWalletId: row.turnkey_wallet_id || null,
     turnkeyAddress: row.turnkey_address || null,
@@ -752,6 +762,122 @@ async function calculateReputation(agentId) {
     rejectedBounties,
     verificationApprovals,
   };
+}
+
+function getTrustMaturity(completedBounties) {
+  const completed = Math.max(0, Number(completedBounties || 0));
+  if (completed >= 10) {
+    return { stage: 'proven', completedBounties: completed, primarySignal: 'agent_performance' };
+  }
+  if (completed >= 3) {
+    return { stage: 'emerging', completedBounties: completed, primarySignal: 'owner_and_performance' };
+  }
+  return { stage: 'new', completedBounties: completed, primarySignal: 'owner_credibility' };
+}
+
+async function getOwnerAssuranceForDisplay(agent) {
+  const independent = Boolean(agent.is_platform_owned);
+  const request = getOwnerAssurance(agent.owner_wallet, { independent });
+  let timer;
+  try {
+    return await Promise.race([
+      request,
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve(
+          getUnavailableOwnerAssurance(agent.owner_wallet, { independent })
+        ), ETHOS_DISPLAY_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function parseBootstrapRequirements(bounty) {
+  let raw = bounty?.bootstrap_requirements;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw || '{}'); } catch { raw = {}; }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = {};
+  return {
+    humanVerified: raw.humanVerified !== false,
+    minEthosScore: Math.max(0, Number(raw.minEthosScore || 0)),
+  };
+}
+
+async function evaluateBountyEligibility(agent, bounty) {
+  const minBardReputation = Math.max(0, Number(bounty.min_reputation || 0));
+  const bardScore = Math.max(0, Number(agent.reputation_score || 0));
+  const bardEligible = bardScore >= minBardReputation;
+  const base = {
+    eligible: bardEligible,
+    path: bardEligible ? 'bard_reputation' : 'none',
+    bardReputation: { score: bardScore, minimum: minBardReputation, eligible: bardEligible },
+    trustBootstrap: {
+      allowed: Boolean(bounty.allow_trust_bootstrap),
+      eligible: false,
+      requirements: parseBootstrapRequirements(bounty),
+    },
+  };
+  if (bardEligible || !bounty.allow_trust_bootstrap) return base;
+
+  const requirements = base.trustBootstrap.requirements;
+  const [ownerAssurance, ownerAgents, activeUseRow, completedResult] = await Promise.all([
+    getOwnerAssurance(agent.owner_wallet, { independent: Boolean(agent.is_platform_owned) }),
+    stmts.getAgentsByOwner(agent.owner_wallet),
+    stmts.countActiveTrustBootstrapUses(agent.owner_wallet),
+    pool.query(
+      `SELECT COUNT(*) AS completed
+         FROM bounties
+        WHERE provider_agent_id = $1
+          AND status = 'completed'
+          AND escrow_status = 'released'
+          AND verifier_decision = 'approved'`,
+      [agent.id],
+    ),
+  ]);
+  const trustMaturity = getTrustMaturity(completedResult.rows[0]?.completed);
+  const activeUses = Number(activeUseRow?.count || 0);
+  const humanPass = !requirements.humanVerified || ownerAssurance.humanVerified;
+  const scorePass = Number(ownerAssurance.score || 0) >= requirements.minEthosScore;
+  const maturityPass = trustMaturity.stage === 'new';
+  const ownerLimitPass = activeUses < MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER;
+  const bootstrapEligible = Boolean(
+    ownerAssurance.available && humanPass && scorePass && maturityPass && ownerLimitPass
+  );
+
+  return {
+    ...base,
+    eligible: bootstrapEligible,
+    path: bootstrapEligible ? 'ethos_owner_assurance' : 'none',
+    trustBootstrap: {
+      ...base.trustBootstrap,
+      eligible: bootstrapEligible,
+      ownerAssurance,
+      trustMaturity,
+      ownerAgentCount: ownerAgents.length,
+      activeUses,
+      maxActiveUses: MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER,
+      checks: {
+        ethosAvailable: ownerAssurance.available,
+        humanVerified: humanPass,
+        minimumEthosScore: scorePass,
+        newAgent: maturityPass,
+        ownerLimit: ownerLimitPass,
+      },
+    },
+  };
+}
+
+async function recordTrustBootstrapUse(agent, bounty, mode) {
+  await stmts.insertTrustBootstrapUse({
+    id: `trust-bootstrap-${Date.now()}-${randomBytes(4).toString('hex')}`,
+    owner_wallet: agent.owner_wallet.toLowerCase(),
+    agent_id: agent.id,
+    bounty_id: bounty.id,
+    mode,
+    created_at: new Date().toISOString(),
+  });
 }
 
 // ── SSE Live Feed ──
@@ -2835,7 +2961,18 @@ app.get('/api/agents/featured', async (req, res) => {
 app.get('/api/agents/:id', async (req, res) => {
   const agent = await stmts.getAgentById(req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
-  const reputation = await calculateReputation(req.params.id);
+  const [reputation, ownerAssurance, ownerAgents] = await Promise.all([
+    calculateReputation(req.params.id),
+    getOwnerAssuranceForDisplay(agent),
+    stmts.getAgentsByOwner(agent.owner_wallet),
+  ]);
+  const trustMaturity = getTrustMaturity(reputation.completedBounties);
+  const bardReputation = {
+    score: reputation.score,
+    tier: reputation.tier,
+    completedBounties: reputation.completedBounties,
+  };
+  ownerAssurance.ownerAgentCount = ownerAgents.length;
 
   // Add performance analytics for swarm agents
   let performance = null;
@@ -2870,7 +3007,25 @@ app.get('/api/agents/:id', async (req, res) => {
     };
   }
 
-  res.json({ agent: agentToJSON(agent), reputation, performance });
+  res.json({
+    agent: agentToJSON(agent),
+    reputation,
+    bardReputation,
+    ownerAssurance,
+    trustMaturity,
+    performance,
+  });
+});
+
+app.get('/api/agents/:id/owner-assurance', async (req, res) => {
+  const agent = await stmts.getAgentById(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found' });
+  const [ownerAssurance, ownerAgents] = await Promise.all([
+    getOwnerAssurance(agent.owner_wallet, { independent: Boolean(agent.is_platform_owned) }),
+    stmts.getAgentsByOwner(agent.owner_wallet),
+  ]);
+  ownerAssurance.ownerAgentCount = ownerAgents.length;
+  res.json({ ownerAssurance });
 });
 
 // Get all active agents (leaderboard)
@@ -4989,6 +5144,17 @@ function normalizeBountyInput(body = {}) {
   const deadlineMs = Date.parse(body.deadline);
   const proposalDeadlineMs = body.proposalDeadline ? Date.parse(body.proposalDeadline) : null;
   const minReputation = Math.max(0, Math.min(100, Number.parseInt(body.minReputation, 10) || 0));
+  const allowTrustBootstrap = body.allowTrustBootstrap === true;
+  const rawBootstrapRequirements = body.bootstrapRequirements && typeof body.bootstrapRequirements === 'object'
+    ? body.bootstrapRequirements
+    : {};
+  const bootstrapRequirements = {
+    humanVerified: rawBootstrapRequirements.humanVerified !== false,
+    minEthosScore: Math.max(
+      0,
+      Math.min(5000, Number.parseInt(rawBootstrapRequirements.minEthosScore, 10) || 0),
+    ),
+  };
   const acceptanceCriteria = normalizeAcceptanceCriteria(
     body.acceptanceCriteria,
     description || title
@@ -5025,6 +5191,8 @@ function normalizeBountyInput(body = {}) {
     amountUsdc,
     deadline: new Date(deadlineMs).toISOString(),
     minReputation,
+    allowTrustBootstrap,
+    bootstrapRequirements,
     acceptanceCriteria,
     selectionMode,
     proposalDeadline: selectionMode === 'proposal' && proposalDeadlineMs !== null
@@ -5052,6 +5220,8 @@ async function insertManagedBounty(wallet, input, status, escrowStatus = 'none')
     selection_mode: input.selectionMode,
     proposal_deadline: input.proposalDeadline,
     escrow_status: escrowStatus,
+    allow_trust_bootstrap: input.allowTrustBootstrap,
+    bootstrap_requirements: JSON.stringify(input.bootstrapRequirements),
   });
   return stmts.getBountyById(id);
 }
@@ -6831,8 +7001,12 @@ app.post('/api/bounties/:id/claim', requireAuth, async (req, res) => {
   if (bounty.status !== 'open' || bounty.escrow_status !== 'funded') {
     return res.status(409).json({ error: 'Bounty is not funded and available for claiming' });
   }
-  if (agent.reputation_score < (bounty.min_reputation || 0)) {
-    return res.status(403).json({ error: `Agent needs reputation >= ${bounty.min_reputation}` });
+  const eligibility = await evaluateBountyEligibility(agent, bounty);
+  if (!eligibility.eligible) {
+    return res.status(403).json({
+      error: `Agent does not meet this bounty's Bard reputation or owner-assurance requirements`,
+      eligibility,
+    });
   }
   if (agentControlsBounty(agent, bounty)) {
     return res.status(409).json({ error: 'An agent cannot claim its own bounty' });
@@ -6867,6 +7041,9 @@ app.post('/api/bounties/:id/claim', requireAuth, async (req, res) => {
     return res.status(409).json({
       error: 'Bounty was already claimed by another agent',
     });
+  }
+  if (eligibility.path === 'ethos_owner_assurance') {
+    await recordTrustBootstrapUse(agent, bounty, 'claim');
   }
   await logEscrowEvent(req.params.id, 'claimed', agent.owner_wallet, 'agent', `Claimed by ${agent.agent_name}`, '');
 
@@ -8219,8 +8396,12 @@ app.post('/api/bounties/:id/proposals', requireAuth, async (req, res) => {
     if (agentControlsBounty(agent, bounty)) {
       return res.status(409).json({ error: 'An agent cannot submit a proposal to its own bounty' });
     }
-    if (agent.reputation_score < (bounty.min_reputation || 0)) {
-      return res.status(403).json({ error: `Agent needs reputation >= ${bounty.min_reputation}` });
+    const eligibility = await evaluateBountyEligibility(agent, bounty);
+    if (!eligibility.eligible) {
+      return res.status(403).json({
+        error: `Agent does not meet this bounty's Bard reputation or owner-assurance requirements`,
+        eligibility,
+      });
     }
     if (!(await checkRateLimit(agent.id, 'bounty_propose'))) {
       return res.status(429).json({ error: 'Rate limit exceeded — max 5 proposals per hour' });
@@ -8252,6 +8433,9 @@ app.post('/api/bounties/:id/proposals', requireAuth, async (req, res) => {
       portfolio_refs: JSON.stringify(refs),
       created_at: now, updated_at: now,
     });
+    if (eligibility.path === 'ethos_owner_assurance') {
+      await recordTrustBootstrapUse(agent, bounty, 'proposal');
+    }
 
     await createNotification({
       wallet: bounty.creator_wallet,

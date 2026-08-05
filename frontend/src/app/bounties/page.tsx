@@ -58,6 +58,7 @@ export default function BountiesPage() {
   const [form, setForm] = useState({
     title: '', description: '', bountyType: 'research',
     amountUsdc: '1.00', deadline: '', minReputation: 0,
+    allowTrustBootstrap: false, bootstrapHumanVerified: true, minEthosScore: 1200,
     selectionMode: 'first_come' as 'first_come' | 'proposal',
     proposalDeadline: '',
     acceptanceCriteria: [''],
@@ -89,6 +90,11 @@ export default function BountiesPage() {
       amountUsdc: form.amountUsdc,
       deadline: new Date(form.deadline).toISOString(),
       minReputation: form.minReputation,
+      allowTrustBootstrap: form.allowTrustBootstrap,
+      bootstrapRequirements: {
+        humanVerified: form.bootstrapHumanVerified,
+        minEthosScore: form.minEthosScore,
+      },
       selectionMode: form.selectionMode,
       proposalDeadline: form.proposalDeadline ? new Date(form.proposalDeadline).toISOString() : undefined,
       acceptanceCriteria: form.acceptanceCriteria.map(item => item.trim()).filter(Boolean),
@@ -100,6 +106,7 @@ export default function BountiesPage() {
       setForm({
         title: '', description: '', bountyType: 'research',
         amountUsdc: '1.00', deadline: '', minReputation: 0,
+        allowTrustBootstrap: false, bootstrapHumanVerified: true, minEthosScore: 1200,
         selectionMode: 'first_come', proposalDeadline: '',
         acceptanceCriteria: [''],
       });
@@ -243,6 +250,43 @@ export default function BountiesPage() {
                 className="input-field w-full font-mono text-sm" />
               {form.minReputation > 0 && <TierBadge score={form.minReputation} size="xs" />}
             </div>
+            {form.minReputation > 0 && (
+              <div className="md:col-span-2 border border-[rgba(255,255,255,0.06)] bg-[#080808] p-4">
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <span className="font-mono text-[10px] text-white uppercase tracking-wider">Allow Ethos trust bootstrap</span>
+                  <input
+                    type="checkbox"
+                    checked={form.allowTrustBootstrap}
+                    onChange={e => setForm(p => ({ ...p, allowTrustBootstrap: e.target.checked }))}
+                    className="h-4 w-4 accent-[#ff8512]"
+                  />
+                </label>
+                {form.allowTrustBootstrap && (
+                  <div className="grid gap-3 mt-4 sm:grid-cols-2">
+                    <label className="flex items-center justify-between gap-3 border border-[rgba(255,255,255,0.06)] px-3 py-2">
+                      <span className="font-mono text-[10px] text-surface-300">Verified human required</span>
+                      <input
+                        type="checkbox"
+                        checked={form.bootstrapHumanVerified}
+                        onChange={e => setForm(p => ({ ...p, bootstrapHumanVerified: e.target.checked }))}
+                        className="h-4 w-4 accent-[#ff8512]"
+                      />
+                    </label>
+                    <label>
+                      <span className="font-mono text-[9px] text-surface-500 uppercase block mb-1">Minimum Ethos score</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5000}
+                        value={form.minEthosScore}
+                        onChange={e => setForm(p => ({ ...p, minEthosScore: parseInt(e.target.value) || 0 }))}
+                        className="input-field w-full font-mono text-sm"
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="md:col-span-2">
               <label className="font-mono text-[10px] text-surface-500 uppercase tracking-wider block mb-1.5">Description</label>
               <textarea value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
@@ -398,6 +442,11 @@ export default function BountiesPage() {
                       {bounty.minReputation > 0 && (
                         <span className="font-mono text-[10px] text-surface-500 flex items-center gap-1">
                           min: <TierBadge score={bounty.minReputation} size="xs" />
+                        </span>
+                      )}
+                      {bounty.allowTrustBootstrap && (
+                        <span className="font-mono text-[9px] text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5">
+                          Ethos bootstrap
                         </span>
                       )}
                     </div>

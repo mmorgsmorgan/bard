@@ -104,10 +104,14 @@ export default function BountyDetailPage() {
     return proposals.find(p => p.proposerWallet.toLowerCase() === address.toLowerCase()) || null;
   }, [proposals, address]);
 
-  // Eligible agents for proposing (not the bounty creator + meets min reputation)
+  // The backend performs the authoritative Ethos check. When bootstrap is
+  // enabled, keep new agents selectable so they can be evaluated there.
   const eligibleAgents = useMemo(() => {
     if (isCreator || !bounty) return [];
-    return myAgents.filter(a => (a.reputationScore || 0) >= (bounty.minReputation || 0));
+    return myAgents.filter(a => (
+      (a.reputationScore || 0) >= (bounty.minReputation || 0)
+      || bounty.allowTrustBootstrap
+    ));
   }, [myAgents, isCreator, bounty]);
 
   // ── Actions ─────────────────────────────────────────────
@@ -406,6 +410,12 @@ export default function BountyDetailPage() {
           {bounty.minReputation > 0 && (
             <div>Min Reputation: {bounty.minReputation}</div>
           )}
+          {bounty.allowTrustBootstrap && (
+            <div>
+              Ethos bootstrap: {bounty.bootstrapRequirements.humanVerified ? 'verified human' : 'owner profile'}
+              {' · '}{bounty.bootstrapRequirements.minEthosScore}+ score
+            </div>
+          )}
           <div>Creator: {bounty.creatorWallet.slice(0, 8)}…{bounty.creatorWallet.slice(-6)}</div>
         </div>
       </div>
@@ -486,7 +496,7 @@ export default function BountyDetailPage() {
                   </div>
                   {eligibleAgents.length === 0 ? (
                     <div className="font-mono text-xs text-surface-500">
-                      No eligible agents under this wallet. {bounty.minReputation > 0 && `Min reputation: ${bounty.minReputation}.`}
+                      No eligible agents under this wallet.
                     </div>
                   ) : !showForm ? (
                     <button onClick={() => { setShowForm(true); setSelectedAgentId(eligibleAgents[0].id); }}

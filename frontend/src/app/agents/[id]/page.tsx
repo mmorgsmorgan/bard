@@ -6,9 +6,10 @@ import Link from 'next/link';
 import { useReadContract } from 'wagmi';
 import { formatUnits } from 'viem';
 import {
-  fetchAgentById, fetchContributionsByAgent, endorseContribution,
+  fetchAgentById, fetchAgentOwnerAssurance, fetchContributionsByAgent, endorseContribution,
   fetchAgentsByOwner, agentVerifyContribution, fetchVerificationStats,
   type Agent, type Contribution, type ReputationData, type VerificationStats,
+  type OwnerAssurance, type TrustMaturity,
 } from '@/lib/store';
 import { TierBadge } from '@/components/TierBadge';
 import { Headline } from '@/components/Editorial';
@@ -50,6 +51,8 @@ export default function AgentDetailPage() {
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [reputation, setReputation] = useState<ReputationData | null>(null);
+  const [ownerAssurance, setOwnerAssurance] = useState<OwnerAssurance | null>(null);
+  const [trustMaturity, setTrustMaturity] = useState<TrustMaturity | null>(null);
   const [contributions, setContributions] = useState<Contribution[]>([]);
   const [loading, setLoading] = useState(true);
   const [endorsing, setEndorsing] = useState<string | null>(null);
@@ -82,7 +85,7 @@ export default function AgentDetailPage() {
     const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
     (async () => {
       const [
-        { agent: a, reputation: r },
+        { agent: a, reputation: r, ownerAssurance: assurance, trustMaturity: maturity },
         contribs,
         vStats,
         owned,
@@ -102,6 +105,13 @@ export default function AgentDetailPage() {
       ]);
       setAgent(a);
       setReputation(r);
+      setOwnerAssurance(assurance);
+      setTrustMaturity(maturity);
+      if (assurance?.reason === 'ethos_pending') {
+        fetchAgentOwnerAssurance(agentId).then(freshAssurance => {
+          if (freshAssurance) setOwnerAssurance(freshAssurance);
+        });
+      }
       setContributions(contribs);
       setVerifStats(vStats);
       setMyAgents(owned);
@@ -205,7 +215,12 @@ export default function AgentDetailPage() {
   }
 
   const isOwner = address?.toLowerCase() === agent.ownerWallet.toLowerCase();
-  const hasOwner = !!agent.ownerWallet && agent.ownerWallet !== '0x0';
+  const hasOwner = Boolean(
+    agent.ownerWallet
+    && agent.ownerWallet !== '0x0'
+    && agent.ownerWallet !== '0x0000000000000000000000000000000000000000'
+    && !agent.isPlatformOwned
+  );
   const typeInfo = AGENT_TYPES[agent.agentType] || AGENT_TYPES.general;
   const verifiedContributions = contributions.filter(c => c.status === 'verified');
   const canAgentVerify = !!verifierAgent && verifierAgent.id !== agentId;
@@ -275,27 +290,57 @@ export default function AgentDetailPage() {
         )}
       </div>
 
-      {/* Owner Link Status */}
+      {/* Owner assurance and agent performance stay separate by design. */}
       <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-4 mb-4">
-        <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase mb-3">Owner Connection</div>
-        {hasOwner ? (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-2 h-2 bg-emerald-500 animate-pulse-subtle" />
-              <span className="font-mono text-xs text-emerald-400">Verified Owner</span>
-              <span className="font-mono text-[10px] text-surface-500">
-                {agent.ownerWallet.slice(0, 8)}...{agent.ownerWallet.slice(-4)}
-              </span>
-              {isOwner && <span className="font-mono text-[9px] px-1.5 py-0.5 bg-[rgba(255,133,18,0.1)] text-[#ff8512] border border-[rgba(255,133,18,0.2)]">YOU</span>}
-            </div>
-            <span className="font-mono text-[9px] text-surface-600">
-              Connected via verification code
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <div className="font-mono text-[10px] text-surface-500 tracking-wider uppercase">Ethos Owner Assurance</div>
+          {trustMaturity && (
+            <span className="font-mono text-[9px] text-surface-300 border border-[rgba(255,255,255,0.08)] px-2 py-1 uppercase">
+              {trustMaturity.stage} agent
             </span>
+          )}
+        </div>
+        {hasOwner ? (
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <div className="font-mono text-[9px] text-surface-600 uppercase mb-2">Accountable Owner</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className={`w-2 h-2 ${ownerAssurance?.humanVerified ? 'bg-emerald-500' : 'bg-surface-500'}`} />
+                <span className={`font-mono text-xs ${ownerAssurance?.humanVerified ? 'text-emerald-400' : 'text-surface-300'}`}>
+                  {ownerAssurance?.humanVerified ? 'Human verified through Ethos' : 'Owner linked'}
+                </span>
+                {isOwner && <span className="font-mono text-[9px] px-1.5 py-0.5 bg-[rgba(255,133,18,0.1)] text-[#ff8512] border border-[rgba(255,133,18,0.2)]">YOU</span>}
+              </div>
+              <div className="font-mono text-[10px] text-surface-500 mt-2">
+                {agent.ownerWallet.slice(0, 8)}...{agent.ownerWallet.slice(-4)}
+              </div>
+              {ownerAssurance?.available ? (
+                <div className="font-mono text-xs text-surface-300 mt-3">
+                  {ownerAssurance.score ?? 'No score'}
+                  {ownerAssurance.level ? ` · ${ownerAssurance.level}` : ''}
+                  {typeof ownerAssurance.ownerAgentCount === 'number' ? ` · ${ownerAssurance.ownerAgentCount} agent${ownerAssurance.ownerAgentCount === 1 ? '' : 's'}` : ''}
+                </div>
+              ) : (
+                <div className="font-mono text-[10px] text-surface-600 mt-3">Ethos assurance unavailable</div>
+              )}
+            </div>
+            <div className="md:border-l md:border-[rgba(255,255,255,0.06)] md:pl-4">
+              <div className="font-mono text-[9px] text-surface-600 uppercase mb-2">Agent Performance</div>
+              <div className="font-mono text-xs text-surface-300">
+                {agent.reputationScore} · {reputation?.tier || 'Newcomer'}
+              </div>
+              <div className="font-mono text-[10px] text-surface-500 mt-2">
+                {trustMaturity?.completedBounties || 0} completed bounties
+              </div>
+              {(trustMaturity?.completedBounties || 0) === 0 && (
+                <div className="font-mono text-[10px] text-surface-600 mt-3">No completed Bard work yet</div>
+              )}
+            </div>
           </div>
         ) : (
           <div className="flex items-center gap-3">
             <div className="w-2 h-2 bg-surface-600" />
-            <span className="font-mono text-xs text-surface-500">Independent — No human owner linked</span>
+            <span className="font-mono text-xs text-surface-500">Independent agent · No accountable owner linked</span>
           </div>
         )}
       </div>

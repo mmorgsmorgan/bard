@@ -114,6 +114,7 @@ export interface Agent {
   availability: string;
   totalEarnedUsdc: number;
   successRate: number;
+  isPlatformOwned?: boolean;
   createdAt: string;
 }
 
@@ -187,6 +188,35 @@ export interface ReputationData {
   verified: number;
   pending: number;
   rejected: number;
+  completedBounties?: number;
+}
+
+export interface OwnerAssurance {
+  source: 'ethos';
+  available: boolean;
+  relationship: 'verified_owner' | 'owner_linked' | 'independent';
+  ownerWallet: string | null;
+  humanVerificationStatus: 'REQUESTED' | 'VERIFIED' | 'REVOKED' | 'PENDING' | null;
+  humanVerified: boolean;
+  score: number | null;
+  level: string | null;
+  profile: {
+    displayName: string | null;
+    username: string | null;
+    avatarUrl: string | null;
+    url: string | null;
+  } | null;
+  reviews: { positive: number; neutral: number; negative: number };
+  vouchesReceived: number;
+  ownerAgentCount?: number;
+  checkedAt: string | null;
+  reason: string | null;
+}
+
+export interface TrustMaturity {
+  stage: 'new' | 'emerging' | 'proven';
+  completedBounties: number;
+  primarySignal: 'owner_credibility' | 'owner_and_performance' | 'agent_performance';
 }
 
 export interface Bounty {
@@ -198,6 +228,11 @@ export interface Bounty {
   amountUsdc: string;
   deadline: string;
   minReputation: number;
+  allowTrustBootstrap: boolean;
+  bootstrapRequirements: {
+    humanVerified: boolean;
+    minEthosScore: number;
+  };
   creatorAgentId?: string;
   creatorAgentName?: string;
   assignedAgentId?: string;
@@ -659,12 +694,35 @@ export async function registerAgent(data: {
   } catch (e) { console.error('registerAgent error:', e); return null; }
 }
 
-export async function fetchAgentById(id: string): Promise<{ agent: Agent | null; reputation: ReputationData | null }> {
+export async function fetchAgentById(id: string): Promise<{
+  agent: Agent | null;
+  reputation: ReputationData | null;
+  ownerAssurance: OwnerAssurance | null;
+  trustMaturity: TrustMaturity | null;
+}> {
   try {
     const res = await fetch(`${API}/api/agents/${id}`);
     const json = await res.json();
-    return { agent: json.agent || null, reputation: json.reputation || null };
-  } catch { return { agent: null, reputation: null }; }
+    return {
+      agent: json.agent || null,
+      reputation: json.reputation || null,
+      ownerAssurance: json.ownerAssurance || null,
+      trustMaturity: json.trustMaturity || null,
+    };
+  } catch {
+    return { agent: null, reputation: null, ownerAssurance: null, trustMaturity: null };
+  }
+}
+
+export async function fetchAgentOwnerAssurance(id: string): Promise<OwnerAssurance | null> {
+  try {
+    const res = await fetch(`${API}/api/agents/${id}/owner-assurance`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.ownerAssurance || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchAgentsByOwner(wallet: string): Promise<Agent[]> {
@@ -825,6 +883,9 @@ function bountyFromRow(row: Record<string, unknown>): Bounty {
       return undefined;
     }
   };
+  const bootstrap = parseObject<{ humanVerified?: boolean; minEthosScore?: number }>(
+    row.bootstrap_requirements || row.bootstrapRequirements
+  );
   return {
     id: row.id as string,
     creatorWallet: (row.creator_wallet || row.creatorWallet) as string,
@@ -834,6 +895,13 @@ function bountyFromRow(row: Record<string, unknown>): Bounty {
     amountUsdc: (row.amount_usdc || row.amountUsdc) as string,
     deadline: row.deadline as string,
     minReputation: (row.min_reputation || row.minReputation || 0) as number,
+    allowTrustBootstrap: [true, 1, '1', 'true'].includes(
+      (row.allow_trust_bootstrap ?? row.allowTrustBootstrap) as string | number | boolean
+    ),
+    bootstrapRequirements: {
+      humanVerified: bootstrap?.humanVerified !== false,
+      minEthosScore: Math.max(0, Number(bootstrap?.minEthosScore || 0)),
+    },
     creatorAgentId: (row.creator_agent_id || row.creatorAgentId) as string | undefined,
     creatorAgentName: (row.creator_agent_name || row.creatorAgentName) as string | undefined,
     assignedAgentId: (row.assigned_agent_id || row.assignedAgentId) as string | undefined,
@@ -974,6 +1042,11 @@ export async function createBounty(data: {
   amountUsdc: string;
   deadline: string;
   minReputation?: number;
+  allowTrustBootstrap?: boolean;
+  bootstrapRequirements?: {
+    humanVerified?: boolean;
+    minEthosScore?: number;
+  };
   selectionMode?: 'first_come' | 'proposal';
   proposalDeadline?: string;
   acceptanceCriteria?: string[];
