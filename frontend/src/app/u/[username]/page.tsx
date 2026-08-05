@@ -5,7 +5,7 @@ import { useState, useEffect } from 'react';
 import { useReadContract } from 'wagmi';
 import { CONTRACTS, VOUCH_TIERS } from '@/lib/config';
 import { BARD_PROFILE_ABI, BARD_VOUCH_ABI, BARD_AGENT_ABI } from '@/lib/abi';
-import { fetchProfileByUsername, fetchContributorVouchSummary, fetchProofsByWallet, fetchPortfolioByWallet, fetchAgentsByOwner, type StoredProfile, type StoredProof, type PortfolioItem, type Agent, type ContributorVouchSummary } from '@/lib/store';
+import { fetchProfileByUsername, fetchContributorVouchSummary, fetchProofsByWallet, fetchPortfolioByWallet, fetchAgentsByOwner, fetchPublicProfileOwnerAssurance, type StoredProfile, type StoredProof, type PortfolioItem, type Agent, type ContributorVouchSummary, type OwnerAssurance } from '@/lib/store';
 import Link from 'next/link';
 import { GitHubIcon, DiscordIcon, FarcasterIcon, XIcon, LinkedInIcon } from '@/components/SocialIcons';
 import { Headline } from '@/components/Editorial';
@@ -29,6 +29,8 @@ export default function PublicProfilePage() {
   const [portfolio, setPortfolio] = useState<PortfolioItem[]>([]);
   const [linkedAgents, setLinkedAgents] = useState<Agent[]>([]);
   const [publicVouchSummary, setPublicVouchSummary] = useState<ContributorVouchSummary | null>(null);
+  const [ownerAssurance, setOwnerAssurance] = useState<OwnerAssurance | null>(null);
+  const [ethosLoading, setEthosLoading] = useState(false);
   const [expandedItem, setExpandedItem] = useState<PortfolioItem | null>(null);
   const [showVouchModal, setShowVouchModal] = useState(false);
   const [showVouchersModal, setShowVouchersModal] = useState(false);
@@ -234,6 +236,25 @@ export default function PublicProfilePage() {
   const profileLinkedin = localProfile?.linkedin || '';
   const hasProfile = !!(profileWallet && profileWallet !== '0x0000000000000000000000000000000000000000');
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!profileWallet) {
+      setOwnerAssurance(null);
+      setEthosLoading(false);
+      return () => { cancelled = true; };
+    }
+
+    setEthosLoading(true);
+    fetchPublicProfileOwnerAssurance(profileWallet)
+      .then((assurance) => {
+        if (!cancelled) setOwnerAssurance(assurance);
+      })
+      .finally(() => {
+        if (!cancelled) setEthosLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [profileWallet]);
+
   // Get PFP URL from local profile storage
   const pfpUrl = localProfile?.pfp || '';
   const hasPendingVouch = Boolean(pendingApproveTxHash || pendingVouchTxHash);
@@ -358,6 +379,68 @@ export default function PublicProfilePage() {
               <span className="font-mono text-[9px] text-surface-600 tracking-[0.15em] ml-2">{s.label}</span>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Ethos is external owner assurance, not Bard performance reputation. */}
+      <div className="border border-[rgba(255,255,255,0.06)] bg-[#0c0c0c] p-5 mb-px">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider mb-2">Ethos Owner Assurance</div>
+            {ethosLoading ? (
+              <div className="font-mono text-xs text-surface-600 animate-pulse-subtle">Checking Ethos...</div>
+            ) : ownerAssurance?.available ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`w-2 h-2 ${ownerAssurance.humanVerificationStatus === 'VERIFIED' ? 'bg-emerald-500' : 'bg-surface-500'}`} />
+                <span className={`font-mono text-xs ${ownerAssurance.humanVerificationStatus === 'VERIFIED' ? 'text-emerald-400' : 'text-surface-300'}`}>
+                  {ownerAssurance.humanVerificationStatus === 'VERIFIED' ? 'Verified Human through Ethos' : 'Ethos profile linked'}
+                </span>
+                {ownerAssurance.profile?.displayName && (
+                  <span className="font-mono text-[10px] text-surface-500">· {ownerAssurance.profile.displayName}</span>
+                )}
+              </div>
+            ) : (
+              <div className="font-mono text-xs text-surface-600">No Ethos profile found for this wallet</div>
+            )}
+          </div>
+
+          {ownerAssurance?.available && !ethosLoading && (
+            <div className="flex flex-wrap items-center gap-4 sm:justify-end">
+              <div>
+                <div className="font-mono text-[9px] text-surface-600 uppercase">Ethos standing</div>
+                <div className="font-mono text-xs text-white mt-1">
+                  {ownerAssurance.score ?? 'No score'}{ownerAssurance.level ? ` · ${ownerAssurance.level}` : ''}
+                </div>
+              </div>
+              <div>
+                <div className="font-mono text-[9px] text-surface-600 uppercase">Reviews</div>
+                <div className="font-mono text-xs text-surface-300 mt-1">
+                  <span className="text-emerald-400">+{ownerAssurance.reviews.positive}</span>
+                  <span className="mx-1.5 text-surface-600">/</span>
+                  <span>{ownerAssurance.reviews.neutral}</span>
+                  <span className="mx-1.5 text-surface-600">/</span>
+                  <span className="text-red-400">-{ownerAssurance.reviews.negative}</span>
+                </div>
+              </div>
+              <div>
+                <div className="font-mono text-[9px] text-surface-600 uppercase">Ethos vouches</div>
+                <div className="font-mono text-xs text-white mt-1">{ownerAssurance.vouchesReceived}</div>
+              </div>
+              {ownerAssurance.profile?.url && (
+                <a
+                  href={ownerAssurance.profile.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-[10px] text-[#ff8512] hover:underline"
+                >
+                  View Ethos ↗
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="font-mono text-[9px] text-surface-700 mt-3">
+          Ethos provides external identity context. Bard work history and reputation remain separate.
         </div>
       </div>
 

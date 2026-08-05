@@ -735,6 +735,16 @@ export async function fetchHumanOwnerAssurance(authFetch: AuthFetch): Promise<Ow
   }
 }
 
+export async function fetchPublicProfileOwnerAssurance(wallet: string): Promise<OwnerAssurance | null> {
+  try {
+    const res = await fetch(`${API}/api/profiles/wallet/${wallet}/owner-assurance`);
+    const json = await res.json();
+    return json.ownerAssurance || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchAgentsByOwner(wallet: string): Promise<Agent[]> {
   try {
     const res = await fetch(`${API}/api/agents/owner/${wallet}`);

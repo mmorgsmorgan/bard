@@ -53,6 +53,7 @@ import { computeReputationScore } from './reputation-score.js';
 import { resolveVouchTarget } from './vouch-target.js';
 import { getOwnerAssurance, getUnavailableOwnerAssurance } from './ethos-service.js';
 import { createHumanEthosHandler } from './human-ethos-route.js';
+import { createPublicProfileEthosHandler } from './public-profile-ethos-route.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1369,6 +1370,10 @@ app.get('/api/profiles/wallet/:wallet', async (req, res) => {
   const row = await stmts.getProfileByWallet(req.params.wallet);
   res.json({ profile: profileToJSON(row) });
 });
+
+app.get('/api/profiles/wallet/:wallet/owner-assurance', createPublicProfileEthosHandler({
+  getProfile: (wallet) => stmts.getProfileByWallet(wallet),
+}));
 
 app.get('/api/profiles/username/:username', async (req, res) => {
   const row = await stmts.getProfileByUsername(req.params.username);

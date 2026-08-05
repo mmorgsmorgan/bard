@@ -34,6 +34,7 @@ npm test --workspace cli
 npm test --workspace sdk
 node backend/test-ethos-service.mjs
 node backend/test-human-ethos-route.mjs
+node backend/test-public-profile-ethos-route.mjs
 node --check backend/server.js
 forge test --root contracts
 ```
