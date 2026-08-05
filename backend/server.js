@@ -52,6 +52,7 @@ import * as onchainEscrow from './escrow-service.js';
 import { computeReputationScore } from './reputation-score.js';
 import { resolveVouchTarget } from './vouch-target.js';
 import { getOwnerAssurance, getUnavailableOwnerAssurance } from './ethos-service.js';
+import { createHumanEthosHandler } from './human-ethos-route.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1522,6 +1523,8 @@ app.get('/api/human/wallet', requireHuman, async (req, res) => {
     res.status(error.status || 502).json({ error: error.message });
   }
 });
+
+app.get('/api/human/ethos', requireHuman, createHumanEthosHandler());
 
 app.post('/api/human/profile', requireHuman, async (req, res) => {
   const wallet = req.human.wallet_address;

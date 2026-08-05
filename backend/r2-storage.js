@@ -1,5 +1,4 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { Upload } from '@aws-sdk/lib-storage';
 import { randomBytes } from 'crypto';
 import { stmts } from './db.js';
 
@@ -20,6 +19,11 @@ const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL || ''; // e.g., https://pub-abc1
 export const isR2Enabled = !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME);
 
 let s3Client = null;
+
+function logStorageMetric(metric) {
+  void stmts.logStorageMetric(metric)
+    .catch(err => console.error('Failed to log storage metric:', err));
+}
 
 if (isR2Enabled) {
   s3Client = new S3Client({
@@ -60,20 +64,17 @@ export async function uploadToR2(buffer, filename, contentType, folder = 'upload
   const key = `${folder}/${filename}`;
 
   try {
-    const upload = new Upload({
-      client: s3Client,
-      params: {
-        Bucket: R2_BUCKET_NAME,
-        Key: key,
-        Body: buffer,
-        ContentType: contentType,
-      },
-    });
+    // Bard caps uploads at 25 MB, so a single PUT avoids multipart setup and
+    // teardown overhead while remaining comfortably inside S3/R2 limits.
+    await s3Client.send(new PutObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    }));
 
-    await upload.done();
-
-    // Log successful upload metric
-    await stmts.logStorageMetric({
+    // Metrics are observability only and must not extend the user-facing upload.
+    logStorageMetric({
       operation: 'upload',
       storage_type: 'r2',
       file_type: contentType,
@@ -81,7 +82,7 @@ export async function uploadToR2(buffer, filename, contentType, folder = 'upload
       wallet,
       success: true,
       error_message: ''
-    }).catch(err => console.error('Failed to log storage metric:', err));
+    });
 
     // Return public URL
     if (R2_PUBLIC_URL) {
@@ -91,8 +92,7 @@ export async function uploadToR2(buffer, filename, contentType, folder = 'upload
       return `https://pub-${R2_ACCOUNT_ID}.r2.dev/${key}`;
     }
   } catch (error) {
-    // Log failed upload metric
-    await stmts.logStorageMetric({
+    logStorageMetric({
       operation: 'upload',
       storage_type: 'r2',
       file_type: contentType,
@@ -100,7 +100,7 @@ export async function uploadToR2(buffer, filename, contentType, folder = 'upload
       wallet,
       success: false,
       error_message: error.message
-    }).catch(err => console.error('Failed to log storage metric:', err));
+    });
 
     throw error;
   }
@@ -125,8 +125,7 @@ export async function deleteFromR2(key, wallet = '') {
 
     await s3Client.send(command);
 
-    // Log successful delete metric
-    await stmts.logStorageMetric({
+    logStorageMetric({
       operation: 'delete',
       storage_type: 'r2',
       file_type: '',
@@ -134,10 +133,9 @@ export async function deleteFromR2(key, wallet = '') {
       wallet,
       success: true,
       error_message: ''
-    }).catch(err => console.error('Failed to log storage metric:', err));
+    });
   } catch (error) {
-    // Log failed delete metric
-    await stmts.logStorageMetric({
+    logStorageMetric({
       operation: 'delete',
       storage_type: 'r2',
       file_type: '',
@@ -145,7 +143,7 @@ export async function deleteFromR2(key, wallet = '') {
       wallet,
       success: false,
       error_message: error.message
-    }).catch(err => console.error('Failed to log storage metric:', err));
+    });
 
     throw error;
   }

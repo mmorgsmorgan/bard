@@ -78,6 +78,11 @@ body {
   transition: background-color 0.3s ease, color 0.3s ease;
 }
 
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 ::selection {
   background: var(--accent);
   color: var(--accent-ink);
@@ -142,7 +147,186 @@ body {
   gap: 0.9ch;
 }
 
-/* ── Buttons — sharp, editorial (no glitch) ── */
+/* ── Shared physical interaction layer ── */
+.ui-pressable,
+.btn-primary,
+.btn-secondary {
+  touch-action: manipulation;
+  transform: translateZ(0) scale(1);
+  transform-origin: center;
+  will-change: transform;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ui-pressable {
+  transition:
+    transform 120ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    color 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease,
+    opacity 160ms ease;
+}
+
+.ui-pressable:active,
+.btn-primary:active:not(:disabled),
+.btn-secondary:active:not(:disabled) {
+  transform: translateZ(0) scale(0.97);
+  transition-duration: 70ms;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ui-pressable:hover {
+    border-color: color-mix(in srgb, var(--accent) 58%, var(--rule));
+  }
+}
+
+/* ── Floating navigation material ── */
+.bard-chrome {
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--rule) 72%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--bg-card) 55%, transparent);
+  backdrop-filter: blur(22px) saturate(145%);
+  -webkit-backdrop-filter: blur(22px) saturate(145%);
+}
+
+.bard-status-chip {
+  background: color-mix(in srgb, var(--bg-card) 56%, transparent);
+}
+
+.bard-nav-link {
+  position: relative;
+  color: var(--muted);
+  padding: 0.55rem 0;
+  transition: color 180ms ease;
+}
+
+.bard-nav-link::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.15rem;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: center;
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.bard-nav-link[data-active='true'],
+.bard-nav-link:hover {
+  color: var(--ink);
+}
+
+.bard-nav-link[data-active='true']::after {
+  transform: scaleX(1);
+}
+
+.motion-chevron {
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.bard-popover {
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.975);
+  transform-origin: top right;
+  filter: blur(5px);
+  background: color-mix(in srgb, var(--bg-card) 88%, transparent);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  transition:
+    opacity 150ms ease,
+    transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    filter 180ms ease,
+    visibility 0s linear 240ms;
+}
+
+.bard-popover[data-open='true'] {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  filter: blur(0);
+  transition-delay: 0s;
+}
+
+.bard-menu-item {
+  border: 1px solid transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .bard-menu-item:hover {
+    background: var(--accent-dim);
+    color: var(--ink) !important;
+  }
+}
+
+.bard-mobile-menu {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-8px);
+  transition:
+    grid-template-rows 260ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 150ms ease,
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.bard-mobile-menu[data-open='true'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.bard-mobile-menu-inner {
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--rule);
+}
+
+.bard-mobile-link {
+  color: var(--muted);
+  border-left: 2px solid transparent;
+}
+
+.bard-mobile-link[data-active='true'] {
+  color: var(--ink);
+  border-left-color: var(--accent);
+  padding-left: 0.75rem;
+}
+
+.bard-modal-scrim {
+  animation: bardScrimIn 180ms ease-out both;
+}
+
+.bard-modal-surface {
+  transform-origin: top center;
+  animation: bardMaterialize 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes bardScrimIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes bardMaterialize {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* ── Buttons — sharp editorial styling, physical response ── */
 .btn-primary {
   background: var(--accent);
   color: var(--accent-ink);
@@ -151,7 +335,10 @@ body {
   border-radius: 1px;
   border: 1px solid var(--accent);
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition:
+    transform 120ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    filter 180ms ease,
+    box-shadow 180ms ease;
   font-size: 0.8rem;
   font-family: 'JetBrains Mono', monospace;
   letter-spacing: 0.04em;
@@ -176,7 +363,11 @@ body {
   border-radius: 1px;
   border: 1px solid var(--rule);
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition:
+    transform 120ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 180ms ease,
+    color 180ms ease,
+    background-color 180ms ease;
   font-size: 0.8rem;
   font-family: 'JetBrains Mono', monospace;
   letter-spacing: 0.04em;
@@ -316,6 +507,23 @@ textarea.input-field {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .bard-chrome,
+  .bard-popover {
+    background: var(--bg);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .bard-chrome,
+  .bard-popover {
+    background: var(--bg);
+    border-color: var(--ink);
   }
 }
 

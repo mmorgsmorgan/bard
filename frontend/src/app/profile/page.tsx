@@ -4,13 +4,30 @@ import { useState, useEffect } from 'react';
 import { useReadContract } from 'wagmi';
 import { PROFILE_TYPES, CONTRACTS, CONTRIBUTION_TYPES } from '@/lib/config';
 import { BARD_PROFILE_ABI, BARD_PFP_ABI, BARD_PROOF_ABI, BARD_VOUCH_ABI, IDENTITY_REGISTRY_ABI } from '@/lib/abi';
-import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, savePortfolioItem, deletePortfolioItem, rememberProfileWallet, type StoredProfile, type StoredProof, type PortfolioItem } from '@/lib/store';
+import { fetchProfileByWallet, fetchProofsByWallet, fetchPortfolioByWallet, fetchHumanOwnerAssurance, savePortfolioItem, deletePortfolioItem, rememberProfileWallet, type StoredProfile, type StoredProof, type PortfolioItem, type OwnerAssurance } from '@/lib/store';
+import { prepareImageUpload } from '@/lib/image-upload';
 import Link from 'next/link';
 import { BardLogo } from '@/components/BardLogo';
 import { AgentAuth } from '@/components/AgentAuth';
 import { LinkAgentForm } from '@/components/LinkAgentForm';
 import { LinkedAgentStatus } from '@/components/LinkedAgentStatus';
 import { useBardAccount } from '@/components/BardAccountProvider';
+
+function proofActionLabel(stage: 'idle' | 'optimizing' | 'uploading' | 'saving' | 'wallet' | 'confirming') {
+  if (stage === 'optimizing') return 'Optimizing image...';
+  if (stage === 'uploading') return 'Uploading file...';
+  if (stage === 'wallet') return 'Confirm in wallet...';
+  if (stage === 'confirming') return 'Confirming on-chain...';
+  if (stage === 'saving') return 'Saving proof...';
+  return 'Save Proof';
+}
+
+function portfolioActionLabel(stage: 'idle' | 'optimizing' | 'uploading' | 'saving') {
+  if (stage === 'optimizing') return 'Optimizing image...';
+  if (stage === 'uploading') return 'Uploading file...';
+  if (stage === 'saving') return 'Saving work...';
+  return 'Add to Portfolio';
+}
 
 export default function ProfilePage() {
   const { address, isConnected, status, login, authFetch, sendTransaction } = useBardAccount();
@@ -30,11 +47,14 @@ export default function ProfilePage() {
   const [profileTxHash, setProfileTxHash] = useState('');
   const [profileExplorer, setProfileExplorer] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [ownerAssurance, setOwnerAssurance] = useState<OwnerAssurance | null>(null);
+  const [ethosLoading, setEthosLoading] = useState(false);
 
   // PFP state
   const [pfpPreview, setPfpPreview] = useState<string | null>(null);
   const [pfpDataURI, setPfpDataURI] = useState<string | null>(null);
   const [pfpUploading, setPfpUploading] = useState(false);
+  const [pfpUploadStage, setPfpUploadStage] = useState<'idle' | 'optimizing' | 'uploading'>('idle');
 
   // Dashboard state (merged)
   const [activeTab, setActiveTab] = useState<'portfolio' | 'proofs' | 'vouches'>('portfolio');
@@ -71,6 +91,7 @@ export default function ProfilePage() {
   const [editDisplayName, setEditDisplayName] = useState('');
   const [editPfpPreview, setEditPfpPreview] = useState<string | null>(null);
   const [editPfpUrl, setEditPfpUrl] = useState('');
+  const [editPfpUploading, setEditPfpUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -125,10 +146,13 @@ export default function ProfilePage() {
 
     // Upload to backend
     setPfpUploading(true);
+    setPfpUploadStage('optimizing');
     setErrorMsg('');
     try {
+      const uploadFile = await prepareImageUpload(file, { maxDimension: 1200, quality: 0.84 });
+      setPfpUploadStage('uploading');
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', uploadFile);
       const res = await authFetch('/api/upload/pfp', { method: 'POST', body: formData });
       // Surface the real server error instead of a generic message.
       let data: { success?: boolean; url?: string; error?: string } = {};
@@ -149,6 +173,7 @@ export default function ProfilePage() {
       setPfpPreview(null);
     } finally {
       setPfpUploading(false);
+      setPfpUploadStage('idle');
     }
   };
 
@@ -161,18 +186,29 @@ export default function ProfilePage() {
     setSettingsLoaded(false);
     setProofs([]);
     setPortfolio([]);
+    setOwnerAssurance(null);
     setStep(1);
 
-    if (!address) return;
+    if (!address) {
+      setEthosLoading(false);
+      return;
+    }
 
     let cancelled = false;
+    setEthosLoading(true);
     fetchProfileByWallet(address).then(local => {
       if (!cancelled) setExistingProfile(local || null);
     });
     fetchProofsByWallet(address).then(p => !cancelled && setProofs(p));
     fetchPortfolioByWallet(address).then(p => !cancelled && setPortfolio(p));
+    fetchHumanOwnerAssurance(authFetch).then(assurance => {
+      if (!cancelled) {
+        setOwnerAssurance(assurance);
+        setEthosLoading(false);
+      }
+    });
     return () => { cancelled = true; };
-  }, [address]);
+  }, [address, authFetch]);
 
   // Sync settings edit state when existingProfile loads
   useEffect(() => {
@@ -271,6 +307,7 @@ export default function ProfilePage() {
   const [proofFile, setProofFile] = useState<File | null>(null);
   const [proofFilePreview, setProofFilePreview] = useState<string | null>(null);
   const [proofUploading, setProofUploading] = useState(false);
+  const [proofUploadStage, setProofUploadStage] = useState<'idle' | 'optimizing' | 'uploading' | 'saving' | 'wallet' | 'confirming'>('idle');
 
   const handleProofFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -292,8 +329,11 @@ export default function ProfilePage() {
     try {
       let fileUrl = '';
       if (proofFile) {
+        setProofUploadStage(proofFile.type.startsWith('image/') ? 'optimizing' : 'uploading');
+        const uploadFile = await prepareImageUpload(proofFile, { maxDimension: 2400, quality: 0.84 });
+        setProofUploadStage('uploading');
         const formData = new FormData();
-        formData.append('file', proofFile);
+        formData.append('file', uploadFile);
         const uploadRes = await authFetch('/api/upload/proof', { method: 'POST', body: formData });
         const uploadData = await uploadRes.json() as {
           success?: boolean;
@@ -306,6 +346,7 @@ export default function ProfilePage() {
         fileUrl = uploadData.url;
       }
 
+      setProofUploadStage('saving');
       const proofInput = {
         id: `proof-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
         title: proofTitle,
@@ -326,7 +367,9 @@ export default function ProfilePage() {
         error?: string;
       };
       if (response.status === 202 && data.signatureRequired && data.transaction) {
+        setProofUploadStage('wallet');
         const txHash = await sendTransaction(data.transaction);
+        setProofUploadStage('confirming');
         response = await authFetch('/api/human/proofs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -348,11 +391,13 @@ export default function ProfilePage() {
       setErrorMsg(error instanceof Error ? error.message : 'Proof submission failed');
     } finally {
       setProofUploading(false);
+      setProofUploadStage('idle');
     }
   };
 
   const [pFile, setPFile] = useState<File | null>(null);
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [portfolioUploadStage, setPortfolioUploadStage] = useState<'idle' | 'optimizing' | 'uploading' | 'saving'>('idle');
 
   const handlePortfolioImage = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -368,34 +413,42 @@ export default function ProfilePage() {
   const handleSubmitPortfolio = async () => {
     if (!address || !pTitle) return;
     setUploadingFile(true);
-    let imageUrl: string | undefined;
-
-    // Upload file to backend if present
-    if (pFile) {
-      try {
+    setErrorMsg('');
+    try {
+      let imageUrl: string | undefined;
+      if (pFile) {
+        setPortfolioUploadStage(pFile.type.startsWith('image/') ? 'optimizing' : 'uploading');
+        const uploadFile = await prepareImageUpload(pFile, { maxDimension: 2400, quality: 0.84 });
+        setPortfolioUploadStage('uploading');
         const formData = new FormData();
-        formData.append('file', pFile);
+        formData.append('file', uploadFile);
         const res = await authFetch('/api/upload/portfolio', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (data.success) imageUrl = data.url;
-      } catch (err) {
-        console.error('Upload failed:', err);
+        const data = await res.json() as { success?: boolean; url?: string; error?: string };
+        if (!res.ok || !data.success || !data.url) {
+          throw new Error(data.error || 'Portfolio upload failed');
+        }
+        imageUrl = data.url;
       }
-    }
 
-    const item: PortfolioItem = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      wallet: address, title: pTitle, description: pDescription, category: pCategory,
-      imageDataURI: imageUrl || undefined, externalLink: pLink || undefined,
-      githubRepo: pGithub.trim() || undefined,
-      tags: pTags.split(',').map(t => t.trim()).filter(Boolean),
-      createdAt: new Date().toISOString(), order: portfolio.length,
-    };
-    savePortfolioItem(authFetch, item);
-    setTimeout(() => fetchPortfolioByWallet(address).then(setPortfolio), 300);
-    setShowAddPortfolio(false);
-    setUploadingFile(false);
-    setPTitle(''); setPDescription(''); setPLink(''); setPGithub(''); setPTags(''); setPFile(null); setPImagePreview(null);
+      setPortfolioUploadStage('saving');
+      const item: PortfolioItem = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        wallet: address, title: pTitle, description: pDescription, category: pCategory,
+        imageDataURI: imageUrl || undefined, externalLink: pLink || undefined,
+        githubRepo: pGithub.trim() || undefined,
+        tags: pTags.split(',').map(t => t.trim()).filter(Boolean),
+        createdAt: new Date().toISOString(), order: portfolio.length,
+      };
+      savePortfolioItem(authFetch, item);
+      setPortfolio(current => [...current, item]);
+      setShowAddPortfolio(false);
+      setPTitle(''); setPDescription(''); setPLink(''); setPGithub(''); setPTags(''); setPFile(null); setPImagePreview(null);
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Portfolio upload failed');
+    } finally {
+      setUploadingFile(false);
+      setPortfolioUploadStage('idle');
+    }
   };
 
   const handleDeletePortfolio = (id: string) => {
@@ -480,14 +533,26 @@ export default function ProfilePage() {
       const reader = new FileReader();
       reader.onload = () => setEditPfpPreview(reader.result as string);
       reader.readAsDataURL(file);
+      setEditPfpUploading(true);
+      setSaveMsg('Optimizing image...');
       try {
+        const uploadFile = await prepareImageUpload(file, { maxDimension: 1200, quality: 0.84 });
+        setSaveMsg('Uploading image...');
         const formData = new FormData();
-        formData.append('file', file);
+        formData.append('file', uploadFile);
         const res = await authFetch('/api/upload/pfp', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (data.success) setEditPfpUrl(data.url);
-        else setSaveMsg('Upload failed');
-      } catch { setSaveMsg('Could not upload image'); }
+        const data = await res.json() as { success?: boolean; url?: string; error?: string };
+        if (res.ok && data.success && data.url) {
+          setEditPfpUrl(data.url);
+          setSaveMsg('Image ready to save');
+        } else {
+          setSaveMsg(data.error || 'Upload failed');
+        }
+      } catch {
+        setSaveMsg('Could not upload image');
+      } finally {
+        setEditPfpUploading(false);
+      }
     };
 
     const handleSaveSettings = async () => {
@@ -602,6 +667,37 @@ export default function ProfilePage() {
                 <span className={`${row.mono ? 'font-mono' : ''} text-surface-200 text-xs`}>{row.value}</span>
               </div>
             ))}
+            <div className="flex items-center justify-between gap-4 p-3 bg-[#050505] text-sm">
+              <span className="text-surface-500 font-mono text-xs uppercase tracking-wider">Ethos</span>
+              {ethosLoading ? (
+                <span className="font-mono text-xs text-surface-500">Checking wallet...</span>
+              ) : ownerAssurance?.available ? (
+                ownerAssurance.profile?.url ? (
+                  <a
+                    href={ownerAssurance.profile.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono text-xs text-[#ff8512] hover:text-white"
+                  >
+                    {ownerAssurance.score ?? 'Profile'}{ownerAssurance.level ? ` · ${ownerAssurance.level}` : ''} ↗
+                  </a>
+                ) : (
+                  <span className="font-mono text-xs text-surface-200">
+                    {ownerAssurance.score ?? 'Profile found'}{ownerAssurance.level ? ` · ${ownerAssurance.level}` : ''}
+                  </span>
+                )
+              ) : (
+                <span className="font-mono text-xs text-surface-500">No Ethos profile found for this wallet</span>
+              )}
+            </div>
+            {ownerAssurance?.available && (
+              <div className="flex items-center justify-between gap-4 p-3 bg-[#050505] text-sm">
+                <span className="text-surface-500 font-mono text-xs uppercase tracking-wider">Human verification</span>
+                <span className={`font-mono text-xs ${ownerAssurance.humanVerificationStatus === 'VERIFIED' ? 'text-emerald-400' : 'text-surface-500'}`}>
+                  {ownerAssurance.humanVerificationStatus === 'VERIFIED' ? 'Verified Human through Ethos' : 'Not verified by Ethos'}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="flex gap-3">
@@ -631,9 +727,9 @@ export default function ProfilePage() {
                     </div>
                   )}
                   <div>
-                    <label className="btn-secondary text-xs cursor-pointer inline-block px-4 py-2">
-                      Change Image
-                      <input type="file" accept="image/*" onChange={handleEditPfpUpload} className="hidden" />
+                    <label className={`btn-secondary text-xs inline-block px-4 py-2 ${editPfpUploading ? 'cursor-wait opacity-60' : 'cursor-pointer'}`}>
+                      {editPfpUploading ? 'Uploading...' : 'Change Image'}
+                      <input type="file" accept="image/*" onChange={handleEditPfpUpload} disabled={editPfpUploading} className="hidden" />
                     </label>
                     <p className="font-mono text-[9px] text-surface-600 mt-1">PNG, JPG, WebP, GIF -- Max 5MB</p>
                   </div>
@@ -694,7 +790,7 @@ export default function ProfilePage() {
                   {saving ? 'Saving...' : 'Save Changes'}
                 </button>
                 {saveMsg && (
-                  <span className={`font-mono text-xs ${saveMsg === 'Settings saved' ? 'text-emerald-400' : 'text-red-400'}`}>{saveMsg}</span>
+                  <span className={`font-mono text-xs ${/(failed|could not|must)/i.test(saveMsg) ? 'text-red-400' : 'text-emerald-400'}`}>{saveMsg}</span>
                 )}
               </div>
             </div>
@@ -979,7 +1075,7 @@ export default function ProfilePage() {
               <div className="flex gap-3 mt-8">
                 <button onClick={() => { setShowAddProof(false); setProofFile(null); setProofFilePreview(null); }} className="btn-secondary flex-1 text-xs">Cancel</button>
                 <button onClick={handleSubmitProof} disabled={!proofTitle || !proofEcosystem || proofUploading} className="btn-primary flex-1 text-xs">
-                  {proofUploading ? 'Uploading...' : 'Save Proof'}
+                  {proofActionLabel(proofUploadStage)}
                 </button>
               </div>
             </div>
@@ -1061,9 +1157,14 @@ export default function ProfilePage() {
                 <div className="flex gap-3 pt-4">
                   <button onClick={() => { setShowAddPortfolio(false); setPFile(null); setPImagePreview(null); }} className="btn-secondary flex-1 text-xs">Cancel</button>
                   <button onClick={handleSubmitPortfolio} disabled={!pTitle || uploadingFile} className="btn-primary flex-1 text-xs">
-                    {uploadingFile ? 'Uploading...' : 'Add to Portfolio'}
+                    {portfolioActionLabel(portfolioUploadStage)}
                   </button>
                 </div>
+                {errorMsg && (
+                  <div className="p-3 bg-red-900/20 border border-red-900/30 text-red-400 text-sm font-mono">
+                    {errorMsg}
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1090,6 +1191,34 @@ export default function ProfilePage() {
             {s < 3 && <div className={`flex-1 h-px ${s < step ? 'bg-[#ff8512]' : 'bg-[rgba(255,255,255,0.06)]'}`} />}
           </div>
         ))}
+      </div>
+
+      <div className="flex flex-col gap-2 border-y border-[rgba(255,255,255,0.06)] py-4 mb-8 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="font-mono text-[10px] text-surface-500 uppercase tracking-wider">Ethos Owner Assurance</div>
+          <div className="font-mono text-[10px] text-surface-600 mt-1">
+            Checked against {address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'your active BARD wallet'}
+          </div>
+        </div>
+        {ethosLoading ? (
+          <span className="font-mono text-xs text-surface-500">Checking wallet...</span>
+        ) : ownerAssurance?.available ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="font-mono text-xs text-surface-200">
+              {ownerAssurance.score ?? 'Profile found'}{ownerAssurance.level ? ` · ${ownerAssurance.level}` : ''}
+            </span>
+            {ownerAssurance.humanVerificationStatus === 'VERIFIED' && (
+              <span className="font-mono text-[10px] text-emerald-400">Verified Human</span>
+            )}
+            {ownerAssurance.profile?.url && (
+              <a href={ownerAssurance.profile.url} target="_blank" rel="noopener noreferrer" className="font-mono text-[10px] text-[#ff8512] hover:text-white">
+                View Ethos ↗
+              </a>
+            )}
+          </div>
+        ) : (
+          <span className="font-mono text-xs text-surface-500">No Ethos profile found for this wallet</span>
+        )}
       </div>
 
       {step === 1 && (
@@ -1153,7 +1282,7 @@ export default function ProfilePage() {
                 <div className="text-xs text-surface-500">
                   <p>Upload up to 5MB</p>
                   <p>PNG, JPG, WebP, or GIF</p>
-                  {pfpUploading && <p className="mt-1" style={{ color: 'var(--accent)' }}>Uploading…</p>}
+                  {pfpUploading && <p className="mt-1" style={{ color: 'var(--accent)' }}>{pfpUploadStage === 'optimizing' ? 'Optimizing image...' : 'Uploading image...'}</p>}
                   {!pfpUploading && pfpDataURI && <p className="mt-1" style={{ color: 'var(--ok)' }}>Uploaded ✓ Ready to save</p>}
                   {!pfpUploading && pfpPreview && !pfpDataURI && !errorMsg && <p className="mt-1" style={{ color: 'var(--muted)' }}>Preview shown — uploading…</p>}
                   {errorMsg && errorMsg.toLowerCase().includes('image') && (
