@@ -4,7 +4,7 @@ export function BardLogo({ size = 32, className = '', style }: { size?: number; 
   return (
     <div className={className} style={{ width: size, height: size, flexShrink: 0, position: 'relative', ...style }}>
       <Image
-        src="/bard-logo.png"
+        src="/bard-logo-transparent.png"
         alt="BARD Logo"
         fill
         sizes={`${size}px`}
@@ -20,7 +20,7 @@ export function BardLogoBg({ className = '' }: { className?: string }) {
     <div className={className}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src="/bard-logo.png"
+        src="/bard-logo-transparent.png"
         alt=""
         className="w-full h-full object-contain"
       />
