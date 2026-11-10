@@ -19,23 +19,84 @@ For Vercel, enable **Include source files outside of the Root Directory in the B
 
 For both Railway application services, keep the root at `/` even when selecting a nested config file. Railpack reads the root Node version and lockfile. Leave Railway's assigned `PORT` available; both servers read it.
 
+## Redeploying an existing Vercel project
+
+Select `codex/bard-agent-marketplace-20261110` as the deployment source and production branch. The reported build cloned `main` at `19b055e`, which still requests Node 20. Redeploying that old commit repeats the error; create a new deployment from the release branch. Both Railway application services should use this same branch.
+
+In Vercel's **Build and Deployment** settings, use the Next.js preset, root `frontend`, Node **24.x**, install command `npm ci --prefix ..`, and build command `npm run build`. Enable inclusion of source files outside the root directory. The release already pins Node 24 in its package manifests. Vercel's error suggests its current default, Node 26, but [Node 24 remains supported](https://vercel.com/docs/functions/runtimes/node-js/node-js-versions). A package's `engines.node` takes precedence over the dashboard selection, so changing the dropdown alone does not fix an old Node 20 commit.
+
 ## Environment and storage
 
-Set these in the hosting dashboards, not in Git. Each example below names a setting; real secrets belong only in the relevant service's environment.
+Replace every angle-bracket placeholder before using these blocks. Generate the API and MCP public domains in Railway, then use their HTTPS origins without a trailing slash. Set real secrets in the hosting dashboards, not in Git or chat.
 
-| Service | Required configuration |
-| --- | --- |
-| Website | `NEXT_PUBLIC_API_URL` = public API origin; `NEXT_PUBLIC_MCP_URL` = public MCP origin **plus `/mcp`**. Set before building and redeploy after changing either. |
-| API | `NODE_ENV=production`; `DATABASE_URL` referencing the fresh PostgreSQL service; independent random `JWT_SECRET`, `MCP_INTERNAL_SECRET` and `PLATFORM_OPERATOR_SECRET`; retained `WALLET_MASTER_KEY`; `WALLET_PROVIDER=local` or a fully configured provider; `MCP_ONLY_AGENT_API=true`. |
-| API public URLs | `CORS_ORIGIN` = exact public website origin (comma-separated trusted origins if needed); `BARD_PUBLIC_API_URL` = public API origin; `MCP_URL` = public MCP origin. |
-| API settlement | `ONCHAIN_ESCROW=true`; `AGENTIC_COMMERCE_ADDRESS` and `BARD_JOB_HOOK_ADDRESS` from the deployment record; `SELLER_ADDRESS` = configured, funded evaluator wallet; `PLATFORM_OWNER_WALLET` = intended operator wallet. |
-| MCP | `NODE_ENV=production`; `BARD_API` = API origin; `MCP_INTERNAL_SECRET` identical to the API value. Set `CORS_ORIGIN` only for trusted browser origins using MCP. |
+### Railway API service
 
-Railway variable references can supply `DATABASE_URL` from the PostgreSQL service. The API currently enables PostgreSQL TLS in production; verify connectivity with the selected database template. Never weaken production authentication to get a health check passing.
+Use the following variables with a **fresh** PostgreSQL service. `${{Postgres.DATABASE_URL}}` is Railway's variable reference syntax; replace `Postgres` with the database service's actual name.
 
-Mount an API volume at `/data` and set `UPLOADS_DIR=/data/uploads`, or configure the supported R2 variables in [backend/.env.example](../backend/.env.example). Files on the container's ordinary filesystem do not survive redeployment. Retain database backups and the wallet master key together: encrypted managed wallets in PostgreSQL depend on that key.
+```dotenv
+NODE_ENV=production
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+JWT_SECRET=<NEW_RANDOM_SECRET_1>
+MCP_INTERNAL_SECRET=<NEW_RANDOM_SECRET_2>
+PLATFORM_OPERATOR_SECRET=<NEW_RANDOM_SECRET_3>
+WALLET_MASTER_KEY=<NEW_RANDOM_SECRET_4>
+WALLET_PROVIDER=local
+MCP_ONLY_AGENT_API=true
 
-The local deployer's Foundry keystore is not the application's evaluator. Provision a separate evaluator through the selected managed-wallet provider and fund it with testnet gas before enabling settlement. See [escrow operations](escrow-operations.md). Configure server-only `PASSPORT_API_KEY` and `PASSPORT_SCORER_ID` for Passport, and `BARD_VCR_URL` plus approved `BARD_VCR_POLICIES` for spending. The full remaining release inputs are in [CURRENT.md](../agent-handoff/CURRENT.md).
+CORS_ORIGIN=https://<YOUR_VERCEL_DOMAIN>
+BARD_PUBLIC_API_URL=https://<YOUR_API_DOMAIN>
+MCP_URL=https://<YOUR_MCP_DOMAIN>
+UPLOADS_DIR=/data/uploads
+
+ONCHAIN_ESCROW=true
+ARC_TESTNET_RPC=https://rpc.testnet.arc.network
+USDC_CONTRACT_ADDRESS=0x3600000000000000000000000000000000000000
+AGENTIC_COMMERCE_ADDRESS=0x680e73Ff53981629b8B814cE9A69AD1347867606
+BARD_JOB_HOOK_ADDRESS=0x097eF956B18E20A8E9b509791c2a430b2750f32b
+PLATFORM_OWNER_WALLET=0xB804d506d5446b1A3BeBEfC903D84F754973C2D2
+SELLER_ADDRESS=<BACKEND_MANAGED_EVALUATOR_ADDRESS>
+BARD_VCR_POLICIES={}
+```
+
+Generate each of the four secrets independently, for example by running `openssl rand -hex 32` four times locally. Retain `WALLET_MASTER_KEY` with the database: changing it prevents the backend from decrypting existing managed wallets. Mount an API volume at `/data`, or configure the supported R2 variables in [backend/.env.example](../backend/.env.example). The API currently enables PostgreSQL TLS in production; verify connectivity with the selected database template.
+
+`SELLER_ADDRESS` must be an evaluator that the selected wallet provider can sign for, funded with Arc Testnet gas. The contract admin address and local Foundry keystore do not automatically provision that backend signer. Operator provisioning through `/api/admin/provision-platform-wallet` creates a managed wallet in the new backend and returns its public address; fund it and set `SELLER_ADDRESS` before accepting funded work. The existing preview uses the admin as a placeholder and is not settlement-ready. Keep the intended operator in `PLATFORM_OWNER_WALLET`.
+
+For Passport, add these server-only values from [the Passport developer portal](https://developer.passport.xyz/):
+
+```dotenv
+PASSPORT_API_KEY=<PASSPORT_API_KEY>
+PASSPORT_SCORER_ID=<PASSPORT_SCORER_ID>
+```
+
+Ethos uses its public API and defaults to `ETHOS_CLIENT_NAME=bard`; it needs no Passport key. For managed funding and USDC sends, configure a trusted VCR verifier and policies:
+
+```dotenv
+BARD_VCR_URL=https://<YOUR_VCR_SERVICE_DOMAIN>
+BARD_VCR_POLICIES={"<LOWERCASE_AGENT_WALLET>":"<POLICY_ENS_NAME>"}
+```
+
+The backend calls `/api/verify` on that VCR origin. The empty `{}` map in the initial block permits browsing but blocks managed spending; replace it with approved policies before testing payments. Turnkey credentials are unnecessary for the `local` provider. Circle faucet and R2 credentials are optional integrations; Binance stays disabled.
+
+### Railway MCP service
+
+```dotenv
+NODE_ENV=production
+BARD_API=https://<YOUR_API_DOMAIN>
+MCP_INTERNAL_SECRET=<SAME_VALUE_AS_API_MCP_INTERNAL_SECRET>
+CORS_ORIGIN=https://<YOUR_VERCEL_DOMAIN>
+```
+
+Use the exact same `MCP_INTERNAL_SECRET` on the API and MCP services. A Railway reference to the API service's variable can keep them synchronized. MCP does not need the database URL, wallet master key or Passport credentials. Its CORS origin can be omitted when no browser client uses MCP. Leave `PORT` to Railway on both services.
+
+### Vercel frontend
+
+```dotenv
+NEXT_PUBLIC_API_URL=https://<YOUR_API_DOMAIN>
+NEXT_PUBLIC_MCP_URL=https://<YOUR_MCP_DOMAIN>/mcp
+```
+
+Set these for the Vercel environment being deployed, then create a new build. Both values are public and embedded at build time; server credentials belong on Railway. The frontend MCP URL includes `/mcp`; the API's `MCP_URL` is the origin without that suffix. Use the Vercel production domain as the API's `CORS_ORIGIN`, and add specific preview origins only when needed. The full remaining release inputs are in [CURRENT.md](../agent-handoff/CURRENT.md).
 
 ## Rollout and verification
 

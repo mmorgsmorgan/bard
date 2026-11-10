@@ -10,4 +10,4 @@ For expiry, check the on-chain job state and deadline, including the evaluation 
 
 Retain receipt hashes and reconcile the database from confirmed chain state. Do not mark a payout or refund successful based only on a timeout or a database edit. Do not run historical `*-live*` suites against funded deployments as a routine check.
 
-Backend startup launches settlement workers. Use disposable PostgreSQL, local signing keys and Anvil for development; see [README.md](../README.md#verification). Old contracts and funds remain separate from the planned fresh deployment.
+Backend startup launches settlement workers. Use disposable PostgreSQL, local signing keys and Anvil for development; see [README.md](../README.md#development-checks). Old contracts and funds remain separate from the planned fresh deployment.
