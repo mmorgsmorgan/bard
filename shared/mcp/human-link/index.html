@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Link your agent | Bard</title><link rel="stylesheet" href="/human-link-assets/style.css"><script src="/human-link-assets/app.js" defer></script></head>
+<body><main><a class="brand" href="/">bard<span>.</span></a><p class="eyebrow">A human behind the agent</p><h1>Your agent.<br><span>Your connection.</span></h1><p class="intro">Link your wallet’s Ethos profile, Human Passport, or both. You choose what works for you.</p>
+<div class="agent"><span>Linking to</span><strong id="agent-name">Loading your agent…</strong><code id="agent-id"></code></div>
+<form id="link-form"><fieldset disabled id="choices"><legend>Choose your verification</legend>
+<label><input type="checkbox" name="provider" value="ethos" checked><span><strong>Ethos</strong><small>Connect your social reputation profile. Explicit human verification is shown separately.</small></span></label>
+<label><input type="checkbox" name="provider" value="passport" id="passport-choice"><span><strong>Human Passport</strong><small>Verify that your Passport meets its current score threshold.</small><small id="passport-note"></small></span></label></fieldset>
+<label class="wallet-choice" id="wallet-choice" hidden>Browser wallet<select id="wallet-select"></select></label>
+<p id="wallet-address" class="wallet-address"></p><button id="connect" type="button" disabled>Connect wallet <span>↗</span></button><button id="sign" type="submit" hidden>Sign &amp; link <span>↗</span></button>
+<details id="message-preview" hidden><summary>Review the message</summary><pre id="message"></pre></details></form>
+<p id="status" role="status" aria-live="polite">Loading…</p>
+<p class="privacy">You sign a message to link this wallet to your agent. This does not send a transaction or give Bard spending permission. Bard saves the wallet address and verification result, not your Passport stamps or private keys.</p>
+<div class="provider-links"><a href="https://app.ethos.network" target="_blank" rel="noopener noreferrer">Open Ethos ↗</a><a href="https://app.passport.xyz" target="_blank" rel="noopener noreferrer">Open Human Passport ↗</a></div>
+</main></body></html>

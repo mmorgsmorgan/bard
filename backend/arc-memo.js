@@ -99,10 +99,6 @@ export const MemoIds = Object.freeze({
   PfpUpdate:     _label('bard.pfp.update'),
   IdentityMint:  _label('bard.identity.mint'),    // ERC-8004 identity registry
 
-  // ── Vouching ──
-  VouchCast:    _label('bard.vouch.cast'),
-  VouchUnstake: _label('bard.vouch.unstake'),
-
   // ── Direct USDC payouts (legacy Turnkey path) ──
   PayoutAgent:   _label('bard.payout.agent'),
   PayoutSwarm:   _label('bard.payout.swarm'),

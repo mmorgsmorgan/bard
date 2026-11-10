@@ -1,83 +1,59 @@
-# BARD Project Guide
+# Bard project guide
 
-This file is a concise map for coding agents. Read [README.md](README.md) for product, setup, usage, and deployment details.
+Read `agent-handoff/START-HERE.md`, `CURRENT.md`, `DECISIONS.md` and `WALLET-DESIGN.md` before continuing. Read [README.md](README.md) for setup and [shared/mcp/skill.md](shared/mcp/skill.md) for the maintained agent workflow.
 
-## Runtime
+## Runtime and workspace
 
-- Supported Node version: `>=20 <21`
-- Frontend minimum: Node `20.19.0`
-- Root package manager: npm workspaces
-- Contracts: Foundry, Solidity `0.8.28`
+- Node `24.x` (see `.nvmrc`); npm workspaces. Install from the repository root with `npm ci`.
+- `frontend/`: Next.js 15 public homepage, agents and bounties. Browsing stays sign-in-free.
+- `backend/`: Express, PostgreSQL, managed signing, escrow and workers.
+- `mcp-server/`: hosted MCP transport. `mcp/`: local stdio adapter.
+- `shared/mcp/`: tool definitions, canonical agent guide and human verification page.
+- `cli/` and `sdk/`: agent clients.
+- `contracts/`: Solidity 0.8.28, Foundry, ERC8183 and BardJobHookV2. It has nested Git metadata.
+- `agent-handoff/`: continuation records and browser previews. `presentation/`: separate existing deck work.
 
-## Workspace Map
+## Product and trust boundaries
 
-- `frontend/`: Next.js 14 application and human-facing flows
-- `backend/`: Express API, database access, auth, uploads, escrow, and background workers
-- `mcp-server/`: hosted Streamable HTTP MCP transport
-- `mcp/`: local stdio MCP wrapper
-- `shared/mcp/`: shared MCP handler and tool definitions
-- `cli/`: published agent CLI
-- `sdk/`: TypeScript agent SDK
-- `contracts/`: Arc contracts and Foundry tests; it is also a nested Git repository
-- `docs/`: escrow and onboarding runbooks
-- `presentation/`: browser deck, PDF, assets, and speaker notes
+- Agent-only, proposal-only marketplace on Arc Testnet `5042002`. Human accounts, vouching and first-come claiming are retired.
+- Agent bearer credentials require the authenticated MCP transport where enabled. Preserve `requireAuth`, `requireOwnAgent` and operator boundaries.
+- Human-link browser capabilities are short-lived and identity-only. They never authorize agent operations, transactions or spending.
+- Ethos profile linkage, explicit Ethos human verification and Passport score validity are distinct. They never increase Bard reputation or bypass work eligibility.
+- Managed wallets sign on the backend. User-PC signing and MPC remain proposals; do not describe backend-local encrypted keys as user-controlled custody.
+- Binance stays **Coming soon** with access disabled until the user authorizes release. Swarm execution and swaps are unavailable.
+- Preserve signed task, fee, delivery, retry and VCR reservation checks when editing settlement.
 
-## Common Commands
+## Local verification
+
+`scripts/launch-preview.mjs` starts an isolated local database, API, MCP and frontend using fresh private runtime configuration outside the repository. Optional `--public` adds a sign-in-free tunnel. Check the running preview details in `agent-handoff/CURRENT.md` before starting or stopping services; leave the user's active preview available while editing.
 
 ```bash
-npm install
-npm run dev --workspace frontend
-npm run dev --workspace backend
-npm run dev --workspace mcp-server
+npm test
 npm run build --workspace frontend
-npm test --workspace cli
-npm test --workspace sdk
-node backend/test-ethos-service.mjs
-node backend/test-human-ethos-route.mjs
-node backend/test-public-profile-ethos-route.mjs
-node --check backend/server.js
 forge test --root contracts
 ```
 
-## Authentication Boundaries
-
-- Humans authenticate through Privy and backend-issued human sessions.
-- Agents authenticate with scoped bearer tokens through MCP/API routes.
-- Human sessions are not agent tokens, and agent tokens must not authorize human-only routes.
-- Route changes should preserve `requireHuman`, `requireAuth`, `requireOwnAgent`, and trusted-operator boundaries.
-
-## Trust Rules
-
-- Bard reputation is agent performance history.
-- Ethos is owner assurance only and must never increase Bard reputation.
-- Show `Verified Human` only for explicit Ethos `VERIFIED` status.
-- Ownership transfer preserves earned agent history and recalculates owner assurance.
-
-## Background-Worker Warning
-
-Do not start `backend/server.js` against a shared or production database for casual testing. Startup launches expiry, escrow reconciliation, and audit workers after schema bootstrap. Use an isolated database and non-production wallet credentials.
-
-## Testing Guidance
-
-- Prefer focused unit/regression tests before broad or live suites.
-- Tests with `-live` may call deployed APIs, shared databases, or Arc contracts.
-- Run `forge test --root contracts` after escrow hook changes.
-- Run a frontend production build after UI, provider, routing, or environment changes.
-
-## Worktree Hygiene
-
-- The workspace may be dirty. Preserve unrelated user changes.
-- Numerous `*.pre-*` files are historical snapshots, not active source files.
-- Do not edit or commit snapshot files unless the user explicitly asks.
-- Stage requested files explicitly; do not use broad `git add .` in a dirty tree.
-- `contracts/` contains nested Git metadata. Confirm which repository owns a contract change before committing.
-
-## Presentation
-
-- Use `frontend/public/bard-logo-transparent.png` for the current logo.
-- Presentation CSS uses design tokens from `presentation/assets/design-tokens.css`.
-- Validate slides with:
+The following require an explicitly disposable `BARD_TEST_DATABASE_URL`:
 
 ```bash
-python3 /home/chief/.agents/skills/ckm-design-system/scripts/slide-token-validator.py presentation/bard-presentation.html
+node backend/test-human-link.mjs
+node backend/test-vcr-spending.mjs
+node backend/test-mcp-only-agent-api.mjs
+BARD_TEST_CHAIN=1 node backend/test-fresh-agent-api.mjs
 ```
+
+Never casually start `backend/server.js` using a shared or production database: schema bootstrap starts expiry, reconciliation, reputation and wallet audit workers. Use isolated data, synthetic keys and `DOTENV_CONFIG_PATH=/dev/null`. Inspect `*-live*` tests before running; they can use deployed services and funds.
+
+## Deployment
+
+The fresh Arc Testnet contracts were deployed and source-verified on 2026-11-10. Use [agent-handoff/DEPLOYMENT-2026-11-10.md](agent-handoff/DEPLOYMENT-2026-11-10.md) for addresses, receipts and verified configuration; continuing the application rollout does not require redeploying them. Use a new database and do not import old jobs, accounts or signing material. Read [docs/CONTRACT-REVIEW.md](docs/CONTRACT-REVIEW.md). The historical admin address ending `Ba3c8` is compromised and remains rejected by the deployment script. Working local signer setup and remaining release inputs are in `agent-handoff/CURRENT.md`.
+
+Backend and MCP deployments need the repository root so the shared guide and verification assets are included. Use `backend/railway.json` for the backend and `railway.json` for MCP. Both use Railpack and Node 24. See [docs/HOSTING.md](docs/HOSTING.md) for the Vercel/Railway service settings. Keep Passport credentials server-only. No deployment or publication is implied by a local cleanup task.
+
+## Coordination and hygiene
+
+- Preserve unrelated work in this dirty checkout. Do not edit `*.pre-*`/`*.original*` snapshots or the presentation unless requested.
+- Record the intended work area in `agent-handoff/JOURNAL.md`. Coordinate if another agent is actively editing it.
+- Keep safety copies outside the repository. Stage requested files explicitly; do not use `git add .`.
+- Confirm whether root or nested Git owns a contract change before committing.
+- Before stopping, update `agent-handoff/CURRENT.md` and append a dated journal entry with changes, tests, limitations and next actions. Never put secrets or private user content in the handoff.

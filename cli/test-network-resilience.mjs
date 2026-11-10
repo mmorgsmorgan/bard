@@ -11,7 +11,6 @@ const CLI = new URL('./bin/bard.js', import.meta.url).pathname;
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'bard-cli-network-'));
 let openCalls = 0;
 let proposalCalls = 0;
-let claimCalls = 0;
 let proposalSubmitCalls = 0;
 let deliverableCalls = 0;
 const statusRequestTimes = {};
@@ -36,9 +35,9 @@ const server = http.createServer(async (req, res) => {
             bounty: {
               id: args.bountyId,
               title: 'Detailed test bounty',
-              description: 'Inspect this before claiming.',
+              description: 'Inspect this before proposing.',
               status: 'open',
-              selection_mode: 'first_come',
+              selection_mode: 'proposal',
               amount_usdc: 5,
               min_reputation: 10,
               deadline: '2026-08-01T00:00:00.000Z',
@@ -53,33 +52,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (tool === 'bard_claim_bounty') {
-    claimCalls++;
+  if (tool === 'bard_submit_proposal') {
+    proposalSubmitCalls++;
     if (args.bountyId === 'bounty-fail') {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'temporary failure' }));
       return;
     }
-    res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({
-      jsonrpc: '2.0',
-      id: rpc.id,
-      result: {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            success: true,
-            message: 'Bounty claimed!',
-            bounty: { id: args.bountyId, title: 'Test bounty', status: 'assigned' },
-          }),
-        }],
-      },
-    }));
-    return;
-  }
-
-  if (tool === 'bard_submit_proposal') {
-    proposalSubmitCalls++;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({
       jsonrpc: '2.0',
@@ -140,7 +119,7 @@ const server = http.createServer(async (req, res) => {
     bounty_type: 'research',
     min_reputation: 0,
     deadline: '2026-08-01T00:00:00.000Z',
-    selection_mode: status === 'proposal_open' ? 'proposal' : 'first_come',
+    selection_mode: 'proposal',
   };
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify({
@@ -189,13 +168,20 @@ try {
   const listResult = await execFileAsync(process.execPath, [CLI, 'bounties'], { env });
 
   assert.equal(listResult.stderr, '');
-  assert.match(listResult.stdout, /Bounties \(2\)/);
-  assert.equal(openCalls, 2, 'read-only MCP calls should retry after a 503');
+  assert.match(listResult.stdout, /Bounties \(1\)/);
+  assert.equal(openCalls, 0, 'default listing must only advertise proposal work');
   assert.equal(proposalCalls, 1);
+
+  const filteredResult = await execFileAsync(process.execPath, [CLI, 'bounties', '--status', 'open,proposal_open'], { env });
+  assert.match(filteredResult.stdout, /Bounties \(2\)/);
+  assert.equal(openCalls, 2, 'read-only MCP calls should retry after a 503');
+  assert.equal(proposalCalls, 2);
   assert.ok(
     Math.abs(statusRequestTimes.open - statusRequestTimes.proposal_open) < 150,
     'status requests should run in parallel'
   );
+
+  await assert.rejects(execFileAsync(process.execPath, [CLI, 'bounties', '--mode', 'first_come'], { env }), /Only proposal mode is supported/);
 
   const detailsResult = await execFileAsync(
     process.execPath,
@@ -206,21 +192,11 @@ try {
   assert.equal(details.bounty.id, 'bounty-test');
   assert.equal(details.bounty.acceptance_criteria[0].id, 'criterion-1');
 
-  const claimResult = await execFileAsync(
-    process.execPath,
-    [CLI, 'claim', 'bounty-test', '--json'],
-    { env }
-  );
-  assert.equal(claimResult.stderr, '');
-  const claim = JSON.parse(claimResult.stdout);
-  assert.equal(claim.success, true);
-  assert.equal(claim.bounty.id, 'bounty-test');
-
   await assert.rejects(
-    execFileAsync(process.execPath, [CLI, 'claim', 'bounty-fail'], { env }),
-    /Could not claim bounty-fail/
+    execFileAsync(process.execPath, [CLI, 'propose', 'bounty-fail', '--input', proposalInput], { env }),
+    /Could not submit proposal/
   );
-  assert.equal(claimCalls, 2, 'mutation MCP calls must not be retried');
+  assert.equal(proposalSubmitCalls, 1, 'mutation MCP calls must not be retried');
 
   const proposalResult = await execFileAsync(
     process.execPath,
@@ -230,7 +206,7 @@ try {
   const proposal = JSON.parse(proposalResult.stdout);
   assert.equal(proposal.success, true);
   assert.equal(proposal.proposal.proposedPriceUsdc, 4);
-  assert.equal(proposalSubmitCalls, 1);
+  assert.equal(proposalSubmitCalls, 2);
 
   const deliverableResult = await execFileAsync(
     process.execPath,
@@ -247,4 +223,4 @@ try {
   await fs.rm(home, { recursive: true, force: true });
 }
 
-console.log('CLI network resilience and claim tests passed');
+console.log('CLI read retries, mutation retry exclusion, proposals and delivery tests passed');

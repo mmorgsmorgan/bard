@@ -60,6 +60,23 @@ export interface CommitmentResult {
   salt: string;
 }
 
+export interface HumanLink {
+  provider: 'ethos' | 'passport';
+  wallet: string;
+  verifiedAt: string;
+  profileLinked?: boolean;
+  humanVerified?: boolean;
+  passed?: boolean;
+  expiresAt?: string;
+}
+
+export interface HumanLinkSession {
+  agentId: string;
+  verificationUrl: string;
+  expiresAt: string;
+  mode: 'hosted';
+}
+
 export interface BountyResult {
   id: string;
   title: string;
@@ -99,18 +116,6 @@ export interface DeliverableResult {
   bounty?: BountyResult;
 }
 
-export interface VouchResult {
-  success: true;
-  contributorWallet: string;
-  contributorAgentId?: string | null;
-  amount: string;
-  tier: number;
-  approveTxHash: string;
-  txHash: string;
-  explorer: string;
-  message?: string;
-}
-
 export type ContributionType = 'research' | 'code_review' | 'data_analysis' | 'content' | 'verification' | 'other';
 
 interface McpToolError {
@@ -128,7 +133,7 @@ interface McpRpcResponse {
   };
 }
 
-const DEFAULT_MCP_URL = 'https://mcp-production-8d2e.up.railway.app/mcp';
+const DEFAULT_MCP_URL = 'https://mcp-production-a3da.up.railway.app/mcp';
 
 export class BardMcpError extends Error {
   readonly tool: string;
@@ -189,7 +194,7 @@ export function buildProofHash(data: unknown): string {
  * const agent = new BardAgent({
  *   agentId: 'agent-xxx',
  *   token: process.env.BARD_TOKEN,
- *   mcpUrl: 'https://mcp-production-8d2e.up.railway.app/mcp',
+ *   mcpUrl: 'https://mcp-production-a3da.up.railway.app/mcp',
  * });
  * const rep = await agent.getReputation();
  * console.log(`${rep?.tier} - Score: ${rep?.score}`);
@@ -215,6 +220,20 @@ export class BardAgent {
   }
 
   // ── Identity ──
+
+  /** Give this URL to the human to choose Ethos, Human Passport, or both. */
+  async linkHuman(): Promise<HumanLinkSession> {
+    return this._mcpCall<HumanLinkSession>('bard_link_human', { mode: 'hosted' });
+  }
+
+  async getHumanLinks(): Promise<{ agentId: string; links: HumanLink[] }> {
+    return this._mcpCall('bard_get_human_links');
+  }
+
+  /** Remove identity links and revoke pending browser sessions. */
+  async unlinkHuman(): Promise<{ success: true; agentId: string; links: HumanLink[] }> {
+    return this._mcpCall('bard_unlink_human');
+  }
 
   /** Get the agent's full profile */
   async getProfile(): Promise<{ agent: AgentProfile; reputation: ReputationData } | null> {
@@ -359,25 +378,6 @@ export class BardAgent {
     }
   }
 
-  /** Stake a 30-day on-chain vouch from this agent's managed wallet. */
-  async vouchFor(options: {
-    contributorWallet?: string;
-    contributorUsername?: string;
-    contributorAgentId?: string;
-    contributorAgentName?: string;
-    amount: string;
-    tier: 0 | 1 | 2 | 3;
-    statement: string;
-    ecosystem: string;
-    evidenceURI?: string;
-    score?: number;
-  }): Promise<VouchResult> {
-    return this._mcpCall<VouchResult>('bard_vouch', {
-      ...options,
-      score: options.score ?? 80,
-    });
-  }
-
   // ── Bounties ──
 
   /** List available bounties */
@@ -393,29 +393,9 @@ export class BardAgent {
     }
   }
 
-  /** Claim a funded first-come bounty */
-  async acceptBounty(bountyId: string): Promise<BountyResult | null> {
-    try {
-      const data = await this._mcpCall<{ bounty: BountyResult }>(
-        'bard_claim_bounty',
-        { bountyId }
-      );
-      console.log(`[BardAgent] Bounty ${bountyId} claimed`);
-      return data.bounty;
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : '[BardAgent] acceptBounty failed');
-      return null;
-    }
-  }
-
-  /**
-   * @deprecated A contribution ID is not a bounty deliverable. Use
-   * submitDeliverable(bountyId, content) with the actual completed work.
-   */
-  async submitBountyWork(_bountyId: string, _contributionId: string): Promise<boolean> {
-    throw new Error(
-      '[BardAgent] submitBountyWork is no longer supported. Use submitDeliverable(bountyId, content).'
-    );
+  /** Propose signed terms. Work starts after the creator accepts and funds them. */
+  async submitProposal(bountyId: string, proposal: { plan: string; proposedPriceUsdc: number; estimatedHours?: number }): Promise<{ success: true; proposal: { id: string } }> {
+    return this._mcpCall('bard_submit_proposal', { bountyId, ...proposal });
   }
 
   /** Submit completed work and optional human-review evidence for a claimed bounty */

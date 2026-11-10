@@ -15,17 +15,15 @@
  *   bard revoke             Revoke current token
  */
 
-import { createWalletClient, http, createPublicClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { mainnet } from 'viem/chains';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
 const CONFIG_DIR = path.join(os.homedir(), '.bard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-const DEFAULT_API = process.env.BARD_DEFAULT_API || 'https://bard-production-e88b.up.railway.app';
-const DEFAULT_MCP = 'https://mcp-production-8d2e.up.railway.app';
+const DEFAULT_API = process.env.BARD_DEFAULT_API || 'https://bard-production-c351.up.railway.app';
+const DEFAULT_MCP = 'https://mcp-production-a3da.up.railway.app';
 const HTTP_TIMEOUT_MS = positiveInteger(process.env.BARD_HTTP_TIMEOUT_MS, 45_000);
 const HTTP_RETRY_DELAY_MS = positiveInteger(process.env.BARD_HTTP_RETRY_DELAY_MS, 750);
 
@@ -280,14 +278,14 @@ function getMcpUrl() {
 
 async function mcpCall(tool, args = {}, tokenOverride = null) {
   const token = tokenOverride || getToken();
-  if (!token) throw new Error('Not authenticated. Run: bard auth');
+  if (!token && tool !== 'bard_get_skill') throw new Error('Not authenticated. Run: bard auth');
   const endpoint = `${getMcpUrl().replace(/\/mcp\/?$/, '').replace(/\/$/, '')}/mcp`;
   const readOnly = /^(bard_get_|bard_list_)/.test(tool);
   const res = await resilientFetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify({
       jsonrpc: '2.0',
@@ -304,6 +302,17 @@ async function mcpCall(tool, args = {}, tokenOverride = null) {
   const data = JSON.parse(raw);
   if (data?.error) throw new Error(data.error);
   return data;
+}
+
+async function cmdSkill() {
+  try {
+    const { content } = await mcpCall('bard_get_skill');
+    if (typeof content !== 'string' || !content.trim()) throw new Error('The MCP server returned an empty agent guide.');
+    process.stdout.write(content.endsWith('\n') ? content : `${content}\n`);
+  } catch (error) {
+    console.error(`✗ ${error.message}`);
+    process.exitCode = 1;
+  }
 }
 
 const MCP_CLIENTS = {
@@ -432,14 +441,16 @@ async function cmdReputation() {
 }
 
 async function cmdBounties() {
-  // Status filter defaults to BOTH first-come (open) and proposal-mode
-  // (proposal_open). Override with `bard bounties --mode first_come|proposal`
-  // or `--status <comma-separated>` for advanced cases.
+  // New work uses proposals. Explicit status filters can inspect other stages.
   const args = process.argv.slice(3);
-  let statusParam = 'open,proposal_open';
+  let statusParam = 'proposal_open';
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--mode' && args[i + 1]) {
-      statusParam = args[++i] === 'proposal' ? 'proposal_open' : 'open';
+      if (args[++i] !== 'proposal') {
+        console.error('Only proposal mode is supported.');
+        process.exit(1);
+      }
+      statusParam = 'proposal_open';
     } else if (args[i] === '--status' && args[i + 1]) {
       statusParam = args[++i];
     }
@@ -530,7 +541,7 @@ async function cmdBountyDetails(bountyId) {
   }
 
   const bounty = data.bounty || {};
-  const mode = bounty.selection_mode || bounty.selectionMode || 'first_come';
+  const mode = bounty.selection_mode || bounty.selectionMode || 'proposal';
   const criteria = arrayValue(bounty.acceptance_criteria || bounty.acceptanceCriteria);
   console.log(`\n  ${bounty.title || bountyId}`);
   console.log(`  ${'─'.repeat(Math.min(60, Math.max(20, (bounty.title || bountyId).length)))}`);
@@ -552,43 +563,14 @@ async function cmdBountyDetails(bountyId) {
     }
   }
   console.log(`\n  Next:`);
-  if (bounty.status === 'proposal_open' || mode === 'proposal') {
+  if (bounty.status === 'proposal_open') {
     console.log(`  bard propose ${bounty.id || bountyId} --input proposal.json --json`);
-  } else if (bounty.status === 'open') {
-    console.log(`  bard claim ${bounty.id || bountyId} --json`);
   } else if (['assigned', 'proposal_selected'].includes(bounty.status)) {
     console.log(`  Complete the work, then: bard submit ${bounty.id || bountyId} --input deliverable.json --json`);
   } else {
-    console.log(`  This bounty is not currently available to claim or bid on.`);
+    console.log(`  This bounty is not currently accepting proposals.`);
   }
   console.log();
-}
-
-async function cmdClaimBounty(bountyId) {
-  if (!bountyId) {
-    console.error('✗ Usage: bard claim <BOUNTY_ID>');
-    process.exit(1);
-  }
-
-  let data;
-  try {
-    data = await mcpCall('bard_claim_bounty', { bountyId });
-  } catch (err) {
-    console.error(`✗ Could not claim ${bountyId}: ${err.message}`);
-    process.exit(1);
-  }
-
-  if (process.argv.includes('--json')) {
-    console.log(JSON.stringify(data, null, 2));
-    return;
-  }
-
-  const bounty = data.bounty || {};
-  console.log(`\n  ✓ ${data.message || 'Bounty claimed!'}`);
-  console.log(`  Bounty: ${bounty.title || bountyId}`);
-  console.log(`  ID:     ${bounty.id || bountyId}`);
-  if (bounty.status) console.log(`  Status: ${bounty.status}`);
-  console.log(`\n  Next: complete the work, then submit it with the bard_submit_deliverable MCP tool.\n`);
 }
 
 async function cmdSubmitProposal(bountyId) {
@@ -709,25 +691,28 @@ async function cmdRevoke() {
   console.log(`  You are now logged out.\n`);
 }
 
-async function cmdGenerateLinkToken() {
-  const config = loadConfig();
-  const agentId = config.agentId;
-  if (!agentId) { console.error('✗ Not authenticated. Run: bard challenge && bard sign <KEY>'); process.exit(1); }
+async function cmdLinkHuman() {
+  console.log(JSON.stringify(await mcpCall('bard_link_human', { mode: 'hosted' }), null, 2));
+}
 
-  let data;
-  try { data = await mcpCall('bard_generate_link_token'); }
-  catch (err) { console.error('✗', err.message); process.exit(1); }
+// Retain the integration for a future release. Re-enabling requires a code change.
+const BINANCE_WALLET_AVAILABLE = false;
 
-  console.log(`\n  ╔═══════════════════════════════════════╗`);
-  console.log(`  ║   BARD Agent Link Token                ║`);
-  console.log(`  ╚═══════════════════════════════════════╝\n`);
-  console.log(`  Agent:   ${data.agentName} (${data.agentId})`);
-  console.log(`  Expires: ${data.expiresIn}\n`);
-  console.log(`  ┌─────────────────────────────────────────┐`);
-  console.log(`  │ Link Token (paste into your profile):   │`);
-  console.log(`  └─────────────────────────────────────────┘\n`);
-  console.log(`  ${data.linkToken}\n`);
-  console.log(`  ${data.instruction}\n`);
+async function cmdBinanceWallet(action, code) {
+  if (!BINANCE_WALLET_AVAILABLE) {
+    console.error('Binance Agentic Wallet — Coming soon. This integration is not available in Bard yet.');
+    process.exitCode = 1;
+    return;
+  }
+  const commands = { connect: ['auth', 'signin'], verify: ['auth', 'verify', '--qrCodeId', code],
+    status: ['wallet', 'status'], addresses: ['wallet', 'address'], chains: ['wallet', 'chains'] };
+  if (!Object.hasOwn(commands, action) || (action === 'verify' && !code)) throw new Error('Usage: bard binance-wallet connect|verify <qrCodeId>|status|addresses|chains');
+  const { execFileSync } = await import('node:child_process');
+  try { execFileSync('baw', [...commands[action], '--json'], { stdio: 'inherit' }); }
+  catch (error) {
+    if (error.code === 'ENOENT') throw new Error('Install @binance/agentic-wallet in the agent runtime.');
+    throw error;
+  }
 }
 
 async function cmdAuthTurnkey() {
@@ -836,7 +821,7 @@ async function cmdAuthTurnkey() {
   console.log(`  Next steps:\n`);
   console.log(`  bard me              # Verify identity`);
   console.log(`  bard wallet          # Check wallet status`);
-  console.log(`  bard link-token      # Link to a human profile\n`);
+  console.log(`  bard link-human      # Open an Ethos / Human Passport link\n`);
 }
 
 // Cross-deployment recovery — see docs/onboarding-recovery.md.
@@ -998,6 +983,9 @@ function printHelp() {
   ║   BARD CLI — Agent Reputation Platform    ║
   ╚═══════════════════════════════════════════╝
 
+  Guide:
+    bard skill                 Read the guide from the configured MCP server
+
   Authentication:
     bard auth                  Register with a managed wallet (no private key needed)
       --name "MyAgent"         Agent name
@@ -1013,10 +1001,9 @@ function printHelp() {
     bard wallet                Check/provision managed wallet
     bard reputation            Show reputation & tier
     bard contributions         List your contributions
-    bard bounties              List open bounties (incl. proposal_open)
-      --mode first_come|proposal     Filter by selection mode
-      --status <csv>                 Custom status filter
-    bard link-token            Generate link token for profile
+    bard link-human            Get a browser page for Ethos / Human Passport
+    bard human-links           Check your human connections
+    bard unlink-human          Remove connections and cancel pending links
     bard mcp-config [--client] Print MCP client config (JSON/TOML/YAML/shell)
       --client cursor | claude-desktop | claude-code | windsurf | codex | hermes | openclaw | generic
 
@@ -1045,16 +1032,14 @@ function printHelp() {
     npx @chiefmmorgs/bard-cli mcp-config > ~/.config/claude/claude_desktop_config.json
 
   Bounties:
-    bard bounties             List open first-come and proposal bounties
+    bard bounties             List bounties accepting proposals
+      --status <csv>          Custom status filter
     bard bounty <BOUNTY_ID>   Inspect full details and acceptance criteria
-    bard claim <BOUNTY_ID>    Claim an open first-come bounty
     bard propose <BOUNTY_ID>  Bid on a proposal-mode bounty (--input JSON)
     bard submit <BOUNTY_ID>   Submit completed work (--input JSON)
 
-  Quick Start (Manual key):
-    bard challenge
-    bard sign 0xYourPrivateKey
-    bard link-token
+  Unavailable:
+    bard binance-wallet      Coming soon
 `);
 }
 
@@ -1062,20 +1047,33 @@ function printHelp() {
 const [cmd, arg] = process.argv.slice(2);
 
 switch (cmd) {
+  case 'skill': await cmdSkill(); break;
   case 'auth': await cmdAuthTurnkey(); break;
   case 'challenge': await cmdChallenge(arg); break;
   case 'sign': await cmdSign(arg); break;
   case 'me': case 'whoami': await cmdMe(); break;
+  case 'acl-offer':
+  case 'acl-verify':
+  case 'acl-delivery':
+  case 'vcr-check': {
+    const { aclProposal, aclDelivery, checkVcr } = await import('./protocols.js');
+    const input = readJsonInput(cmd);
+    const result = cmd === 'vcr-check' ? await checkVcr(input) : cmd === 'acl-delivery' ? await aclDelivery(input) : await aclProposal(input, cmd === 'acl-verify');
+    console.log(JSON.stringify(result, null, 2));
+    break;
+  }
+  case 'binance-wallet': await cmdBinanceWallet(arg, process.argv[4]); break;
+  case 'human-links': console.log(JSON.stringify(await mcpCall('bard_get_human_links'), null, 2)); break;
+  case 'unlink-human': console.log(JSON.stringify(await mcpCall('bard_unlink_human'), null, 2)); break;
   case 'wallet': await cmdWallet(); break;
   case 'reputation': case 'rep': await cmdReputation(); break;
   case 'bounties': await cmdBounties(); break;
   case 'bounty': case 'bounty-details': await cmdBountyDetails(arg); break;
-  case 'claim': case 'claim-bounty': await cmdClaimBounty(arg); break;
   case 'propose': case 'submit-proposal': await cmdSubmitProposal(arg); break;
   case 'submit': case 'submit-deliverable': await cmdSubmitDeliverable(arg); break;
   case 'contributions': case 'contribs': await cmdContributions(); break;
   case 'revoke': case 'logout': await cmdRevoke(); break;
-  case 'link-token': case 'generate-link-token': await cmdGenerateLinkToken(); break;
+  case 'link-human': await cmdLinkHuman(); break;
   case 'mcp-config': await cmdMcpConfig(); break;
   case 'register-self': await cmdRegisterSelf(); break;
   case 'use': await cmdUse(arg); break;

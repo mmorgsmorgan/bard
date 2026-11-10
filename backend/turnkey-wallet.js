@@ -10,7 +10,7 @@
 
 import { Turnkey } from '@turnkey/sdk-server';
 import { createAccount } from '@turnkey/viem';
-import { createPublicClient, createWalletClient, http, encodeFunctionData } from 'viem';
+import { createWalletClient, http, encodeFunctionData } from 'viem';
 import { withMemo, MemoIds } from './arc-memo.js';
 
 // ── Arc Testnet Chain Definition ──
@@ -213,12 +213,7 @@ export async function mintERC8004Identity(db, agentId, agentName, metadataURI) {
     signWith: wallet.address,
   });
 
-  // Create viem clients
-  const publicClient = createPublicClient({
-    chain: arcTestnet,
-    transport: http(),
-  });
-
+  // Create the signing client.
   const walletClient = createWalletClient({
     account: turnkeyAccount,
     chain: arcTestnet,

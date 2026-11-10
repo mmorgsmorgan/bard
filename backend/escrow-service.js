@@ -459,7 +459,9 @@ async function jobIdFromReceipt(receipt) {
  * @param {bigint} [p.providerAgentId]
  * @param {string} [p.evaluator]     defaults to the platform wallet
  * @param {number} p.earningsUsdc    agent earnings (budget)
+ * @param {string} [p.earningsUnits] exact signed budget in USDC base units
  * @param {number} [p.platformFeeUsdc]  platform fee (0 = no fee)
+ * @param {string} [p.platformFeeUnits] exact signed fee in USDC base units
  * @param {string} [p.feeRecipient]  fee recipient (defaults to platform wallet)
  * @param {number} [p.maxFeeBps]     consented fee cap (0 = uncapped)
  * @param {number} [p.minRepScore]
@@ -469,9 +471,9 @@ async function jobIdFromReceipt(receipt) {
 export async function openAndFund(p) {
   const evaluator = p.evaluator || SELLER_ADDRESS;
   const feeRecipient = p.feeRecipient || SELLER_ADDRESS;
-  const earningsWei = toUsdcWei(p.earningsUsdc);
-  const feeWei = toUsdcWei(p.platformFeeUsdc || 0);
-  const expiredAt = Math.floor(Date.now() / 1000) + (p.expirySeconds || 72 * 3600);
+  const earningsWei = p.earningsUnits === undefined ? toUsdcWei(p.earningsUsdc) : BigInt(p.earningsUnits);
+  const feeWei = p.platformFeeUnits === undefined ? toUsdcWei(p.platformFeeUsdc || 0) : BigInt(p.platformFeeUnits);
+  const expiredAt = p.expiresAt || Math.floor(Date.now() / 1000) + (p.expirySeconds || 72 * 3600);
   const txs = {};
 
   let jobId;
@@ -541,8 +543,8 @@ export async function openAndFund(p) {
  */
 export async function resumeAndFund(p) {
   const jobId = BigInt(p.jobId);
-  const earningsWei = toUsdcWei(p.earningsUsdc);
-  const feeWei = toUsdcWei(p.platformFeeUsdc || 0);
+  const earningsWei = p.earningsUnits === undefined ? toUsdcWei(p.earningsUsdc) : BigInt(p.earningsUnits);
+  const feeWei = p.platformFeeUnits === undefined ? toUsdcWei(p.platformFeeUsdc || 0) : BigInt(p.platformFeeUnits);
   const evaluator = p.evaluator || SELLER_ADDRESS;
   const feeRecipient = p.feeRecipient || SELLER_ADDRESS;
   const zeroAddress = '0x0000000000000000000000000000000000000000';
@@ -551,6 +553,7 @@ export async function resumeAndFund(p) {
 
   try {
     let job = await getJob(jobId);
+    if (p.expiresAt && (Number(job.expiredAt) !== p.expiresAt || job.description !== p.description)) throw new Error('Recovery job differs from signed task or expiry.');
     if (!sameAddress(job.client, p.creatorWallet)) {
       throw new Error(`escrow-service: job ${jobId} belongs to a different creator`);
     }
@@ -568,7 +571,9 @@ export async function resumeAndFund(p) {
     if (feeMeta.configured) {
       if (
         BigInt(feeMeta.platformFee) !== feeWei ||
-        !sameAddress(feeMeta.feeRecipient, feeRecipient)
+        !sameAddress(feeMeta.feeRecipient, feeRecipient) ||
+        Number(feeMeta.maxFeeBps) !== (p.maxFeeBps || 0) ||
+        Number(feeMeta.minRepScore) !== (p.minRepScore || 0)
       ) {
         throw new Error(`escrow-service: job ${jobId} fee configuration does not match the bounty`);
       }

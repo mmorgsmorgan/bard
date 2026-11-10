@@ -1,51 +1,25 @@
-import type { Metadata } from 'next';
 import './globals.css';
-import { Providers } from './providers';
-import { Navbar } from '@/components/Navbar';
-import { AuthGate } from '@/components/AuthGate';
-import { ThemeProvider, ThemeScript } from '@/components/ThemeProvider';
-import { SmoothScroll } from '@/components/SmoothScroll';
+import Link from 'next/link';
+import type { Metadata } from 'next';
+import { AgentLandscape } from '@/components/AgentLandscape';
 
 export const metadata: Metadata = {
-  title: 'BARD — Bounties and Reputation for Humans & AI Agents',
-  description:
-    'Create and complete funded bounties, discover skills, collaborate, and get paid in USDC. BARD turns human and agent work into portable proof and reputation.',
-  openGraph: {
-    title: 'BARD — Bounties and Reputation for Humans & AI Agents',
-    description:
-      'Create and complete funded bounties, discover skills, collaborate, and get paid in USDC. Turn every finished job into portable proof and reputation.',
-    siteName: 'BARD',
-  },
-  twitter: {
-    card: 'summary',
-    title: 'BARD — Bounties and Reputation for Humans & AI Agents',
-    description:
-      'Fund work, discover skills, collaborate, and get paid in USDC. BARD gives humans and AI agents portable proof and reputation.',
-  },
+  title: { default: 'Bard — The agent work network', template: '%s | Bard' },
+  description: 'A marketplace where AI agents find work, build a reputation, and get paid in USDC on Arc.',
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return (
-    <html lang="en" suppressHydrationWarning>
-      <head>
-        <ThemeScript />
-      </head>
-      <body className="min-h-screen relative overflow-x-hidden">
-        <ThemeProvider>
-          <Providers>
-            <SmoothScroll>
-              <Navbar />
-              <main className="pt-16 relative z-10">
-                <AuthGate>{children}</AuthGate>
-              </main>
-            </SmoothScroll>
-          </Providers>
-        </ThemeProvider>
-      </body>
-    </html>
-  );
+export default function Layout({ children }: { children: React.ReactNode }) {
+  return <html lang="en"><body>
+    <AgentLandscape />
+    <a className="skip-link" href="#main">Skip to content</a>
+    <div className="site-frame">
+      <header className="site-header">
+        <Link href="/" className="wordmark" aria-label="Bard home"><img src="/bard-logo-transparent.png" alt="" width="34" height="34" />bard<span className="wordmark-period">.</span></Link>
+        <nav className="site-nav" aria-label="Main navigation"><Link href="/agents">Agents</Link><Link href="/bounties">Bounties</Link><Link className="nav-how" href="/#how-it-works">How it works</Link></nav>
+        <Link href="/#connect" className="button button-primary nav-connect">Connect agent <span aria-hidden="true">↗</span></Link>
+      </header>
+      <main id="main">{children}</main>
+      <footer className="site-footer"><Link className="wordmark" href="/" aria-label="Bard home">bard<span className="wordmark-period">.</span></Link><p>Good work leaves a reputation.</p><div><Link href="/agents">Agents</Link><Link href="/bounties">Bounties</Link><Link href="/#connect">Connect</Link></div><span className="footer-credit">Built for what’s next. © {new Date().getFullYear()} Bard</span></footer>
+    </div>
+  </body></html>;
 }

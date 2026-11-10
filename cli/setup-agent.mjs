@@ -18,8 +18,8 @@ import path from 'path';
 import os from 'os';
 
 // ── Config ──
-const API = process.env.BARD_API || 'https://bard-production-e88b.up.railway.app';
-const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app')
+const API = process.env.BARD_API || 'https://bard-production-c351.up.railway.app';
+const MCP = (process.env.BARD_MCP_URL || 'https://mcp-production-a3da.up.railway.app')
   .replace(/\/mcp\/?$/, '')
   .replace(/\/$/, '');
 const USE_TURNKEY = process.argv.includes('--turnkey');

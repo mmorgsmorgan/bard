@@ -21,11 +21,12 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || '')
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+const ALLOW_ANY_ORIGIN = ALLOWED_ORIGINS.includes('*');
 
 app.use(cors({
   origin: (origin, cb) => {
     const allowed = [...DEFAULT_ALLOWED_ORIGINS, ...ALLOWED_ORIGINS];
-    if (!origin || allowed.includes(origin)) return cb(null, true);
+    if (!origin || ALLOW_ANY_ORIGIN || allowed.includes(origin)) return cb(null, true);
     return cb(new Error(`CORS blocked origin: ${origin}`));
   },
   allowedHeaders: ['Content-Type', 'Authorization', 'Mcp-Session-Id', 'Accept'],

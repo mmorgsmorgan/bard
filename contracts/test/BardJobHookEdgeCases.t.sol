@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
-import "../src/BardJobHook.sol";
+import "../src/BardJobHookV2.sol";
 import "../src/vendor/ERC8183.sol";
 import "../src/vendor/MockUSDC.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
@@ -17,7 +17,7 @@ import "../src/vendor/IERC8183Hook.sol";
  */
 contract BardJobHookEdgeCases is Test {
     ERC8183     internal ac;
-    BardJobHook internal hook;
+    BardJobHookV2 internal hook;
     MockUSDC    internal usdc;
 
     address internal admin     = makeAddr("admin");
@@ -41,7 +41,7 @@ contract BardJobHookEdgeCases is Test {
         );
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initCall);
         ac = ERC8183(address(proxy));
-        hook = new BardJobHook(address(ac), address(usdc), address(0));
+        hook = new BardJobHookV2(address(ac), address(usdc), address(0), address(this));
 
         vm.startPrank(admin);
         ac.setPaymentTokenAllowed(address(usdc), true);
@@ -56,22 +56,22 @@ contract BardJobHookEdgeCases is Test {
     // ──────────────────────────────────────────────
 
     function test_Constructor_RevertWhen_ZeroAgenticCommerce() public {
-        vm.expectRevert(BardJobHook.InvalidAddress.selector);
-        new BardJobHook(address(0), address(usdc), address(0));
+        vm.expectRevert(BardJobHookV2.InvalidAddress.selector);
+        new BardJobHookV2(address(0), address(usdc), address(0), address(this));
     }
 
     function test_Constructor_RevertWhen_ZeroPaymentToken() public {
-        vm.expectRevert(BardJobHook.InvalidAddress.selector);
-        new BardJobHook(address(ac), address(0), address(0));
+        vm.expectRevert(BardJobHookV2.InvalidAddress.selector);
+        new BardJobHookV2(address(ac), address(0), address(0), address(this));
     }
 
     function test_Constructor_SetsOwnerToDeployer() public {
-        BardJobHook fresh = new BardJobHook(address(ac), address(usdc), address(0));
+        BardJobHookV2 fresh = new BardJobHookV2(address(ac), address(usdc), address(0), address(this));
         assertEq(fresh.owner(), address(this), "owner is deployer");
     }
 
     function test_Constructor_AcceptsZeroReputationReader() public {
-        BardJobHook fresh = new BardJobHook(address(ac), address(usdc), address(0));
+        BardJobHookV2 fresh = new BardJobHookV2(address(ac), address(usdc), address(0), address(this));
         assertEq(address(fresh.reputationReader()), address(0));
     }
 
@@ -86,7 +86,7 @@ contract BardJobHookEdgeCases is Test {
             "t", address(hook), 0
         );
         vm.prank(client);
-        vm.expectRevert(BardJobHook.InvalidAddress.selector);
+        vm.expectRevert(BardJobHookV2.InvalidAddress.selector);
         hook.configureBardJob(jobId, PLATFORM_FEE, address(0), 2500, 0);
     }
 
@@ -99,7 +99,7 @@ contract BardJobHookEdgeCases is Test {
         vm.prank(client);
         hook.configureBardJob(jobId, 0, address(0), 0, 0);
 
-        BardJobHook.FeeMeta memory fm = hook.getFeeMeta(jobId);
+        BardJobHookV2.FeeMeta memory fm = hook.getFeeMeta(jobId);
         assertTrue(fm.configured);
         assertEq(fm.platformFee, 0);
     }
@@ -107,7 +107,7 @@ contract BardJobHookEdgeCases is Test {
     function test_ConfigureOnNonexistentJob_RevertsNotClient() public {
         // No job 42 exists; _readClient returns address(0); msg.sender != 0 → NotClient.
         vm.prank(client);
-        vm.expectRevert(BardJobHook.NotClient.selector);
+        vm.expectRevert(BardJobHookV2.NotClient.selector);
         hook.configureBardJob(42, PLATFORM_FEE, treasury, 2500, 0);
     }
 
@@ -122,7 +122,7 @@ contract BardJobHookEdgeCases is Test {
             "t", address(hook), 0
         );
         vm.prank(client);
-        vm.expectRevert(BardJobHook.NotConfigured.selector);
+        vm.expectRevert(BardJobHookV2.NotConfigured.selector);
         hook.depositFee(jobId);
     }
 
@@ -143,7 +143,7 @@ contract BardJobHookEdgeCases is Test {
         hook.depositFee(jobId);
         assertEq(usdc.balanceOf(address(hook)), hookBefore, "no transfer for zero fee");
 
-        BardJobHook.FeeMeta memory fm = hook.getFeeMeta(jobId);
+        BardJobHookV2.FeeMeta memory fm = hook.getFeeMeta(jobId);
         assertTrue(fm.feeDeposited);
     }
 
@@ -184,7 +184,7 @@ contract BardJobHookEdgeCases is Test {
         ac.setBudget(jobId, address(usdc), AGENT_EARNINGS, "");
 
         // Configured but not deposited.
-        vm.expectRevert(BardJobHook.FeeNotDeposited.selector);
+        vm.expectRevert(BardJobHookV2.FeeNotDeposited.selector);
         hook.refundFee(jobId);
     }
 
@@ -197,7 +197,7 @@ contract BardJobHookEdgeCases is Test {
         ac.complete(jobId, keccak256("ok"), "");
 
         // afterAction(complete) already settled the fee.
-        vm.expectRevert(BardJobHook.AlreadySettled.selector);
+        vm.expectRevert(BardJobHookV2.AlreadySettled.selector);
         hook.refundFee(jobId);
     }
 
@@ -207,7 +207,7 @@ contract BardJobHookEdgeCases is Test {
         ac.claimRefund(jobId);
 
         hook.refundFee(jobId);
-        vm.expectRevert(BardJobHook.AlreadySettled.selector);
+        vm.expectRevert(BardJobHookV2.AlreadySettled.selector);
         hook.refundFee(jobId);
     }
 
@@ -233,7 +233,7 @@ contract BardJobHookEdgeCases is Test {
         // Permissionless sweep via the Rejected branch.
         uint256 clientBefore = usdc.balanceOf(client);
         vm.expectEmit(true, true, false, true, address(hook));
-        emit BardJobHook.BardFeeRefunded(jobId, client, PLATFORM_FEE, BardJobHook.RefundCause.Rejected);
+        emit BardJobHookV2.BardFeeRefunded(jobId, client, PLATFORM_FEE, BardJobHookV2.RefundCause.Rejected);
         hook.refundFee(jobId);
 
         assertEq(usdc.balanceOf(client) - clientBefore, PLATFORM_FEE);
@@ -248,7 +248,7 @@ contract BardJobHookEdgeCases is Test {
         ac.reject(jobId, keccak256("no"), "");
 
         // afterAction(reject) already refunded — calling refundFee again must revert.
-        vm.expectRevert(BardJobHook.AlreadySettled.selector);
+        vm.expectRevert(BardJobHookV2.AlreadySettled.selector);
         hook.refundFee(jobId);
     }
 
@@ -271,12 +271,12 @@ contract BardJobHookEdgeCases is Test {
         // setBudget / fund / submit afterAction is a no-op — covered by happy path
         // not exploding. Here we sanity-check feeMeta is untouched after submit.
         uint256 jobId = _createAndFund();
-        BardJobHook.FeeMeta memory before_ = hook.getFeeMeta(jobId);
+        BardJobHookV2.FeeMeta memory before_ = hook.getFeeMeta(jobId);
 
         vm.prank(provider);
         ac.submit(jobId, keccak256("d"), "");
 
-        BardJobHook.FeeMeta memory after_ = hook.getFeeMeta(jobId);
+        BardJobHookV2.FeeMeta memory after_ = hook.getFeeMeta(jobId);
         assertEq(after_.platformFee, before_.platformFee);
         assertEq(after_.feeSettled, before_.feeSettled);
     }
@@ -287,7 +287,7 @@ contract BardJobHookEdgeCases is Test {
 
     function test_RevertWhen_NonOwnerSetsReputationReader() public {
         vm.prank(stranger);
-        vm.expectRevert(BardJobHook.NotOwner.selector);
+        vm.expectRevert(BardJobHookV2.NotOwner.selector);
         hook.setReputationReader(address(0xBEEF));
     }
 
@@ -298,7 +298,7 @@ contract BardJobHookEdgeCases is Test {
         assertEq(hook.owner(), newOwner);
 
         // Old owner (this test contract) is locked out.
-        vm.expectRevert(BardJobHook.NotOwner.selector);
+        vm.expectRevert(BardJobHookV2.NotOwner.selector);
         hook.setReputationReader(address(0xBEEF));
 
         // New owner can.
@@ -308,13 +308,13 @@ contract BardJobHookEdgeCases is Test {
     }
 
     function test_RevertWhen_TransferOwnershipToZero() public {
-        vm.expectRevert(BardJobHook.InvalidAddress.selector);
+        vm.expectRevert(BardJobHookV2.InvalidAddress.selector);
         hook.transferOwnership(address(0));
     }
 
     function test_RevertWhen_NonOwnerTransfersOwnership() public {
         vm.prank(stranger);
-        vm.expectRevert(BardJobHook.NotOwner.selector);
+        vm.expectRevert(BardJobHookV2.NotOwner.selector);
         hook.transferOwnership(stranger);
     }
 
@@ -414,7 +414,7 @@ contract BardJobHookEdgeCases is Test {
         if (shouldRevert) {
             vm.expectRevert(
                 abi.encodeWithSelector(
-                    BardJobHook.FeeExceedsCap.selector,
+                    BardJobHookV2.FeeExceedsCap.selector,
                     uint16(actualBps),
                     capBps
                 )
@@ -422,7 +422,7 @@ contract BardJobHookEdgeCases is Test {
             hook.depositFee(jobId);
         } else {
             hook.depositFee(jobId);
-            BardJobHook.FeeMeta memory fm = hook.getFeeMeta(jobId);
+            BardJobHookV2.FeeMeta memory fm = hook.getFeeMeta(jobId);
             assertTrue(fm.feeDeposited);
             assertEq(usdc.balanceOf(address(hook)), fee);
         }

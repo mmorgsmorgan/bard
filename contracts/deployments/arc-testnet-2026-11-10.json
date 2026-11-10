@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 1,
+  "network": "Arc Testnet",
+  "chainId": 5042002,
+  "recordedLocalDate": "2026-11-10",
+  "timezone": "Africa/Lagos",
+  "broadcastCompletedAtUTC": "2026-11-09T23:39:14.212Z",
+  "rpcUrl": "https://rpc.testnet.arc.network",
+  "explorerUrl": "https://explorer.testnet.arc.io",
+  "deployer": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2",
+  "secureAdmin": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2",
+  "source": {
+    "compiler": "0.8.28",
+    "optimizer": true,
+    "optimizerRuns": 200,
+    "viaIR": true,
+    "evmVersion": "cancun",
+    "workingTree": "uncommitted"
+  },
+  "contracts": {
+    "implementation": {
+      "name": "ERC8183",
+      "address": "0x7DAE3eD8e9d99E95E20e11634EAE5d3Ba073D18D",
+      "source": "src/vendor/ERC8183.sol:ERC8183",
+      "creationTransaction": "0x7b533450926054ade1a99edb0947bc22820e4ef21c6dd2c77a8f46f3d3de3739",
+      "blockNumber": 71616767,
+      "sourceVerified": true,
+      "explorerUrl": "https://explorer.testnet.arc.io/address/0x7DAE3eD8e9d99E95E20e11634EAE5d3Ba073D18D"
+    },
+    "proxy": {
+      "name": "ERC1967Proxy",
+      "address": "0x680e73Ff53981629b8B814cE9A69AD1347867606",
+      "source": "lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol:ERC1967Proxy",
+      "creationTransaction": "0xa54eb9b7dc87d995d29eaae380df3d7577a7f52cd7b57456e28bc8c1f2fe5b52",
+      "blockNumber": 71616772,
+      "sourceVerified": true,
+      "explorerUrl": "https://explorer.testnet.arc.io/address/0x680e73Ff53981629b8B814cE9A69AD1347867606"
+    },
+    "hook": {
+      "name": "BardJobHookV2",
+      "address": "0x097eF956B18E20A8E9b509791c2a430b2750f32b",
+      "source": "src/BardJobHookV2.sol:BardJobHookV2",
+      "creationTransaction": "0x183f738185ce24e45aa4d9eb20d7c759591b814cf633762d88c7b99a4941c22a",
+      "blockNumber": 71616777,
+      "sourceVerified": true,
+      "explorerUrl": "https://explorer.testnet.arc.io/address/0x097eF956B18E20A8E9b509791c2a430b2750f32b"
+    }
+  },
+  "configuration": {
+    "platformTreasury": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2",
+    "hookOwner": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2",
+    "defaultAdmin": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2",
+    "adminRole": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2",
+    "paymentToken": "0x3600000000000000000000000000000000000000",
+    "paymentTokenDecimals": 6,
+    "reputationReader": "0x0000000000000000000000000000000000000000",
+    "platformFeeBP": 0,
+    "evaluatorFeeBP": 0,
+    "paymentTokenAllowed": true,
+    "hookWhitelisted": true,
+    "paused": false,
+    "compromisedAddressHasAdminRoles": false
+  },
+  "gas": {
+    "nativeToken": "USDC",
+    "nativeDecimals": 18,
+    "simulationEstimate": "0.2790738825",
+    "paid": "0.11481755625",
+    "paidWei": "114817556250000000",
+    "balanceAfter": "43.467972893466185482"
+  },
+  "transactions": [
+    {
+      "nonce": 119,
+      "contract": "ERC8183",
+      "transactionType": "CREATE",
+      "address": "0x7dae3ed8e9d99e95e20e11634eae5d3ba073d18d",
+      "hash": "0x7b533450926054ade1a99edb0947bc22820e4ef21c6dd2c77a8f46f3d3de3739",
+      "block": 71616767,
+      "gasUsed": 2659480,
+      "effectiveGasPriceWei": "28125000000",
+      "feeWei": "74797875000000000",
+      "status": "success",
+      "description": "Deploy ERC8183 implementation"
+    },
+    {
+      "nonce": 120,
+      "contract": "ERC1967Proxy",
+      "transactionType": "CREATE",
+      "address": "0x680e73ff53981629b8b814ce9a69ad1347867606",
+      "hash": "0xa54eb9b7dc87d995d29eaae380df3d7577a7f52cd7b57456e28bc8c1f2fe5b52",
+      "block": 71616772,
+      "gasUsed": 235997,
+      "effectiveGasPriceWei": "28125000000",
+      "feeWei": "6637415625000000",
+      "status": "success",
+      "description": "Deploy and initialize ERC1967 proxy"
+    },
+    {
+      "nonce": 121,
+      "contract": "BardJobHookV2",
+      "transactionType": "CREATE",
+      "address": "0x097ef956b18e20a8e9b509791c2a430b2750f32b",
+      "hash": "0x183f738185ce24e45aa4d9eb20d7c759591b814cf633762d88c7b99a4941c22a",
+      "block": 71616777,
+      "gasUsed": 1081411,
+      "effectiveGasPriceWei": "28125000000",
+      "feeWei": "30414684375000000",
+      "status": "success",
+      "description": "Deploy BardJobHookV2"
+    },
+    {
+      "nonce": 122,
+      "contract": "ERC1967Proxy",
+      "transactionType": "CALL",
+      "address": "0x680e73ff53981629b8b814ce9a69ad1347867606",
+      "hash": "0x7b8f79418133d5bbb1c05aa424ba15559e59e4465b4207f1c6981e4b9f82a1c9",
+      "block": 71616779,
+      "gasUsed": 52357,
+      "effectiveGasPriceWei": "28125000000",
+      "feeWei": "1472540625000000",
+      "status": "success",
+      "description": "Allow Arc USDC"
+    },
+    {
+      "nonce": 123,
+      "contract": "ERC1967Proxy",
+      "transactionType": "CALL",
+      "address": "0x680e73ff53981629b8b814ce9a69ad1347867606",
+      "hash": "0x1e8ca31cccf472707c83e1fbfa79905c97bfd381ab15154afa47cb0b65e41fea",
+      "block": 71616784,
+      "gasUsed": 53157,
+      "effectiveGasPriceWei": "28125000000",
+      "feeWei": "1495040625000000",
+      "status": "success",
+      "description": "Allow BardJobHookV2"
+    }
+  ],
+  "liveChecks": {
+    "adminRole": {
+      "passed": true,
+      "value": "true"
+    },
+    "defaultAdminRole": {
+      "passed": true,
+      "value": "true"
+    },
+    "oldAdminRole": {
+      "passed": true,
+      "value": "false"
+    },
+    "oldDefaultAdminRole": {
+      "passed": true,
+      "value": "false"
+    },
+    "treasury": {
+      "passed": true,
+      "value": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2"
+    },
+    "platformFeeBP": {
+      "passed": true,
+      "value": "0"
+    },
+    "evaluatorFeeBP": {
+      "passed": true,
+      "value": "0"
+    },
+    "paymentTokenAllowed": {
+      "passed": true,
+      "value": "true"
+    },
+    "hookWhitelisted": {
+      "passed": true,
+      "value": "true"
+    },
+    "paused": {
+      "passed": true,
+      "value": "false"
+    },
+    "hookOwner": {
+      "passed": true,
+      "value": "0xB804d506d5446b1A3BeBEfC903D84F754973C2D2"
+    },
+    "hookCommerce": {
+      "passed": true,
+      "value": "0x680e73Ff53981629b8B814cE9A69AD1347867606"
+    },
+    "hookPaymentToken": {
+      "passed": true,
+      "value": "0x3600000000000000000000000000000000000000"
+    },
+    "reputationReader": {
+      "passed": true,
+      "value": "0x0000000000000000000000000000000000000000"
+    },
+    "implementationSlot": {
+      "passed": true,
+      "value": "0x0000000000000000000000007dae3ed8e9d99e95e20e11634eae5d3ba073d18d"
+    },
+    "balanceUSDC": {
+      "passed": true,
+      "value": "43.467972893466185482"
+    },
+    "nonce": {
+      "passed": true,
+      "value": "124"
+    },
+    "implementationCodeBytes": {
+      "passed": true,
+      "value": 11933
+    },
+    "proxyCodeBytes": {
+      "passed": true,
+      "value": 130
+    },
+    "hookCodeBytes": {
+      "passed": true,
+      "value": 4629
+    }
+  },
+  "backendEnvironment": {
+    "AGENTIC_COMMERCE_ADDRESS": "0x680e73Ff53981629b8B814cE9A69AD1347867606",
+    "BARD_JOB_HOOK_ADDRESS": "0x097eF956B18E20A8E9b509791c2a430b2750f32b"
+  },
+  "applicationRollout": "pending; fresh database, evaluator and service/provider configuration required",
+  "broadcastManifest": "../broadcast/DeployEscrowSecure.s.sol/5042002/run-1794267554212.json"
+}

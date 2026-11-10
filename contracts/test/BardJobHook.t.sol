@@ -2,20 +2,20 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
-import "../src/BardJobHook.sol";
+import "../src/BardJobHookV2.sol";
 import "../src/vendor/ERC8183.sol";
 import "../src/vendor/MockUSDC.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /**
- * @title BardJobHook tests
+ * @title BardJobHookV2 tests
  * @notice End-to-end tests for the side-car hook design.
  *
  *  Client/Provider/Evaluator -> AgenticCommerce  (custody of agent earnings)
  *                                     │
  *                                     │ before/after hook callbacks
  *                                     ▼
- *                                BardJobHook  (custody of platform fee)
+ *                                BardJobHookV2  (custody of platform fee)
  *
  *  Roles:
  *      admin     — owns ERC8183, whitelists hook + USDC
@@ -26,7 +26,7 @@ import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
  */
 contract BardJobHookTest is Test {
     ERC8183     internal ac;
-    BardJobHook internal hook;
+    BardJobHookV2 internal hook;
     MockUSDC    internal usdc;
 
     address internal admin     = makeAddr("admin");
@@ -56,7 +56,7 @@ contract BardJobHookTest is Test {
         ac = ERC8183(address(proxy));
 
         // Deploy the hook (test contract is owner).
-        hook = new BardJobHook(address(ac), address(usdc), address(0));
+        hook = new BardJobHookV2(address(ac), address(usdc), address(0), address(this));
 
         // Admin: allow USDC + whitelist the hook.
         vm.startPrank(admin);
@@ -130,7 +130,7 @@ contract BardJobHookTest is Test {
         assertEq(usdc.balanceOf(address(hook)), 0, "hook drained");
         assertEq(usdc.balanceOf(address(ac)),   0, "ac drained");
 
-        BardJobHook.FeeMeta memory fm = hook.getFeeMeta(jobId);
+        BardJobHookV2.FeeMeta memory fm = hook.getFeeMeta(jobId);
         assertTrue(fm.feeSettled, "fee settled flag");
     }
 
@@ -258,11 +258,11 @@ contract BardJobHookTest is Test {
     // ──────────────────────────────────────────────
 
     function test_RevertWhen_HookCallbacksCalledByStranger() public {
-        vm.expectRevert(BardJobHook.NotAgenticCommerce.selector);
+        vm.expectRevert(BardJobHookV2.NotAgenticCommerce.selector);
         vm.prank(stranger);
         hook.beforeAction(1, bytes4(0), "");
 
-        vm.expectRevert(BardJobHook.NotAgenticCommerce.selector);
+        vm.expectRevert(BardJobHookV2.NotAgenticCommerce.selector);
         vm.prank(stranger);
         hook.afterAction(1, bytes4(0), "");
     }
@@ -279,7 +279,7 @@ contract BardJobHookTest is Test {
         );
 
         vm.prank(stranger);
-        vm.expectRevert(BardJobHook.NotClient.selector);
+        vm.expectRevert(BardJobHookV2.NotClient.selector);
         hook.configureBardJob(jobId, PLATFORM_FEE, treasury, MAX_BPS, 0);
     }
 
@@ -299,7 +299,7 @@ contract BardJobHookTest is Test {
         ac.setBudget(jobId, address(usdc), AGENT_EARNINGS, "");
 
         vm.prank(stranger);
-        vm.expectRevert(BardJobHook.NotClient.selector);
+        vm.expectRevert(BardJobHookV2.NotClient.selector);
         hook.depositFee(jobId);
     }
 
@@ -322,7 +322,7 @@ contract BardJobHookTest is Test {
 
         vm.startPrank(client);
         usdc.approve(address(ac), AGENT_EARNINGS);
-        vm.expectRevert(BardJobHook.FeeNotDeposited.selector);
+        vm.expectRevert(BardJobHookV2.FeeNotDeposited.selector);
         ac.fund(jobId, AGENT_EARNINGS, "");
         vm.stopPrank();
     }
@@ -331,7 +331,7 @@ contract BardJobHookTest is Test {
         uint256 jobId = _createAndFund(address(0));
         // Job is Funded — not a refund state.
         vm.prank(stranger);
-        vm.expectRevert(BardJobHook.JobNotInRefundState.selector);
+        vm.expectRevert(BardJobHookV2.JobNotInRefundState.selector);
         hook.refundFee(jobId);
     }
 
@@ -349,7 +349,7 @@ contract BardJobHookTest is Test {
         hook.configureBardJob(jobId, PLATFORM_FEE, treasury, MAX_BPS, 0);
 
         vm.prank(client);
-        vm.expectRevert(BardJobHook.AlreadyConfigured.selector);
+        vm.expectRevert(BardJobHookV2.AlreadyConfigured.selector);
         hook.configureBardJob(jobId, PLATFORM_FEE, treasury, MAX_BPS, 0);
     }
 
@@ -357,7 +357,7 @@ contract BardJobHookTest is Test {
         uint256 jobId = _createAndFund(address(0));
         vm.startPrank(client);
         usdc.approve(address(hook), PLATFORM_FEE);
-        vm.expectRevert(BardJobHook.AlreadyDeposited.selector);
+        vm.expectRevert(BardJobHookV2.AlreadyDeposited.selector);
         hook.depositFee(jobId);
         vm.stopPrank();
     }
@@ -388,7 +388,7 @@ contract BardJobHookTest is Test {
         ac.setProvider(jobId, provider, 99);  // agent id 99, reader says score 5
 
         vm.prank(provider);
-        vm.expectRevert(abi.encodeWithSelector(BardJobHook.ReputationTooLow.selector, 5, 50));
+        vm.expectRevert(abi.encodeWithSelector(BardJobHookV2.ReputationTooLow.selector, 5, 50));
         ac.setBudget(jobId, address(usdc), AGENT_EARNINGS, "");
     }
 

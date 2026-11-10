@@ -21,7 +21,6 @@ function emptyAssurance(ownerWallet = null, relationship = 'independent', reason
     level: null,
     profile: null,
     reviews: { positive: 0, neutral: 0, negative: 0 },
-    vouchesReceived: 0,
     checkedAt: null,
     reason,
   };
@@ -45,19 +44,6 @@ function reviewCounts(user) {
   };
 }
 
-function vouchCount(user) {
-  const receivedCount = Number(user?.stats?.vouch?.received?.count);
-  if (Number.isFinite(receivedCount)) return receivedCount;
-  const totals = user?.stats?.vouchTotals;
-  if (Array.isArray(totals)) {
-    return totals.reduce((sum, item) => {
-      const count = Number(item?.count?.received ?? item?.count ?? item?.total ?? 0);
-      return sum + (Number.isFinite(count) ? count : 0);
-    }, 0);
-  }
-  return Number(user?.stats?.vouches?.received || user?.stats?.vouchCount || 0) || 0;
-}
-
 function normalize(address, user, scoreResult, checkedAt) {
   const humanVerificationStatus = user?.humanVerificationStatus || null;
   const humanVerified = humanVerificationStatus === 'VERIFIED';
@@ -78,7 +64,6 @@ function normalize(address, user, scoreResult, checkedAt) {
       url: user.links?.profile || null,
     } : null,
     reviews: reviewCounts(user),
-    vouchesReceived: vouchCount(user),
     checkedAt,
     reason: null,
   };
