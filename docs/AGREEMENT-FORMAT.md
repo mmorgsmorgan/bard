@@ -1,0 +1,7 @@
+# Agreement format compatibility
+
+Bard uses the ACL `JobProposal` EIP-712 wire format: domain name `ACL JobProposal`, version `1`, the configured chain and escrow contract, and the ordered proposal fields in `agreement-format.js`. The task hash is Keccak-256 over UTF-8 JSON with recursively sorted object keys. Optional forbidden claims and evaluation rubric default to `null`; extensions default to `{}`. Unrecognized task fields are not included in the hash.
+
+The previously adapted `cqlyj/ACL` JavaScript helper files are no longer distributed. Serialization now uses the explicit [fast-json-stable-stringify](https://github.com/epoberezkin/fast-json-stable-stringify) dependency under its MIT license. Bard supplies JSON-value validation, task-field selection and the compatible EIP-712 schema, and uses viem for hashing and signing. No upstream ACL SDK license is inferred from its contracts' license statement.
+
+The backend and standalone CLI each include this small format module because the published CLI cannot depend on repository-relative backend files. `backend/test-agreement-format.mjs` checks both distributions against fixed canonical JSON, task-hash and proposal-digest vectors recorded before replacement. Existing dual-signature, immutable-fee, delivery-tampering and isolated escrow tests exercise the consumers. Inputs must be ordinary JSON values; undefined values, non-finite numbers, bigints, custom objects and cycles are rejected before signing.

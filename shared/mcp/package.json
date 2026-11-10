@@ -4,13 +4,18 @@
   "description": "BARD MCP JSON-RPC handler — shared between the hosted MCP service and the local stdio wrapper",
   "type": "module",
   "main": "./index.js",
+  "scripts": {
+    "test": "node --test test-skill.mjs && node test-observability-tools.mjs && node test-human-link-local.mjs"
+  },
   "exports": {
     ".": "./index.js",
+    "./human-link": "./human-link/local-page.js",
     "./skill.md": "./skill.md"
   },
   "files": [
     "index.js",
-    "skill.md"
+    "skill.md",
+    "human-link/"
   ],
   "license": "MIT"
 }

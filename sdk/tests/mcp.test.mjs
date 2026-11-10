@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
-import { BardAgent, buildProofHash } from '../src/index.ts';
+import { BardAgent, buildProofHash } from '../dist/index.js';
 
 function toolResult(value) {
   return {
@@ -59,23 +59,16 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
     bard_list_my_contributions: {
       contributions: [{ id: 'contrib-sdk-test' }],
     },
-    bard_vouch: {
-      success: true,
-      contributorWallet: '0x1111111111111111111111111111111111111111',
-      contributorAgentId: 'agent-recipient',
-      amount: '10',
-      tier: 1,
-      approveTxHash: '0xapprove',
-      txHash: '0xvouch',
-      explorer: 'https://testnet.arcscan.app/tx/0xvouch',
-    },
     bard_list_bounties: {
       bounties: [{ id: 'bounty-sdk-test', status: 'open' }],
     },
-    bard_claim_bounty: {
+    bard_submit_proposal: {
       success: true,
-      bounty: { id: 'bounty-sdk-test', status: 'assigned' },
+      proposal: { id: 'proposal-sdk-test' },
     },
+    bard_link_human: { agentId: 'agent-sdk-test', verificationUrl: 'https://example.com/verify-human#test', expiresAt: '2026-12-01', mode: 'hosted' },
+    bard_get_human_links: { agentId: 'agent-sdk-test', links: [{ provider: 'ethos' }] },
+    bard_unlink_human: { success: true, agentId: 'agent-sdk-test', links: [] },
     bard_submit_deliverable: {
       success: true,
       bounty: { id: 'bounty-sdk-test', status: 'submitted' },
@@ -137,15 +130,9 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
   });
   assert.equal(contribution.id, 'contrib-sdk-test');
   assert.equal((await agent.getContributions()).length, 1);
-  assert.equal((await agent.vouchFor({
-    contributorAgentId: 'agent-recipient',
-    amount: '10',
-    tier: 1,
-    statement: 'Verified strong work',
-    ecosystem: 'Arc',
-  })).txHash, '0xvouch');
+  assert.equal('vouchFor' in agent, false);
   assert.equal((await agent.listBounties()).length, 1);
-  assert.equal((await agent.acceptBounty('bounty-sdk-test'))?.status, 'assigned');
+  assert.equal((await agent.submitProposal('bounty-sdk-test', { plan: 'Inspect the work', proposedPriceUsdc: 4 })).proposal.id, 'proposal-sdk-test');
   assert.equal(
     (await agent.submitDeliverable('bounty-sdk-test', 'Completed work')).bounty?.status,
     'submitted'
@@ -153,10 +140,11 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
 
   await agent.saveState({ cursor: 12 });
   assert.deepEqual(await agent.loadState(), { cursor: 12 });
-  await assert.rejects(
-    agent.submitBountyWork('bounty-sdk-test', 'contrib-sdk-test'),
-    /submitDeliverable/
-  );
+  assert.equal('submitBountyWork' in agent, false);
+  assert.equal('acceptBounty' in agent, false);
+  assert.equal((await agent.linkHuman()).mode, 'hosted');
+  assert.equal((await agent.getHumanLinks()).links[0].provider, 'ethos');
+  assert.deepEqual((await agent.unlinkHuman()).links, []);
 
   assert.deepEqual(
     calls.map((call) => call.tool),
@@ -167,12 +155,14 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
       'bard_reveal_reasoning',
       'bard_submit_contribution',
       'bard_list_my_contributions',
-      'bard_vouch',
       'bard_list_bounties',
-      'bard_claim_bounty',
+      'bard_submit_proposal',
       'bard_submit_deliverable',
       'bard_save_agent_state',
       'bard_get_agent_state',
+      'bard_link_human',
+      'bard_get_human_links',
+      'bard_unlink_human',
     ]
   );
   assert.ok(calls.every((call) => call.authorization === 'Bearer sdk-test-token'));
@@ -182,14 +172,6 @@ test('BardAgent routes authenticated operations through MCP tools', async (t) =>
     salt: '0xsalt',
   });
   assert.equal(calls[4].args.proof, JSON.stringify({ result: 'verified' }));
-  assert.deepEqual(calls[6].args, {
-    contributorAgentId: 'agent-recipient',
-    amount: '10',
-    tier: 1,
-    statement: 'Verified strong work',
-    ecosystem: 'Arc',
-    score: 80,
-  });
   assert.equal(
     buildProofHash({ result: 'verified' }),
     `0x${await import('node:crypto').then(({ createHash }) =>

@@ -1,59 +1,28 @@
 import 'dotenv/config';
+import { reserveSpend } from './vcr-spending.js';
+import { AGENTIC_COMMERCE_ADDRESS as commerceAddress, BARD_JOB_HOOK_ADDRESS as feeAddress } from './erc8183-client.js';
+import { jobTerms, typedAgreement, verifyAgreement, attestDelivery, verifyDelivery } from './agent-agreement.js';
+import { getWalletProvider } from './wallet-provider.js';
 import express from 'express';
 import multer from 'multer';
 import cors from 'cors';
 import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
-import { createHash, createHmac, timingSafeEqual, randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto';
+import { createHash, createHmac, timingSafeEqual, randomBytes } from 'crypto';
 import { EventEmitter } from 'events';
 import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
-import { createGatewayMiddleware } from '@circle-fin/x402-batching/server';
 import { formatUnits, verifyMessage, createPublicClient, http, parseUnits } from 'viem';
 import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans, deleteStrandedWallets, signMessageWithAgentWallet } from './turnkey-wallet.js';
-import { pool, query, initSchema, stmts } from './db.js';
+import { pool, initSchema, stmts } from './db.js';
 import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
-import {
-  ACHSWAP_ADAPTER,
-  NATIVE_TOKEN,
-  MAX_UINT256,
-  ADAPTER_ABI,
-  ERC20_ABI,
-  resolveToken,
-  achswapCall,
-} from './achswap.js';
-import { withMemo, MemoIds, ARC_MEMO_ADDRESS } from './arc-memo.js';
-import { createSiweRouter } from './siwe-auth.js';
-import { createHumanAuthRouter, requireHumanSession } from './human-auth.js';
-import {
-  buildHumanProfileMetadataURI,
-  buildHumanProfileTransactions,
-  buildHumanProofTransaction,
-  buildHumanUsdcTransfer,
-  buildHumanVouchTransactions,
-  createAgentVouch,
-  createHumanVouch,
-  createOrUpdateHumanProfile,
-  fundManagedEscrow,
-  getContributorVouchSummary,
-  humanWalletBalance,
-  listHumanVouches,
-  prepareHumanProfileTransaction,
-  prepareHumanUsdcTransfer,
-  prepareHumanVouchWithdrawal,
-  prepareHumanVouchTransactions,
-  sendHumanUsdc,
-  submitHumanProof,
-  validateExternalTransactionDetails,
-  withdrawHumanVouch,
-} from './human-wallet-service.js';
+import { NATIVE_TOKEN, ERC20_ABI, resolveToken, achswapCall } from './achswap.js';
+import { withMemo, MemoIds } from './arc-memo.js';
 import * as onchainEscrow from './escrow-service.js';
 import { computeReputationScore } from './reputation-score.js';
-import { resolveVouchTarget } from './vouch-target.js';
 import { getOwnerAssurance, getUnavailableOwnerAssurance } from './ethos-service.js';
-import { createHumanEthosHandler } from './human-ethos-route.js';
-import { createPublicProfileEthosHandler } from './public-profile-ethos-route.js';
+import { getHumanLinks, humanLinkOrigin, mountHumanLinkRoutes } from './human-link.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -66,7 +35,7 @@ const PORT = process.env.PORT || 4000;
 // http://... which Vercel blocks as mixed content.
 app.set('trust proxy', 1);
 
-// ── Seller wallet (receives USDC nanopayments) ──
+// ── Platform settlement wallet ──
 const SELLER_ADDRESS = process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E13Ba3b1b3c042e28a';
 
 // ── Platform owner wallet (Stage 1 escrow verifier) ──
@@ -81,44 +50,11 @@ const PLATFORM_OWNER_WALLET = (process.env.PLATFORM_OWNER_WALLET || SELLER_ADDRE
 // creator/provider leg, so a human/MetaMask creator can't use the on-chain path.
 const ONCHAIN_ESCROW = process.env.ONCHAIN_ESCROW === '1' || process.env.ONCHAIN_ESCROW === 'true';
 
-// ── Swarms API configuration ──
-// DORMANT: the swarm feature is on hold. It stays code-complete but every
-// entry point is gated behind SWARMS_ENABLED (default false) and returns 503.
-// This neutralizes the known executeSwarm scope bug, the webhook, and the
-// unauthenticated status endpoint until the feature is revisited. Flip
-// SWARMS_ENABLED=true to re-enable.
-const SWARMS_ENABLED = process.env.SWARMS_ENABLED === 'true';
-const SWARMS_DISABLED_MSG = 'Swarm feature is temporarily disabled';
-const SWARMS_API_KEY = process.env.SWARMS_API_KEY || '';
-const SWARMS_PLATFORM_MARKUP_PCT = parseFloat(process.env.SWARMS_PLATFORM_MARKUP_PCT || '20');
-const SWARMS_API_BASE = 'https://api.swarms.world';
-const SWARMS_WEBHOOK_SECRET = process.env.SWARMS_WEBHOOK_SECRET || '';
-
-// Express middleware: reject any swarm route while the feature is dormant.
-function requireSwarmsEnabled(req, res, next) {
-  if (!SWARMS_ENABLED) {
-    return res.status(503).json({ error: SWARMS_DISABLED_MSG, hint: 'swarms_disabled' });
-  }
-  next();
+// Swarm execution has no active implementation or spending policy.
+function swarmsUnavailable(_req, res) {
+  return res.status(503).json({ error: 'Swarm execution is unavailable.', hint: 'swarms_disabled' });
 }
 
-function requireSwarmsWebhookSecret(_req, res, next) {
-  if (!SWARMS_WEBHOOK_SECRET) {
-    return res.status(503).json({
-      error: 'Swarm webhook is unavailable because SWARMS_WEBHOOK_SECRET is not configured',
-    });
-  }
-  next();
-}
-
-// ── Registration stake hook (Sybil resistance, deferred) ──
-// When > 0, agent registration for a real wallet would additionally require a
-// refundable USDC stake. Wired as a constant now; enforcement is future work.
-const REGISTRATION_STAKE = parseFloat(process.env.REGISTRATION_STAKE || '0');
-const MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER = Math.max(
-  1,
-  Number.parseInt(process.env.MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER || '3', 10) || 3,
-);
 const ETHOS_DISPLAY_WAIT_MS = Math.max(
   50,
   Number.parseInt(process.env.ETHOS_DISPLAY_WAIT_MS || '500', 10) || 500,
@@ -174,6 +110,7 @@ app.use(helmet({
 app.use(cors({
   origin: (origin, callback) => {
     const allowed = [...DEFAULT_ALLOWED_ORIGINS, ...ALLOWED_ORIGINS];
+    try { allowed.push(humanLinkOrigin()); } catch { /* Unconfigured verification is unavailable. */ }
     if (!origin || allowed.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked origin: ${origin}`));
   },
@@ -182,8 +119,6 @@ app.use(cors({
     'Authorization',
     'Mcp-Session-Id',
     'Accept',
-    'X-Privy-Token',
-    'X-Elevated-Token',
   ],
 }));
 const captureRawBody = (req, _res, buffer) => {
@@ -211,11 +146,10 @@ app.all('/mcp', (req, res) => {
 });
 
 // ── Static file serving ──
-// ── Static file serving ──
 // On Railway, uploads MUST land on a mounted volume to survive redeploys.
 // Set UPLOADS_DIR=/data/uploads and attach a volume at /data, OR move uploads
 // to object storage (R2/S3) — see the deployment notes in .env.example.
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, 'uploads');
 try {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -255,9 +189,6 @@ const RATE_LIMITS = {
   'auth_verify': { max: 10, window: 60 },     // 10 verify attempts per minute per IP
   'bounty_propose': { max: 5, window: 3600 },  // 5 proposals per hour per agent
   'bounty_message': { max: 60, window: 3600 }, // 60 messages per hour per wallet
-  'agent_vouch': { max: 10, window: 3600 },     // 10 staked vouches per hour per agent
-  'dex_swap': { max: 10, window: 3600 },       // 10 swaps per hour per agent
-  'dex_swap_daily_usdc': { max: 500, window: 86400 }, // 500 USDC equivalent per 24h per agent (counter incremented by USDC units, see checkRateLimitN)
 };
 
 async function checkRateLimit(key, action) {
@@ -276,30 +207,6 @@ async function checkRateLimit(key, action) {
   }
   if (row.count >= limits.max) return false;
   await pool.query('UPDATE rate_limits SET count = count + 1 WHERE key = $1', [fullKey]);
-  return true;
-}
-
-// Same as checkRateLimit but increments by N (e.g. USDC amount) per call instead
-// of 1. Rejects if (current count + N) would exceed the configured max. Used by
-// the dex_swap_daily_usdc cap where each call burns "amountIn USDC" of budget.
-async function checkRateLimitN(key, action, n) {
-  const limits = RATE_LIMITS[action];
-  if (!limits) return true;
-  if (n <= 0) return true;
-  const fullKey = `${key}:${action}`;
-  const now = Math.floor(Date.now() / 1000);
-  const row = (await pool.query('SELECT count, window_start FROM rate_limits WHERE key = $1', [fullKey])).rows[0];
-  if (!row || (now - row.window_start) > limits.window) {
-    if (n > limits.max) return false;
-    await pool.query(
-      `INSERT INTO rate_limits (key, count, window_start) VALUES ($1, $2, $3)
-       ON CONFLICT (key) DO UPDATE SET count = EXCLUDED.count, window_start = EXCLUDED.window_start`,
-      [fullKey, n, now]
-    );
-    return true;
-  }
-  if (row.count + n > limits.max) return false;
-  await pool.query('UPDATE rate_limits SET count = count + $1 WHERE key = $2', [n, fullKey]);
   return true;
 }
 
@@ -549,40 +456,6 @@ async function runOrphanAudit() {
 }
 
 // ── Helper: row → frontend format ──
-function profileToJSON(row) {
-  if (!row) return null;
-  return {
-    wallet: row.wallet, username: row.username, displayName: row.display_name,
-    bio: row.bio, profileType: row.profile_type,
-    ecosystems: JSON.parse(row.ecosystems || '[]'),
-    farcaster: row.farcaster || '', github: row.github || '',
-    x: row.x || '', discord: row.discord || '', linkedin: row.linkedin || '',
-    pfp: row.pfp || '',
-    createdAt: row.created_at,
-  };
-}
-
-function proofToJSON(row) {
-  return {
-    id: row.id, title: row.title, ecosystem: row.ecosystem,
-    contributionType: row.contribution_type, description: row.description,
-    externalLinks: JSON.parse(row.external_links || '[]'),
-    contributor: row.contributor, status: row.status, timestamp: row.timestamp,
-  };
-}
-
-function portfolioToJSON(row) {
-  return {
-    id: row.id, wallet: row.wallet, title: row.title,
-    description: row.description, category: row.category,
-    imageDataURI: row.image_url || undefined,
-    externalLink: row.external_link || undefined,
-    githubRepo: row.github_repo || undefined,
-    tags: JSON.parse(row.tags || '[]'),
-    createdAt: row.created_at, order: row.sort_order,
-  };
-}
-
 function notifToJSON(row) {
   return {
     id: row.id, wallet: row.wallet, type: row.type,
@@ -778,15 +651,15 @@ function getTrustMaturity(completedBounties) {
 }
 
 async function getOwnerAssuranceForDisplay(agent) {
-  const independent = Boolean(agent.is_platform_owned);
-  const request = getOwnerAssurance(agent.owner_wallet, { independent });
+  const independent = !agent.ethos_owner_wallet;
+  const request = getOwnerAssurance(agent.ethos_owner_wallet, { independent });
   let timer;
   try {
     return await Promise.race([
       request,
       new Promise(resolve => {
         timer = setTimeout(() => resolve(
-          getUnavailableOwnerAssurance(agent.owner_wallet, { independent })
+          getUnavailableOwnerAssurance(agent.ethos_owner_wallet, { independent })
         ), ETHOS_DISPLAY_WAIT_MS);
       }),
     ]);
@@ -795,91 +668,16 @@ async function getOwnerAssuranceForDisplay(agent) {
   }
 }
 
-function parseBootstrapRequirements(bounty) {
-  let raw = bounty?.bootstrap_requirements;
-  if (typeof raw === 'string') {
-    try { raw = JSON.parse(raw || '{}'); } catch { raw = {}; }
-  }
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = {};
-  return {
-    humanVerified: raw.humanVerified !== false,
-    minEthosScore: Math.max(0, Number(raw.minEthosScore || 0)),
-  };
-}
-
 async function evaluateBountyEligibility(agent, bounty) {
   const minBardReputation = Math.max(0, Number(bounty.min_reputation || 0));
   const bardScore = Math.max(0, Number(agent.reputation_score || 0));
   const bardEligible = bardScore >= minBardReputation;
-  const base = {
+  return {
     eligible: bardEligible,
     path: bardEligible ? 'bard_reputation' : 'none',
     bardReputation: { score: bardScore, minimum: minBardReputation, eligible: bardEligible },
-    trustBootstrap: {
-      allowed: Boolean(bounty.allow_trust_bootstrap),
-      eligible: false,
-      requirements: parseBootstrapRequirements(bounty),
-    },
+    trustBootstrap: { allowed: false, eligible: false },
   };
-  if (bardEligible || !bounty.allow_trust_bootstrap) return base;
-
-  const requirements = base.trustBootstrap.requirements;
-  const [ownerAssurance, ownerAgents, activeUseRow, completedResult] = await Promise.all([
-    getOwnerAssurance(agent.owner_wallet, { independent: Boolean(agent.is_platform_owned) }),
-    stmts.getAgentsByOwner(agent.owner_wallet),
-    stmts.countActiveTrustBootstrapUses(agent.owner_wallet),
-    pool.query(
-      `SELECT COUNT(*) AS completed
-         FROM bounties
-        WHERE provider_agent_id = $1
-          AND status = 'completed'
-          AND escrow_status = 'released'
-          AND verifier_decision = 'approved'`,
-      [agent.id],
-    ),
-  ]);
-  const trustMaturity = getTrustMaturity(completedResult.rows[0]?.completed);
-  const activeUses = Number(activeUseRow?.count || 0);
-  const humanPass = !requirements.humanVerified || ownerAssurance.humanVerified;
-  const scorePass = Number(ownerAssurance.score || 0) >= requirements.minEthosScore;
-  const maturityPass = trustMaturity.stage === 'new';
-  const ownerLimitPass = activeUses < MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER;
-  const bootstrapEligible = Boolean(
-    ownerAssurance.available && humanPass && scorePass && maturityPass && ownerLimitPass
-  );
-
-  return {
-    ...base,
-    eligible: bootstrapEligible,
-    path: bootstrapEligible ? 'ethos_owner_assurance' : 'none',
-    trustBootstrap: {
-      ...base.trustBootstrap,
-      eligible: bootstrapEligible,
-      ownerAssurance,
-      trustMaturity,
-      ownerAgentCount: ownerAgents.length,
-      activeUses,
-      maxActiveUses: MAX_ACTIVE_TRUST_BOOTSTRAPS_PER_OWNER,
-      checks: {
-        ethosAvailable: ownerAssurance.available,
-        humanVerified: humanPass,
-        minimumEthosScore: scorePass,
-        newAgent: maturityPass,
-        ownerLimit: ownerLimitPass,
-      },
-    },
-  };
-}
-
-async function recordTrustBootstrapUse(agent, bounty, mode) {
-  await stmts.insertTrustBootstrapUse({
-    id: `trust-bootstrap-${Date.now()}-${randomBytes(4).toString('hex')}`,
-    owner_wallet: agent.owner_wallet.toLowerCase(),
-    agent_id: agent.id,
-    bounty_id: bounty.id,
-    mode,
-    created_at: new Date().toISOString(),
-  });
 }
 
 // ── SSE Live Feed ──
@@ -915,17 +713,21 @@ if (process.env.NODE_ENV === 'production' && MCP_ONLY_AGENT_API && !MCP_INTERNAL
   console.error('FATAL: MCP_ONLY_AGENT_API requires MCP_INTERNAL_SECRET in production');
   process.exit(1);
 }
-if (process.env.NODE_ENV === 'production' && SWARMS_ENABLED && !SWARMS_WEBHOOK_SECRET) {
-  console.error('FATAL: SWARMS_ENABLED requires SWARMS_WEBHOOK_SECRET in production');
-  process.exit(1);
-}
 
-// ── SIWE wallet sessions (Sign-In With Ethereum, EIP-4361) ──
-// Additive: mounts /auth/nonce, /auth/verify, /auth/me. Reuses JWT_SECRET so
-// wallet sessions share the same bearer scheme as agent tokens.
-app.use(createSiweRouter({ jwtSecret: JWT_SECRET }));
-app.use('/api/human', createHumanAuthRouter({ jwtSecret: JWT_SECRET }));
-const requireHuman = requireHumanSession(JWT_SECRET);
+// Human sessions have no authority on the agent marketplace.
+function requireHuman(_req, res) {
+  return res.status(410).json({ error: 'Bard human accounts have been retired.' });
+}
+app.use('/api/human', requireHuman);
+app.use('/auth', requireHuman);
+app.use('/api/profiles', (_req, res) => res.status(410).json({ error: 'Human profiles are retired. Browse /api/agents.' }));
+app.post('/api/agents/:id/dex/swap', (_req, res) => {
+  res.status(409).json({ error: 'This spending operation requires a token-specific VCR integration.' });
+});
+app.use(['/api/vouches', '/api/agents/:id/vouches'], (_req, res) => {
+  res.status(410).json({ error: 'Vouching has been removed from Bard.' });
+});
+
 
 function requestHasValidMcpProof(req, token) {
   if (!MCP_INTERNAL_SECRET || !token) return false;
@@ -990,9 +792,9 @@ async function requireAuth(req, res, next) {
       return res.status(401).json({ error: 'Token has been revoked' });
     }
     decoded.agentId = decoded.agentId || decoded.sub;
-    const humanDelegated = decoded.kind === 'human-agent-session';
+    if (decoded.kind !== 'agent' || !decoded.agentId) return res.status(403).json({ error: 'An agent credential is required.' });
     const mcpVerified = requestHasValidMcpProof(req, token);
-    if (MCP_ONLY_AGENT_API && !humanDelegated && !mcpVerified) {
+    if (MCP_ONLY_AGENT_API && !mcpVerified) {
       return res.status(403).json({
         error: 'Authenticated agent actions are MCP-only. Use the BARD MCP server and bard_* tools.',
         hint: 'use_mcp',
@@ -1000,7 +802,7 @@ async function requireAuth(req, res, next) {
       });
     }
     req.auth = decoded;
-    req.authTransport = humanDelegated ? 'human-delegation' : (mcpVerified ? 'mcp' : 'direct');
+    req.authTransport = mcpVerified ? 'mcp' : 'direct';
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
@@ -1013,6 +815,8 @@ function requireOwnAgent(req, res, next) {
   }
   next();
 }
+
+mountHumanLinkRoutes(app, { pool, requireAuth, requireOwnAgent });
 
 // ══════════════════════════════════════════════════════
 // ── Real agent attestations (verifiable proof of work) ──
@@ -1064,38 +868,6 @@ async function attestAgentMessage({ agent, message, providedSignature }) {
 }
 
 // ══════════════════════════════════════════════════════
-// ── Circle Gateway x402 Nanopayments ──
-// ══════════════════════════════════════════════════════
-
-let gateway;
-try {
-  gateway = createGatewayMiddleware({
-    sellerAddress: SELLER_ADDRESS,
-    facilitatorUrl: 'https://gateway-api-testnet.circle.com',
-  });
-  console.log(`  x402 Gateway: enabled (seller: ${SELLER_ADDRESS.slice(0, 8)}...)`);
-} catch (err) {
-  console.warn(`  x402 Gateway: disabled (${err.message})`);
-  gateway = null;
-}
-
-// Helper: log payment to Postgres
-async function logPayment(req, endpoint) {
-  if (req.payment) {
-    const { payer, amount, network, transaction } = req.payment;
-    const formattedAmount = formatUnits(BigInt(amount), 6);
-    console.log(`  Payment: ${formattedAmount} USDC from ${payer.slice(0, 8)}... on ${network}`);
-    try {
-      await stmts.insertPayment({
-        payer, amount: formattedAmount, network, endpoint,
-        transaction_id: transaction || '',
-        created_at: new Date().toISOString(),
-      });
-    } catch (e) { /* non-critical */ }
-  }
-}
-
-// ══════════════════════════════════════════════════════
 // ── Multer config ──
 // ══════════════════════════════════════════════════════
 
@@ -1138,8 +910,7 @@ const upload = multer({ storage, fileFilter, limits: { fileSize: MAX_FILE_SIZE }
 
 app.get('/api/health', async (req, res) => {
   try {
-    const profileCount = (await pool.query('SELECT COUNT(*) as count FROM profiles')).rows[0].count;
-    const paymentStats = await stmts.getPaymentStats();
+    const agentCount = (await pool.query('SELECT COUNT(*) as count FROM agents')).rows[0].count;
 
     // Check platform wallet balance (non-blocking, optional)
     let walletBalance = null;
@@ -1151,9 +922,8 @@ app.get('/api/health', async (req, res) => {
     }
 
     res.json({
-      status: 'ok', uptime: process.uptime(), profiles: Number(profileCount), db: 'postgres',
-      x402: !!gateway, sellerAddress: SELLER_ADDRESS,
-      payments: { total: Number(paymentStats.total_payments), volumeUSDC: Number(paymentStats.total_amount) },
+      status: 'ok', uptime: process.uptime(), agents: Number(agentCount), db: 'postgres',
+      x402: false, sellerAddress: SELLER_ADDRESS,
       storage: isR2Enabled ? 'r2' : 'local',
       r2Bucket: isR2Enabled ? process.env.R2_BUCKET_NAME : null,
       turnkey: isTurnkeyEnabled(),
@@ -1265,904 +1035,18 @@ app.get('/api/platform/wallet/transfers', async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════
-// ── Routes: x402 Premium Endpoints ──
-// ══════════════════════════════════════════════════════
-
-// Premium: Full trust analytics for a contributor
-if (gateway) {
-  app.get('/api/premium/trust-report/:wallet', gateway.require('$0.01'), async (req, res) => {
-    await logPayment(req, '/api/premium/trust-report');
-    const wallet = req.params.wallet;
-    const profile = profileToJSON(await stmts.getProfileByWallet(wallet));
-    const proofs = (await stmts.getProofsByWallet(wallet)).map(proofToJSON);
-    const portfolio = (await stmts.getPortfolioByWallet(wallet)).map(portfolioToJSON);
-
-    // Compute trust metrics
-    const validatedProofs = proofs.filter(p => p.status === 'validated').length;
-    const ecosystems = [...new Set(proofs.map(p => p.ecosystem).filter(Boolean))];
-    const trustScore = Math.min(100, (validatedProofs * 15) + (proofs.length * 5) + (portfolio.length * 3));
-
-    res.json({
-      report: {
-        profile, proofs, portfolio,
-        metrics: {
-          trustScore,
-          totalProofs: proofs.length,
-          validatedProofs,
-          portfolioItems: portfolio.length,
-          ecosystems,
-          memberSince: profile?.createdAt,
-        },
-      },
-      paid_by: req.payment?.payer,
-    });
-  });
-
-  // Premium: Platform-wide leaderboard with full analytics
-  app.get('/api/premium/leaderboard', gateway.require('$0.01'), async (req, res) => {
-    await logPayment(req, '/api/premium/leaderboard');
-    const rows = await stmts.getAllProfiles();
-    const profiles = [];
-    for (const row of rows) {
-      const p = profileToJSON(row);
-      const proofs = await stmts.getProofsByWallet(row.wallet);
-      const portfolio = await stmts.getPortfolioByWallet(row.wallet);
-      const validatedProofs = proofs.filter(pr => pr.status === 'validated').length;
-      profiles.push({
-        ...p,
-        stats: {
-          proofs: proofs.length,
-          validatedProofs,
-          portfolioItems: portfolio.length,
-          trustScore: Math.min(100, (validatedProofs * 15) + (proofs.length * 5) + (portfolio.length * 3)),
-        },
-      });
-    }
-
-    profiles.sort((a, b) => b.stats.trustScore - a.stats.trustScore);
-    res.json({ leaderboard: profiles, total: profiles.length, paid_by: req.payment?.payer });
-  });
-
-  // Premium: Export full profile data as JSON
-  app.get('/api/premium/export/:wallet', gateway.require('$0.005'), async (req, res) => {
-    await logPayment(req, '/api/premium/export');
-    const wallet = req.params.wallet;
-    const profile = profileToJSON(await stmts.getProfileByWallet(wallet));
-    const proofs = (await stmts.getProofsByWallet(wallet)).map(proofToJSON);
-    const portfolio = (await stmts.getPortfolioByWallet(wallet)).map(portfolioToJSON);
-    const notifications = (await stmts.getNotificationsByWallet(wallet)).map(notifToJSON);
-
-    res.json({
-      export: { profile, proofs, portfolio, notifications, exportedAt: new Date().toISOString() },
-      paid_by: req.payment?.payer,
-    });
-  });
-}
-
-// ── Payment info endpoint (free) ──
-app.get('/api/x402/info', (req, res) => {
-  res.json({
-    enabled: !!gateway,
-    seller: SELLER_ADDRESS,
-    network: 'Arc Testnet (eip155:5042002)',
-    currency: 'USDC',
-    endpoints: [
-      { path: '/api/premium/trust-report/:wallet', price: '$0.01', description: 'Full trust analytics report for a contributor' },
-      { path: '/api/premium/leaderboard', price: '$0.01', description: 'Platform-wide trust leaderboard with analytics' },
-      { path: '/api/premium/export/:wallet', price: '$0.005', description: 'Export full profile data as JSON' },
-    ],
-  });
-});
-
-// ══════════════════════════════════════════════════════
-// ── Routes: Profiles ──
-// ══════════════════════════════════════════════════════
-
-app.post('/api/profiles', (_req, res) => {
-  res.status(410).json({
-    error: 'Profile writes require an authenticated BARD human session',
-    hint: 'Use POST /api/human/profile',
-  });
-});
-
-app.get('/api/profiles/wallet/:wallet', async (req, res) => {
-  const row = await stmts.getProfileByWallet(req.params.wallet);
-  res.json({ profile: profileToJSON(row) });
-});
-
-app.get('/api/profiles/wallet/:wallet/owner-assurance', createPublicProfileEthosHandler({
-  getProfile: (wallet) => stmts.getProfileByWallet(wallet),
+// Compatibility responses for retired human-profile and payment routes.
+app.use(['/api/premium', '/api/portfolio'], requireHuman);
+app.use('/api/proofs', (_req, res) => res.status(410).json({
+  error: 'Legacy proof routes are retired. Use bard_submit_contribution.',
 }));
-
-app.get('/api/profiles/username/:username', async (req, res) => {
-  const row = await stmts.getProfileByUsername(req.params.username);
-  res.json({ profile: profileToJSON(row) });
-});
-
-app.get('/api/profiles', async (req, res) => {
-  const rows = await stmts.getAllProfiles();
-  res.json({ profiles: rows.map(profileToJSON) });
-});
-
-app.get('/api/vouches/contributor/:wallet', async (req, res) => {
-  try {
-    const summary = await getContributorVouchSummary(req.params.wallet);
-    res.json({ summary });
-  } catch (error) {
-    res.status(error.status || 502).json({ error: error.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════
-// ── Human wallet actions ──
-// ══════════════════════════════════════════════════════
-
-function humanUsesExternalWallet(req) {
-  return req.human.wallet_type === 'external';
-}
-
-function externalTransactionPayload(transaction) {
-  return {
-    to: transaction.to,
-    data: transaction.data || '0x',
-    value: `0x${BigInt(transaction.value || 0n).toString(16)}`,
-    chainId: 5042002,
-  };
-}
-
-async function verifyExactExternalTransaction(
-  txHash,
-  expectedFrom,
-  expectedTo,
-  acceptedData
-) {
-  if (!/^0x[0-9a-fA-F]{64}$/.test(txHash || '')) {
-    return { valid: false, error: 'Valid transaction hash required' };
-  }
-  const receipt = await onchainEscrow.withArcRpcRetry(
-    () => arcTestnetClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 }),
-    { label: `external transaction ${txHash} receipt` },
-  );
-  const transaction = await onchainEscrow.withArcRpcRetry(
-    () => arcTestnetClient.getTransaction({ hash: txHash }),
-    { label: `external transaction ${txHash} details` },
-  );
-  const validation = validateExternalTransactionDetails({
-    receipt,
-    transaction,
-    expectedFrom,
-    expectedTo,
-    acceptedData,
-  });
-  return validation.valid
-    ? { valid: true, receipt, transaction }
-    : validation;
-}
-
-async function claimHumanTransaction(req, txHash, action) {
-  const result = await pool.query(
-    `INSERT INTO human_tx_confirmations (tx_hash, action, human_id)
-     VALUES (LOWER($1), $2, $3)
-     ON CONFLICT (tx_hash, action) DO NOTHING
-     RETURNING tx_hash`,
-    [txHash, action, req.human.id]
-  );
-  return result.rowCount > 0;
-}
-
-async function persistExternalProofConfirmation(req, txHash, proof) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const inserted = await client.query(
-      `INSERT INTO human_tx_confirmations
-         (tx_hash, action, human_id, resource_id)
-       VALUES (LOWER($1), 'proof', $2, $3)
-       ON CONFLICT (tx_hash, action) DO NOTHING
-       RETURNING human_id, resource_id`,
-      [txHash, req.human.id, proof.id]
-    );
-    const confirmation = inserted.rows[0] || (await client.query(
-      `SELECT human_id, resource_id
-         FROM human_tx_confirmations
-        WHERE tx_hash = LOWER($1) AND action = 'proof'
-        FOR UPDATE`,
-      [txHash]
-    )).rows[0];
-    if (!confirmation || confirmation.human_id !== req.human.id) {
-      throw Object.assign(
-        new Error('This proof transaction is already assigned to another account'),
-        { status: 409 }
-      );
-    }
-    if (confirmation.resource_id && confirmation.resource_id !== proof.id) {
-      throw Object.assign(
-        new Error('This proof transaction is already assigned to another proof'),
-        { status: 409 }
-      );
-    }
-    if (!confirmation.resource_id) {
-      await client.query(
-        `UPDATE human_tx_confirmations
-            SET resource_id = $1
-          WHERE tx_hash = LOWER($2) AND action = 'proof'`,
-        [proof.id, txHash]
-      );
-    }
-    await client.query(
-      `INSERT INTO proofs
-         (id, title, ecosystem, contribution_type, description, external_links,
-          contributor, status, timestamp)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (id) DO NOTHING`,
-      [
-        proof.id,
-        proof.title,
-        proof.ecosystem,
-        proof.contribution_type,
-        proof.description,
-        proof.external_links,
-        proof.contributor,
-        proof.status,
-        proof.timestamp,
-      ]
-    );
-    await client.query('COMMIT');
-    return inserted.rowCount > 0;
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-app.get('/api/human/wallet', requireHuman, async (req, res) => {
-  try {
-    res.json({
-      ...(await humanWalletBalance(req.human.wallet_address)),
-      type: req.human.wallet_type === 'external' ? 'external' : 'managed',
-    });
-  } catch (error) {
-    res.status(error.status || 502).json({ error: error.message });
-  }
-});
-
-app.get('/api/human/ethos', requireHuman, createHumanEthosHandler());
-
-app.post('/api/human/profile', requireHuman, async (req, res) => {
-  const wallet = req.human.wallet_address;
-  const {
-    username,
-    displayName = '',
-    bio = '',
-    profileType = 'human',
-    ecosystems = [],
-    farcaster = '',
-    github = '',
-    x = '',
-    discord = '',
-    linkedin = '',
-    pfp = '',
-    txHash = '',
-  } = req.body || {};
-  if (!/^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$/.test(username || '') || username.includes('--')) {
-    return res.status(400).json({ error: 'Username must be 3-32 lowercase letters, numbers, or single hyphens' });
-  }
-  const profileKind = profileType === 'agent' ? 'agent' : 'human';
-  const metadataURI = buildHumanProfileMetadataURI({
-    username,
-    displayName,
-    profileType: profileKind,
-    bio,
-    ecosystems,
-    wallet,
-    farcaster,
-    github,
-    x,
-    discord,
-    linkedin,
-    pfp,
-  });
-
-  try {
-    const usernameOwner = await stmts.getProfileByUsername(username);
-    if (usernameOwner && usernameOwner.wallet.toLowerCase() !== wallet.toLowerCase()) {
-      return res.status(409).json({ error: 'Username is already taken' });
-    }
-    const profileTransaction = {
-      username,
-      metadataURI,
-      profileType: profileKind === 'agent' ? 1 : 0,
-    };
-    let confirmedTxHash = '';
-    if (humanUsesExternalWallet(req)) {
-      const expected = buildHumanProfileTransactions(profileTransaction);
-      if (!txHash) {
-        const prepared = await prepareHumanProfileTransaction(wallet, profileTransaction);
-        return res.status(202).json({
-          signatureRequired: true,
-          walletType: 'external',
-          transaction: externalTransactionPayload(prepared.transaction),
-        });
-      }
-      const verification = await verifyExactExternalTransaction(
-        txHash,
-        wallet,
-        expected.create.to,
-        [expected.create.data, expected.update.data]
-      );
-      if (!verification.valid) {
-        return res.status(409).json({ error: verification.error, txHash });
-      }
-      confirmedTxHash = txHash.toLowerCase();
-    } else {
-      const chain = await createOrUpdateHumanProfile(wallet, profileTransaction);
-      confirmedTxHash = chain.txHash;
-    }
-    const now = new Date().toISOString();
-    await stmts.upsertProfile({
-      wallet,
-      username,
-      display_name: displayName,
-      bio,
-      profile_type: profileKind,
-      ecosystems: JSON.stringify(Array.isArray(ecosystems) ? ecosystems : []),
-      farcaster,
-      github,
-      x,
-      discord,
-      linkedin,
-      pfp,
-      created_at: now,
-    });
-    if (humanUsesExternalWallet(req)) {
-      await claimHumanTransaction(req, confirmedTxHash, 'profile');
-    }
-    const saved = await stmts.getProfileByWallet(wallet);
-    res.json({
-      success: true,
-      profile: profileToJSON(saved),
-      txHash: confirmedTxHash,
-      explorer: `https://testnet.arcscan.app/tx/${confirmedTxHash}`,
-    });
-  } catch (error) {
-    if (
-      error.code === '23505' &&
-      (
-        error.constraint === 'profiles_username_key' ||
-        error.message?.includes('profiles_username_key')
-      )
-    ) {
-      return res.status(409).json({
-        error: 'Username is already taken',
-        code: 'username_taken',
-      });
-    }
-    res.status(error.status || 502).json({
-      error: error.message,
-      code: error.code,
-      txHash: error.txHash,
-      gasTopUpTxHash: error.gasTopUpTxHash,
-    });
-  }
-});
-
-app.post('/api/human/send-usdc', requireHuman, async (req, res) => {
-  try {
-    const { to, amount, txHash = '' } = req.body || {};
-    let confirmedTxHash = '';
-    let firstConfirmation = true;
-    if (humanUsesExternalWallet(req)) {
-      const transaction = buildHumanUsdcTransfer(to, amount);
-      if (!txHash) {
-        await prepareHumanUsdcTransfer(req.human.wallet_address, to, amount);
-        return res.status(202).json({
-          signatureRequired: true,
-          walletType: 'external',
-          transaction: externalTransactionPayload(transaction),
-        });
-      }
-      const verification = await verifyExactExternalTransaction(
-        txHash,
-        req.human.wallet_address,
-        transaction.to,
-        transaction.data
-      );
-      if (!verification.valid) {
-        return res.status(409).json({ error: verification.error, txHash });
-      }
-      confirmedTxHash = txHash.toLowerCase();
-      firstConfirmation = await claimHumanTransaction(req, confirmedTxHash, 'send-usdc');
-    } else {
-      const result = await sendHumanUsdc(req.human.wallet_address, to, amount);
-      confirmedTxHash = result.txHash;
-    }
-    if (firstConfirmation) {
-      await createNotification({
-        wallet: req.human.wallet_address,
-        type: 'send',
-        title: 'USDC Sent',
-        message: `${amount} USDC sent to ${to}`,
-        from: req.human.wallet_address,
-        amount: String(amount),
-      });
-      await createNotification({
-        wallet: to,
-        type: 'send',
-        title: 'USDC Received',
-        message: `${amount} USDC received from ${req.human.wallet_address}`,
-        from: req.human.wallet_address,
-        amount: String(amount),
-      });
-    }
-    res.json({
-      success: true,
-      txHash: confirmedTxHash,
-      explorer: `https://testnet.arcscan.app/tx/${confirmedTxHash}`,
-    });
-  } catch (error) {
-    res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
-  }
-});
-
-app.post('/api/human/proofs', requireHuman, async (req, res) => {
-  try {
-    const wallet = req.human.wallet_address;
-    const {
-      id = `proof-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      title,
-      description = '',
-      ecosystem = '',
-      contributionType = 'other',
-      externalLinks = [],
-      fileUrl = '',
-      txHash = '',
-    } = req.body || {};
-    const links = Array.isArray(externalLinks) ? externalLinks.filter(Boolean) : [];
-    if (fileUrl) links.push(fileUrl);
-    const proofTransaction = {
-      title,
-      description,
-      ecosystem,
-      contributionType,
-      externalLink: links[0] || '',
-    };
-    let confirmedTxHash = '';
-    let alreadyConfirmed = false;
-    if (humanUsesExternalWallet(req)) {
-      const transaction = buildHumanProofTransaction(proofTransaction);
-      if (!txHash) {
-        return res.status(202).json({
-          signatureRequired: true,
-          walletType: 'external',
-          transaction: externalTransactionPayload(transaction),
-        });
-      }
-      const verification = await verifyExactExternalTransaction(
-        txHash,
-        wallet,
-        transaction.to,
-        transaction.data
-      );
-      if (!verification.valid) {
-        return res.status(409).json({ error: verification.error, txHash });
-      }
-      confirmedTxHash = txHash.toLowerCase();
-    } else {
-      const chain = await submitHumanProof(wallet, proofTransaction);
-      confirmedTxHash = chain.txHash;
-    }
-    const timestamp = new Date().toISOString();
-    const proof = {
-      id,
-      title,
-      ecosystem,
-      contribution_type: contributionType,
-      description,
-      external_links: JSON.stringify(links),
-      contributor: wallet,
-      status: 'unvalidated',
-      timestamp,
-    };
-    if (humanUsesExternalWallet(req)) {
-      alreadyConfirmed = !await persistExternalProofConfirmation(
-        req,
-        confirmedTxHash,
-        proof
-      );
-    } else {
-      await stmts.insertProof(proof);
-    }
-    res.json({
-      success: true,
-      alreadyConfirmed,
-      proof: proofToJSON(await stmts.getProofById?.(id) || {
-        id, title, ecosystem, contribution_type: contributionType, description,
-        external_links: JSON.stringify(links), contributor: wallet,
-        status: 'unvalidated', timestamp,
-      }),
-      txHash: confirmedTxHash,
-      explorer: `https://testnet.arcscan.app/tx/${confirmedTxHash}`,
-    });
-  } catch (error) {
-    res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
-  }
-});
-
-app.post('/api/human/vouches', requireHuman, async (req, res) => {
-  try {
-    const target = await resolveVouchTarget(stmts, req.body || {});
-    const input = { ...(req.body || {}), ...target };
-    let result;
-    let firstConfirmation = true;
-    if (humanUsesExternalWallet(req)) {
-      const transactions = buildHumanVouchTransactions(input, {
-        voucherAddress: req.human.wallet_address,
-      });
-      const approveTxHash = String(input.approveTxHash || '');
-      const vouchTxHash = String(input.vouchTxHash || '');
-      if (!approveTxHash) {
-        await prepareHumanVouchTransactions(req.human.wallet_address, input);
-        return res.status(202).json({
-          signatureRequired: true,
-          walletType: 'external',
-          stage: 'approve',
-          transaction: externalTransactionPayload(transactions.approve),
-        });
-      }
-      const approval = await verifyExactExternalTransaction(
-        approveTxHash,
-        req.human.wallet_address,
-        transactions.approve.to,
-        transactions.approve.data
-      );
-      if (!approval.valid) {
-        return res.status(409).json({
-          error: approval.error,
-          txHash: approveTxHash,
-          stage: 'approve',
-        });
-      }
-      if (!vouchTxHash) {
-        return res.status(202).json({
-          signatureRequired: true,
-          walletType: 'external',
-          stage: 'vouch',
-          approveTxHash: approveTxHash.toLowerCase(),
-          transaction: externalTransactionPayload(transactions.vouch),
-        });
-      }
-      const vouch = await verifyExactExternalTransaction(
-        vouchTxHash,
-        req.human.wallet_address,
-        transactions.vouch.to,
-        transactions.vouch.data
-      );
-      if (!vouch.valid) {
-        return res.status(409).json({
-          error: vouch.error,
-          txHash: vouchTxHash,
-          stage: 'vouch',
-        });
-      }
-      firstConfirmation = await claimHumanTransaction(
-        req,
-        vouchTxHash.toLowerCase(),
-        'vouch'
-      );
-      result = {
-        approveTxHash: approveTxHash.toLowerCase(),
-        txHash: vouchTxHash.toLowerCase(),
-      };
-    } else {
-      result = await createHumanVouch(req.human.wallet_address, input);
-    }
-    if (firstConfirmation) {
-      await createNotification({
-        wallet: input.contributorWallet,
-        agentId: input.contributorAgentId,
-        type: 'vouch',
-        title: 'New Vouch Received',
-        message: `${input.amount} USDC vouch received`,
-        from: req.human.wallet_address,
-        amount: String(input.amount || ''),
-      });
-    }
-    res.json({
-      success: true,
-      ...result,
-      explorer: `https://testnet.arcscan.app/tx/${result.txHash}`,
-    });
-  } catch (error) {
-    res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
-  }
-});
-
-app.get('/api/human/vouches', requireHuman, async (req, res) => {
-  try {
-    const vouches = await listHumanVouches(req.human.wallet_address);
-    const enriched = await Promise.all(vouches.map(async (vouch) => {
-      const [profile, agentResult] = await Promise.all([
-        stmts.getProfileByWallet(vouch.contributorWallet),
-        pool.query(
-          `SELECT id, agent_name
-             FROM agents
-            WHERE LOWER(turnkey_address) = LOWER($1)
-               OR LOWER(owner_wallet) = LOWER($1)
-            ORDER BY created_at ASC
-            LIMIT 1`,
-          [vouch.contributorWallet]
-        ),
-      ]);
-      const agent = agentResult.rows[0];
-      return {
-        ...vouch,
-        contributorName: agent?.agent_name || profile?.display_name || profile?.username || null,
-        contributorUsername: profile?.username || null,
-        contributorAgentId: agent?.id || null,
-      };
-    }));
-    const active = enriched.filter((vouch) => vouch.active);
-    const withdrawable = active.filter((vouch) => vouch.canWithdraw);
-    const sum = (rows) => rows.reduce((total, vouch) => total + Number(vouch.amountUsdc), 0);
-    res.json({
-      vouches: enriched,
-      summary: {
-        count: enriched.length,
-        activeCount: active.length,
-        withdrawnCount: enriched.filter((vouch) => vouch.withdrawn).length,
-        totalVouchedUsdc: sum(enriched).toFixed(6),
-        activeStakedUsdc: sum(active).toFixed(6),
-        withdrawableUsdc: sum(withdrawable).toFixed(6),
-      },
-    });
-  } catch (error) {
-    res.status(error.status || 502).json({ error: error.message });
-  }
-});
-
-app.post('/api/human/vouches/:contributorId/:vouchIndex/withdraw', requireHuman, async (req, res) => {
-  try {
-    const { contributorId, vouchIndex } = req.params;
-    const transaction = await prepareHumanVouchWithdrawal(
-      req.human.wallet_address,
-      contributorId,
-      vouchIndex
-    );
-    let txHash;
-    if (humanUsesExternalWallet(req)) {
-      const submittedTxHash = String(req.body?.txHash || '');
-      if (!submittedTxHash) {
-        return res.status(202).json({
-          signatureRequired: true,
-          walletType: 'external',
-          transaction: externalTransactionPayload(transaction),
-        });
-      }
-      const verification = await verifyExactExternalTransaction(
-        submittedTxHash,
-        req.human.wallet_address,
-        transaction.to,
-        transaction.data
-      );
-      if (!verification.valid) {
-        return res.status(409).json({
-          error: verification.error,
-          txHash: submittedTxHash,
-        });
-      }
-      await claimHumanTransaction(req, submittedTxHash.toLowerCase(), 'vouch_withdraw');
-      txHash = submittedTxHash.toLowerCase();
-    } else {
-      const result = await withdrawHumanVouch(
-        req.human.wallet_address,
-        contributorId,
-        vouchIndex
-      );
-      txHash = result.txHash;
-    }
-    res.json({
-      success: true,
-      txHash,
-      explorer: `https://testnet.arcscan.app/tx/${txHash}`,
-    });
-  } catch (error) {
-    res.status(error.status || 502).json({
-      error: error.message,
-      lockExpiry: error.lockExpiry || null,
-      txHash: error.txHash || null,
-    });
-  }
-});
-
-// A logged-in human can operate an agent linked to their managed wallet without
-// exposing or browser-signing with that wallet's private key.
-app.post('/api/human/agents/:id/token', requireHuman, async (req, res) => {
-  const agent = await stmts.getAgentById(req.params.id);
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-  if (agent.owner_wallet?.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
-    return res.status(403).json({ error: 'Agent is not linked to this BARD account' });
-  }
-  const tokenId = `tok-${Date.now()}-${randomBytes(4).toString('hex')}`;
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-  const token = jwt.sign({
-    sub: agent.id,
-    agentId: agent.id,
-    kind: 'human-agent-session',
-    wallet: agent.owner_wallet.toLowerCase(),
-    scope: 'agent:human-delegated',
-    agentName: agent.agent_name,
-    jti: tokenId,
-  }, JWT_SECRET, { expiresIn: '15m' });
-  await stmts.insertAuthToken({
-    id: tokenId,
-    agent_id: agent.id,
-    wallet: agent.owner_wallet.toLowerCase(),
-    scope: 'agent:human-delegated',
-    expires_at: expiresAt,
-    created_at: new Date().toISOString(),
-  });
-  res.json({ token, agentId: agent.id, agentName: agent.agent_name, expiresAt });
-});
-
-// ══════════════════════════════════════════════════════
-// ── Routes: Proofs ──
-// ══════════════════════════════════════════════════════
-
-app.post('/api/proofs', (_req, res) => {
-  res.status(410).json({
-    error: 'Proof writes require an authenticated BARD human or agent session',
-    hint: 'Use POST /api/human/proofs or bard_submit_contribution',
-  });
-});
-
-app.get('/api/proofs/:wallet', async (req, res) => {
-  const rows = await stmts.getProofsByWallet(req.params.wallet);
-  res.json({ proofs: rows.map(proofToJSON) });
-});
-
-// ══════════════════════════════════════════════════════
-// ── Routes: Portfolio ──
-// ══════════════════════════════════════════════════════
-
-app.post('/api/human/portfolio', requireHuman, async (req, res) => {
-  const p = req.body || {};
-  const wallet = req.human.wallet_address;
-  if (!p.id) return res.status(400).json({ error: 'id required' });
-  try {
-    await stmts.insertPortfolio({
-      id: p.id, wallet, title: p.title || '',
-      description: p.description || '', category: p.category || 'other',
-      image_url: p.imageDataURI || '', external_link: p.externalLink || '',
-      github_repo: p.githubRepo || '',
-      tags: JSON.stringify(p.tags || []),
-      created_at: p.createdAt || new Date().toISOString(),
-      sort_order: p.order || 0,
-    });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/portfolio/:wallet', async (req, res) => {
-  const rows = await stmts.getPortfolioByWallet(req.params.wallet);
-  res.json({ portfolio: rows.map(portfolioToJSON) });
-});
-
-app.delete('/api/human/portfolio/:id', requireHuman, async (req, res) => {
-  const item = (await pool.query(
-    'SELECT wallet FROM portfolio WHERE id = $1',
-    [req.params.id]
-  )).rows[0];
-  if (!item) return res.status(404).json({ error: 'Portfolio item not found' });
-  if (item.wallet.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
-    return res.status(403).json({ error: 'You can only delete your own portfolio items' });
-  }
-  const result = await stmts.deletePortfolio(req.params.id);
-  res.json({ success: true, deleted: result.changes > 0 });
-});
-
-app.put('/api/human/portfolio/reorder', requireHuman, async (req, res) => {
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    return res.status(400).json({ error: 'orderedIds must be an array' });
-  }
-  if (orderedIds.length > 0) {
-    const owned = await pool.query(
-      'SELECT id FROM portfolio WHERE wallet = $1 AND id = ANY($2::text[])',
-      [req.human.wallet_address, orderedIds]
-    );
-    if (owned.rows.length !== new Set(orderedIds).size) {
-      return res.status(403).json({ error: 'Portfolio order contains an item you do not own' });
-    }
-  }
-  // Sequential reorder. (SQLite version used db.transaction() to batch these —
-  // Postgres equivalent would require a pool.connect() + BEGIN/COMMIT block.
-  // The previous batched version had no atomicity requirement either, so we
-  // keep this sequential and treat the call as best-effort.)
-  for (let i = 0; i < orderedIds.length; i++) {
-    await stmts.updatePortfolioOrder(i, orderedIds[i]);
-  }
-  res.json({ success: true });
-});
-
-app.post('/api/portfolio', (_req, res) => {
-  res.status(410).json({
-    error: 'Portfolio writes require an authenticated BARD human session',
-    hint: 'Use POST /api/human/portfolio',
-  });
-});
-
-app.delete('/api/portfolio/:id', (_req, res) => {
-  res.status(410).json({
-    error: 'Portfolio writes require an authenticated BARD human session',
-    hint: 'Use DELETE /api/human/portfolio/:id',
-  });
-});
-
-app.put('/api/portfolio/reorder', (_req, res) => {
-  res.status(410).json({
-    error: 'Portfolio writes require an authenticated BARD human session',
-    hint: 'Use PUT /api/human/portfolio/reorder',
-  });
-});
-
-// ══════════════════════════════════════════════════════
-// ── Routes: Notifications ──
-// ══════════════════════════════════════════════════════
-
-app.post('/api/notifications', (_req, res) => {
-  res.status(410).json({
-    error: 'Notifications are created by authenticated BARD workflows',
-  });
-});
-
-app.get('/api/human/notifications', requireHuman, async (req, res) => {
-  const rows = await stmts.getNotificationsByWallet(req.human.wallet_address);
-  res.json({ notifications: rows.map(notifToJSON) });
-});
-
-app.put('/api/human/notifications/:id/read', requireHuman, async (req, res) => {
-  const notification = (await pool.query(
-    'SELECT wallet FROM notifications WHERE id = $1',
-    [req.params.id]
-  )).rows[0];
-  if (!notification) return res.status(404).json({ error: 'Notification not found' });
-  if (notification.wallet.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
-    return res.status(403).json({ error: 'You can only update your own notifications' });
-  }
-  await stmts.markRead(req.params.id);
-  res.json({ success: true });
-});
-
-app.put('/api/human/notifications/read-all', requireHuman, async (req, res) => {
-  await stmts.markAllRead(req.human.wallet_address);
-  res.json({ success: true });
-});
-
-app.get('/api/notifications/:wallet', (_req, res) => {
-  res.status(410).json({
-    error: 'Notification reads require an authenticated BARD account',
-    hint: 'Use GET /api/human/notifications or bard_get_notifications',
-  });
-});
-
-app.put('/api/notifications/:id/read', (_req, res) => {
-  res.status(410).json({
-    error: 'Notification updates require an authenticated BARD human session',
-    hint: 'Use PUT /api/human/notifications/:id/read',
-  });
-});
-
-app.put('/api/notifications/:wallet/read-all', (_req, res) => {
-  res.status(410).json({
-    error: 'Notification updates require an authenticated BARD human session',
-    hint: 'Use PUT /api/human/notifications/read-all',
-  });
-});
+app.use('/api/notifications', (_req, res) => res.status(410).json({
+  error: 'Use authenticated agent notification tools.',
+  hint: 'bard_get_notifications',
+}));
+app.get('/api/x402/info', (_req, res) => res.json({
+  enabled: false, network: 'Arc Testnet (eip155:5042002)', currency: 'USDC', endpoints: [],
+}));
 
 // ── Agent Notifications ──
 // Agents can read notifications addressed to their owner wallet (which includes cross-entity notifs).
@@ -2202,220 +1086,13 @@ app.get('/api/agents/:id/notifications', requireAuth, async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════
-// ── Routes: File Uploads ──
-// ══════════════════════════════════════════════════════
+app.post('/api/upload/portfolio', requireHuman);
 
-app.post('/api/upload/portfolio', requireHuman, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+app.post('/api/upload/portfolio/batch', requireHuman);
 
-  try {
-    let url, filename;
-    const wallet = req.human.wallet_address;
+app.post('/api/upload/pfp', requireHuman);
 
-    if (isR2Enabled) {
-      try {
-        // Upload to R2
-        filename = generateFilename(req.file.originalname, wallet);
-        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio', wallet);
-      } catch (r2Error) {
-        console.error('R2 upload failed, falling back to local storage:', r2Error.message);
-        // Fallback to local disk storage
-        const walletPrefix = wallet.toLowerCase().slice(0, 12);
-        const ext = path.extname(req.file.originalname) || '.png';
-        filename = `${walletPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
-        const dir = path.join(UPLOADS_DIR, 'portfolio');
-        fs.mkdirSync(dir, { recursive: true });
-        const filePath = path.join(dir, filename);
-        fs.writeFileSync(filePath, req.file.buffer);
-        url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
-      }
-    } else {
-      // Local disk storage
-      filename = req.file.filename;
-      url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
-    }
-
-    res.json({ success: true, url, filename, size: req.file.size, mimetype: req.file.mimetype });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Multi-file portfolio upload
-app.post('/api/upload/portfolio/batch', requireHuman, upload.array('files', 10), async (req, res) => {
-  if (!req.files || req.files.length === 0) {
-    return res.status(400).json({ error: 'No files uploaded' });
-  }
-
-  try {
-    const results = [];
-    const errors = [];
-    const wallet = req.human.wallet_address;
-
-    for (const file of req.files) {
-      try {
-        let url, filename;
-
-        if (isR2Enabled) {
-          try {
-            // Upload to R2
-            filename = generateFilename(file.originalname, wallet);
-            url = await uploadToR2(file.buffer, filename, file.mimetype, 'portfolio', wallet);
-          } catch (r2Error) {
-            console.error('R2 upload failed, falling back to local storage:', r2Error.message);
-            // Fallback to local disk storage
-            const walletPrefix = wallet.toLowerCase().slice(0, 12);
-            const ext = path.extname(file.originalname) || '.png';
-            filename = `${walletPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
-            const dir = path.join(UPLOADS_DIR, 'portfolio');
-            fs.mkdirSync(dir, { recursive: true });
-            const filePath = path.join(dir, filename);
-            fs.writeFileSync(filePath, file.buffer);
-            url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
-          }
-        } else {
-          // Local disk storage
-          filename = file.filename;
-          url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
-        }
-
-        results.push({
-          success: true,
-          url,
-          filename,
-          originalName: file.originalname,
-          size: file.size,
-          mimetype: file.mimetype
-        });
-      } catch (fileError) {
-        errors.push({
-          filename: file.originalname,
-          error: fileError.message
-        });
-      }
-    }
-
-    res.json({
-      success: true,
-      uploaded: results.length,
-      failed: errors.length,
-      results,
-      errors: errors.length > 0 ? errors : undefined
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/upload/pfp', requireHuman, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-  try {
-    let url, filename;
-    const wallet = req.human.wallet_address;
-
-    if (isR2Enabled) {
-      try {
-        // Upload to R2
-        filename = generateFilename(req.file.originalname, wallet);
-        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'pfp', wallet);
-      } catch (r2Error) {
-        console.error('R2 upload failed, falling back to local storage:', r2Error.message);
-        // Fallback to local disk storage
-        const walletPrefix = wallet.toLowerCase().slice(0, 12);
-        const ext = path.extname(req.file.originalname) || '.png';
-        filename = `${walletPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
-        const dir = path.join(UPLOADS_DIR, 'pfp');
-        fs.mkdirSync(dir, { recursive: true });
-        const filePath = path.join(dir, filename);
-        fs.writeFileSync(filePath, req.file.buffer);
-        url = `${req.protocol}://${req.get('host')}/uploads/pfp/${filename}`;
-      }
-    } else {
-      // Local disk storage
-      filename = req.file.filename;
-      url = `${req.protocol}://${req.get('host')}/uploads/pfp/${filename}`;
-    }
-
-    res.json({ success: true, url, filename, size: req.file.size, mimetype: req.file.mimetype });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/upload/proof', requireHuman, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-  const wallet = req.human.wallet_address.toLowerCase();
-  const isVideo = req.file.mimetype.startsWith('video/');
-
-  // Enforce 3-video limit per account
-  let deletedOldest = null;
-  if (isVideo && wallet) {
-    const MAX_VIDEOS = 3;
-    const { rows: walletVideos } = await pool.query(
-      "SELECT id, file_url, timestamp FROM proofs WHERE LOWER(contributor) = $1 AND file_url != '' AND (file_url LIKE '%.mp4' OR file_url LIKE '%.webm' OR file_url LIKE '%.mov' OR file_url LIKE '%.avi' OR file_url LIKE '%.mkv') ORDER BY timestamp ASC",
-      [wallet]
-    );
-
-    if (walletVideos.length >= MAX_VIDEOS) {
-      // Delete the oldest video file
-      const oldest = walletVideos[0];
-      if (oldest.file_url) {
-        try {
-          if (isR2Enabled) {
-            // Extract R2 key from URL
-            const urlObj = new URL(oldest.file_url);
-            const key = urlObj.pathname.substring(1); // Remove leading /
-            await deleteFromR2(key);
-          } else {
-            // Delete from local disk
-            const filename = oldest.file_url.split('/').pop();
-            const filePath = path.join(UPLOADS_DIR, 'portfolio', filename);
-            fs.unlinkSync(filePath);
-          }
-        } catch (err) {
-          console.error('Failed to delete old video:', err);
-        }
-        // Clear the file_url but keep the proof post
-        await pool.query("UPDATE proofs SET file_url = '' WHERE id = $1", [oldest.id]);
-        deletedOldest = { proofId: oldest.id, removedFile: oldest.file_url };
-      }
-    }
-  }
-
-  try {
-    let url, filename;
-
-    if (isR2Enabled) {
-      try {
-        // Upload to R2
-        filename = generateFilename(req.file.originalname, wallet);
-        url = await uploadToR2(req.file.buffer, filename, req.file.mimetype, 'portfolio');
-      } catch (r2Error) {
-        console.error('R2 upload failed, falling back to local storage:', r2Error.message);
-        // Fallback to local disk storage
-        const walletPrefix = (wallet || 'unknown').toLowerCase().slice(0, 12);
-        const ext = path.extname(req.file.originalname) || '.png';
-        filename = `${walletPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
-        const dir = path.join(UPLOADS_DIR, 'portfolio');
-        fs.mkdirSync(dir, { recursive: true });
-        const filePath = path.join(dir, filename);
-        fs.writeFileSync(filePath, req.file.buffer);
-        url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
-      }
-    } else {
-      // Local disk storage
-      filename = req.file.filename;
-      url = `${req.protocol}://${req.get('host')}/uploads/portfolio/${filename}`;
-    }
-
-    res.json({ success: true, url, filename, size: req.file.size, mimetype: req.file.mimetype, deletedOldest });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+app.post('/api/upload/proof', requireHuman);
 
 // Agent proxy: upload proof on behalf of linked human
 app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), async (req, res) => {
@@ -2535,200 +1212,9 @@ app.post('/api/agents/:id/upload-proof', requireAuth, upload.single('file'), asy
   }
 });
 
-app.get('/api/files/:wallet', requireHuman, (req, res) => {
-  if (req.params.wallet.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
-    return res.status(403).json({ error: 'You can only list your own files' });
-  }
-  const wallet = req.human.wallet_address.toLowerCase().slice(0, 12);
-  const dir = path.join(UPLOADS_DIR, 'portfolio');
-  if (!fs.existsSync(dir)) return res.json({ files: [] });
-  const files = fs.readdirSync(dir)
-    .filter(f => f.startsWith(wallet))
-    .map(f => ({
-      filename: f,
-      url: `${req.protocol}://${req.get('host')}/uploads/portfolio/${f}`,
-      size: fs.statSync(path.join(dir, f)).size,
-    }));
-  res.json({ files });
-});
+app.get('/api/files/:wallet', requireHuman);
 
-app.delete('/api/files/:type/:filename', requireHuman, async (req, res) => {
-  const { type, filename } = req.params;
-  if (!['portfolio', 'pfp'].includes(type)) return res.status(400).json({ error: 'Invalid type' });
-  if (path.basename(filename) !== filename) {
-    return res.status(400).json({ error: 'Invalid filename' });
-  }
-  const walletPrefix = req.human.wallet_address.toLowerCase().slice(0, 12);
-  if (!filename.toLowerCase().startsWith(`${walletPrefix}-`)) {
-    return res.status(403).json({ error: 'You can only delete your own files' });
-  }
-
-  try {
-    if (isR2Enabled) {
-      // Delete from R2
-      const key = `${type}/${filename}`;
-      await deleteFromR2(key, req.human.wallet_address);
-      res.json({ success: true });
-    } else {
-      // Delete from local disk
-      const filePath = path.join(UPLOADS_DIR, type, filename);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        res.json({ success: true });
-      } else {
-        res.status(404).json({ error: 'File not found' });
-      }
-    }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ══════════════════════════════════════════════════════
-// ── Swarm Execution Helpers ──
-// ══════════════════════════════════════════════════════
-
-// BYOK secret-at-rest encryption. Uses a dedicated ENCRYPTION_KEY (falls back to
-// JWT_SECRET with a warning), a PER-RECORD random salt (static salt defeats
-// scrypt), and no insecure 'default-secret' fallback.
-function encryptionSecret() {
-  const secret = process.env.ENCRYPTION_KEY || process.env.JWT_SECRET;
-  if (!secret) throw new Error('No ENCRYPTION_KEY or JWT_SECRET configured for at-rest encryption');
-  return secret;
-}
-
-function encryptApiKey(plaintext) {
-  const salt = randomBytes(16);
-  const key = scryptSync(encryptionSecret(), salt, 32);
-  const iv = randomBytes(16);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  let encrypted = cipher.update(plaintext, 'utf8', 'base64');
-  encrypted += cipher.final('base64');
-  const authTag = cipher.getAuthTag().toString('base64');
-  return JSON.stringify({ encrypted, iv: iv.toString('base64'), authTag, salt: salt.toString('base64') });
-}
-
-function decryptApiKey(ciphertext) {
-  const { encrypted, iv, authTag, salt } = JSON.parse(ciphertext);
-  // Back-compat: legacy records were encrypted with the static 'salt' string.
-  const saltBuf = salt ? Buffer.from(salt, 'base64') : Buffer.from('salt');
-  const key = scryptSync(encryptionSecret(), saltBuf, 32);
-  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64'));
-  decipher.setAuthTag(Buffer.from(authTag, 'base64'));
-  let decrypted = decipher.update(encrypted, 'base64', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
-}
-
-async function executeSwarm(agent, task, bountyId) {
-  const executionId = `swarm-exec-${Date.now()}-${randomBytes(4).toString('hex')}`;
-  const now = new Date().toISOString();
-
-  try {
-    // Parse swarm config
-    const swarmConfig = JSON.parse(agent.swarm_config || '{}');
-    const { swarm_type, agents: swarmAgents, user_swarms_api_key_encrypted } = swarmConfig;
-
-    if (!swarm_type || !swarmAgents) {
-      throw new Error('Invalid swarm_config: missing swarm_type or agents');
-    }
-
-    // Determine API key
-    let apiKey;
-    if (agent.is_platform_owned === 1) {
-      apiKey = SWARMS_API_KEY;
-      if (!apiKey) throw new Error('Platform SWARMS_API_KEY not configured');
-    } else {
-      if (!user_swarms_api_key_encrypted) throw new Error('User swarm missing API key');
-      apiKey = decryptApiKey(user_swarms_api_key_encrypted);
-    }
-
-    // Create execution record
-    await pool.query(
-      `INSERT INTO swarm_executions (id, bounty_id, agent_id, swarm_type, task, status, started_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [executionId, bountyId, agent.id, swarm_type, task, 'running', now, now]
-    );
-
-    // Call Swarms API with correct endpoint and format (5 minute timeout)
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000); // 5 minutes
-
-    try {
-      const response = await fetch(`${SWARMS_API_BASE}/v1/swarm/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey
-        },
-        body: JSON.stringify({
-          name: agent.agent_name,
-          description: agent.description || 'BARD swarm execution',
-          task: task,
-          swarm_type: swarm_type,
-          agents: swarmAgents.map(a => ({
-            agent_name: a.role,
-            system_prompt: a.system_prompt,
-            model_name: a.model,
-            description: `${a.role} agent`,
-            role: 'worker'
-          })),
-          max_loops: 1,
-          stream: false
-        }),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Swarms API error: ${response.status} ${errorText}`);
-      }
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      if (fetchError.name === 'AbortError') {
-        throw new Error('Swarm execution timed out after 5 minutes');
-      }
-      throw fetchError;
-    }
-
-    const result = await response.json();
-    const deliverable = result.output || result.completion || JSON.stringify(result);
-
-    // Extract cost from response (default to $1.00 if not provided)
-    const swarmsCostUsd = result.total_cost || result.cost_usd || 1.00;
-    const platformMarkupUsd = agent.is_platform_owned === 1
-      ? swarmsCostUsd * (SWARMS_PLATFORM_MARKUP_PCT / 100)
-      : 0;
-    const totalChargedUsd = swarmsCostUsd + platformMarkupUsd;
-
-    // Update execution record
-    await pool.query(
-      `UPDATE swarm_executions
-       SET status = $1, swarms_api_response = $2, swarms_cost_usd = $3,
-           platform_markup_usd = $4, total_charged_usd = $5, completed_at = $6
-       WHERE id = $7`,
-      ['completed', JSON.stringify(result), swarmsCostUsd, platformMarkupUsd, totalChargedUsd, now, executionId]
-    );
-
-    return {
-      executionId,
-      deliverable,
-      status: 'completed',
-      costs: { swarmsCostUsd, platformMarkupUsd, totalChargedUsd }
-    };
-
-  } catch (error) {
-    // Mark execution as failed
-    await pool.query(
-      `UPDATE swarm_executions SET status = $1, swarms_api_response = $2, completed_at = $3 WHERE id = $4`,
-      ['failed', JSON.stringify({ error: error.message }), now, executionId]
-    );
-
-    throw error;
-  }
-}
+app.delete('/api/files/:type/:filename', requireHuman);
 
 // ══════════════════════════════════════════════════════
 // ── Routes: Agent Reputation System ──
@@ -2820,6 +1306,7 @@ app.post('/api/agents/register-from-token', requireAuth, async (req, res) => {
 
 app.post('/api/agents/register', async (req, res) => {
   const { ownerWallet, agentName, agentPublicKey, agentType, description, swarmConfig, challengeId, signature } = req.body;
+  if (agentType === 'swarm' || swarmConfig) return swarmsUnavailable(req, res);
   if (!ownerWallet || !agentName || !agentPublicKey) {
     return res.status(400).json({ error: 'ownerWallet, agentName, and agentPublicKey required' });
   }
@@ -2840,7 +1327,7 @@ app.post('/api/agents/register', async (req, res) => {
       });
     }
     const challenge = await stmts.getChallenge(challengeId);
-    if (!challenge) return res.status(404).json({ error: 'Challenge not found' });
+    if (!challenge || challenge.scope !== 'agent:full') return res.status(404).json({ error: 'Agent authentication challenge not found' });
     if (challenge.used) return res.status(409).json({ error: 'Challenge already used' });
     if (new Date(challenge.expires_at) < new Date()) return res.status(410).json({ error: 'Challenge expired. Request a new one.' });
     let ok = false;
@@ -2849,8 +1336,6 @@ app.post('/api/agents/register', async (req, res) => {
     } catch { ok = false; }
     if (!ok) return res.status(401).json({ error: 'Signature does not prove control of ownerWallet' });
     await stmts.markChallengeUsed(challengeId);
-    // REGISTRATION_STAKE hook: when > 0, additionally require an on-chain stake
-    // before issuing a token (deferred — see plan). Currently informational only.
   }
 
   const nameCollision = await stmts.getAgentByName(agentName);
@@ -2865,24 +1350,6 @@ app.post('/api/agents/register', async (req, res) => {
       agent_public_key: agentPublicKey, agent_type: agentType || 'general',
       description: description || '', created_at: new Date().toISOString(),
     };
-
-    // If swarm config provided, encrypt the BYOK API key before storage
-    if (swarmConfig) {
-      try {
-        const parsed = typeof swarmConfig === 'string' ? JSON.parse(swarmConfig) : swarmConfig;
-
-        // Encrypt the user's Swarms API key if present
-        if (parsed.user_swarms_api_key) {
-          parsed.user_swarms_api_key_encrypted = encryptApiKey(parsed.user_swarms_api_key);
-          delete parsed.user_swarms_api_key; // Never store plaintext
-        }
-
-        insertData.swarm_config = JSON.stringify(parsed);
-        insertData.is_platform_owned = 0; // User-owned swarm
-      } catch (err) {
-        return res.status(400).json({ error: `Invalid swarmConfig: ${err.message}` });
-      }
-    }
 
     await stmts.insertAgent(insertData);
 
@@ -2969,10 +1436,10 @@ app.get('/api/agents/featured', async (req, res) => {
 app.get('/api/agents/:id', async (req, res) => {
   const agent = await stmts.getAgentById(req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
-  const [reputation, ownerAssurance, ownerAgents] = await Promise.all([
+  const [reputation, ownerAssurance, humanLinks] = await Promise.all([
     calculateReputation(req.params.id),
     getOwnerAssuranceForDisplay(agent),
-    stmts.getAgentsByOwner(agent.owner_wallet),
+    getHumanLinks(pool, agent.id),
   ]);
   const trustMaturity = getTrustMaturity(reputation.completedBounties);
   const bardReputation = {
@@ -2980,60 +1447,25 @@ app.get('/api/agents/:id', async (req, res) => {
     tier: reputation.tier,
     completedBounties: reputation.completedBounties,
   };
-  ownerAssurance.ownerAgentCount = ownerAgents.length;
-
-  // Add performance analytics for swarm agents
-  let performance = null;
-  if (agent.agent_type === 'swarm') {
-    const { rows: executions } = await pool.query(
-      `SELECT
-        COUNT(*) as total_executions,
-        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_executions,
-        COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_executions,
-        AVG(CASE WHEN status = 'completed' THEN swarms_cost_usd END) as avg_cost_usd,
-        AVG(CASE WHEN status = 'completed' THEN total_charged_usd END) as avg_total_charged_usd,
-        AVG(CASE WHEN status = 'completed' AND completed_at IS NOT NULL AND started_at IS NOT NULL
-          THEN EXTRACT(EPOCH FROM (completed_at::timestamp - started_at::timestamp)) END) as avg_completion_time_seconds
-      FROM swarm_executions
-      WHERE agent_id = $1`,
-      [req.params.id]
-    );
-
-    const stats = executions[0];
-    const totalExecs = parseInt(stats.total_executions) || 0;
-    const completedExecs = parseInt(stats.completed_executions) || 0;
-
-    performance = {
-      total_executions: totalExecs,
-      completed_executions: completedExecs,
-      failed_executions: parseInt(stats.failed_executions) || 0,
-      success_rate: totalExecs > 0 ? (completedExecs / totalExecs * 100).toFixed(1) : '0.0',
-      avg_cost_usd: stats.avg_cost_usd ? parseFloat(stats.avg_cost_usd).toFixed(2) : '0.00',
-      avg_total_charged_usd: stats.avg_total_charged_usd ? parseFloat(stats.avg_total_charged_usd).toFixed(2) : '0.00',
-      avg_completion_time_seconds: stats.avg_completion_time_seconds ? Math.round(stats.avg_completion_time_seconds) : 0,
-      avg_completion_time_minutes: stats.avg_completion_time_seconds ? (stats.avg_completion_time_seconds / 60).toFixed(1) : '0.0'
-    };
-  }
 
   res.json({
     agent: agentToJSON(agent),
     reputation,
     bardReputation,
     ownerAssurance,
+    humanLinks,
     trustMaturity,
-    performance,
   });
 });
 
 app.get('/api/agents/:id/owner-assurance', async (req, res) => {
   const agent = await stmts.getAgentById(req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
-  const [ownerAssurance, ownerAgents] = await Promise.all([
-    getOwnerAssurance(agent.owner_wallet, { independent: Boolean(agent.is_platform_owned) }),
-    stmts.getAgentsByOwner(agent.owner_wallet),
+  const [ownerAssurance, humanLinks] = await Promise.all([
+    getOwnerAssuranceForDisplay(agent),
+    getHumanLinks(pool, agent.id),
   ]);
-  ownerAssurance.ownerAgentCount = ownerAgents.length;
-  res.json({ ownerAssurance });
+  res.json({ ownerAssurance, humanLinks });
 });
 
 // Get all active agents (leaderboard)
@@ -3082,127 +1514,13 @@ app.patch('/api/agents/:id/availability', requireAuth, requireOwnAgent, async (r
   res.json({ availability });
 });
 
-// ── Agent-to-Human Linking (Token-Based) ──
-
-// Helper: Check if an agent is genuinely linked to a human profile
-// (as opposed to just having its own Turnkey wallet as owner_wallet)
+// Only wallet proofs in the human-link flow establish a human connection.
 function isLinkedToHuman(agent) {
-  const w = agent.owner_wallet?.toLowerCase();
-  if (!w || w === '0x0') return false;
-  // If owner_wallet matches the agent's own public key → self-registered, not linked
-  if (w === agent.agent_public_key?.toLowerCase()) return false;
-  // If owner_wallet matches the agent's Turnkey address → self-owned wallet, not linked
-  if (w === agent.turnkey_address?.toLowerCase()) return false;
-  // Otherwise it's a real human wallet link
-  return true;
+  return Boolean(agent.human_owner_wallet || agent.ethos_owner_wallet);
 }
 
-// Step 1: Agent generates a link token (called via MCP/CLI with agent auth)
-app.post('/api/agents/:id/generate-link-token', requireAuth, async (req, res) => {
-  // Only the authenticated agent can generate its own link token
-  if (req.auth.agentId !== req.params.id) {
-    return res.status(403).json({ error: 'You can only generate link tokens for your own agent.' });
-  }
-
-  const agent = await stmts.getAgentById(req.params.id);
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-  // Prevent re-linking if already linked to a real human profile
-  if (isLinkedToHuman(agent)) {
-    return res.status(409).json({
-      error: 'Agent is already linked to a human profile. Unlink first to generate a new token.',
-      ownerWallet: agent.owner_wallet.slice(0, 8) + '...',
-    });
-  }
-
-  // Generate a short-lived JWT link token (15 minutes)
-  const linkToken = jwt.sign({
-    purpose: 'agent-link',
-    agentId: agent.id,
-    agentName: agent.agent_name,
-    iat: Math.floor(Date.now() / 1000),
-  }, JWT_SECRET, { expiresIn: '15m' });
-
-  res.json({
-    success: true,
-    linkToken,
-    agentId: agent.id,
-    agentName: agent.agent_name,
-    expiresIn: '15 minutes',
-    instruction: 'Paste this token into your BARD profile to link this agent to your wallet.',
-  });
-});
-
-// Step 2: Authenticated human pastes the link token to claim the agent.
-app.post('/api/human/agents/link', requireHuman, async (req, res) => {
-  const linkToken = req.body?.linkToken;
-  const ownerWallet = req.human.wallet_address;
-  if (!linkToken) return res.status(400).json({ error: 'linkToken required' });
-
-  // Verify the JWT
-  let decoded;
-  try {
-    decoded = jwt.verify(linkToken, JWT_SECRET);
-  } catch (err) {
-    if (err.name === 'TokenExpiredError') return res.status(401).json({ error: 'Link token expired. Generate a new one from your agent.' });
-    return res.status(401).json({ error: 'Invalid link token' });
-  }
-
-  if (decoded.purpose !== 'agent-link') return res.status(400).json({ error: 'Invalid token type' });
-  if (!decoded.agentId) return res.status(400).json({ error: 'Malformed link token — missing agentId' });
-
-  const agent = await stmts.getAgentById(decoded.agentId);
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-  // Already linked to this wallet — idempotent success
-  if (agent.owner_wallet && agent.owner_wallet.toLowerCase() === ownerWallet.toLowerCase()) {
-    return res.json({ success: true, agent: agentToJSON(agent), message: 'Already linked' });
-  }
-
-  // Block takeover: if agent is already linked to a DIFFERENT human wallet, reject
-  if (isLinkedToHuman(agent)) {
-    return res.status(403).json({
-      error: 'Agent is already linked to another profile. The agent must unlink first.',
-    });
-  }
-
-  // Perform the link
-  await pool.query('UPDATE agents SET owner_wallet = $1 WHERE id = $2', [ownerWallet.toLowerCase(), decoded.agentId]);
-  const updated = await stmts.getAgentById(decoded.agentId);
-  emitFeedEvent('agent:linked', { agentId: decoded.agentId, agentName: decoded.agentName, ownerWallet });
-  await createNotification({ wallet: ownerWallet, type: 'system', title: 'Agent Linked', message: `${decoded.agentName} is now linked to your profile.`, from: decoded.agentName });
-  await createNotification({ agentId: decoded.agentId, type: 'system', title: 'Linked to Human', message: `You are now linked to wallet ${ownerWallet.slice(0,6)}...${ownerWallet.slice(-4)}.`, from: ownerWallet });
-  res.json({ success: true, agent: agentToJSON(updated) });
-});
-
-app.post('/api/agents/link', (_req, res) => {
-  res.status(410).json({
-    error: 'Agent linking now requires an authenticated BARD human session.',
-    hint: 'Use POST /api/human/agents/link from the BARD frontend.',
-  });
-});
-
-// Step 3: Agent can unlink itself from a human profile
-app.post('/api/agents/:id/unlink', requireAuth, async (req, res) => {
-  // Only the authenticated agent can unlink itself
-  if (req.auth.agentId !== req.params.id) {
-    return res.status(403).json({ error: 'You can only unlink your own agent.' });
-  }
-
-  const agent = await stmts.getAgentById(req.params.id);
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-  if (!isLinkedToHuman(agent)) {
-    return res.json({ success: true, message: 'Agent is not linked to any human profile.' });
-  }
-
-  // Reset to Turnkey address if available, otherwise null
-  const previousOwner = agent.owner_wallet;
-  const resetWallet = agent.turnkey_address || null;
-  await pool.query('UPDATE agents SET owner_wallet = $1 WHERE id = $2', [resetWallet, req.params.id]);
-  const updated = await stmts.getAgentById(req.params.id);
-  emitFeedEvent('agent:unlinked', { agentId: req.params.id, agentName: agent.agent_name, previousOwner });
-  res.json({ success: true, agent: agentToJSON(updated), message: 'Agent unlinked from human profile.' });
+app.use(['/api/agents/:id/generate-link-token', '/api/agents/:id/verify-owner'], (_req, res) => {
+  res.status(410).json({ error: 'Use bard_link_human through MCP to choose Ethos, Human Passport, or both in your browser.' });
 });
 
 // ── Agent Turnkey Wallet Provisioning ──
@@ -3287,64 +1605,6 @@ app.get('/api/agents/:id/wallet-balance', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Agent wallet balance error:', err);
     res.status(502).json({ error: 'Wallet balance unavailable', details: err.message });
-  }
-});
-
-// POST /api/agents/:id/vouches — stake an on-chain vouch from an agent wallet
-app.post('/api/agents/:id/vouches', requireAuth, async (req, res) => {
-  try {
-    if (req.auth.agentId !== req.params.id) {
-      return res.status(403).json({ error: 'Can only vouch from your own agent wallet' });
-    }
-    const agent = await stmts.getAgentById(req.params.id);
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-    const walletAddress = agent.turnkey_address;
-    if (!walletAddress) {
-      return res.status(400).json({
-        error: 'Agent has no managed wallet. Use bard_create_wallet first.',
-        hint: 'wallet_missing',
-      });
-    }
-    if (!walletSigningReady()) {
-      return res.status(400).json({ error: 'No wallet provider configured. Cannot sign transactions.' });
-    }
-    const target = await resolveVouchTarget(stmts, req.body || {});
-    const input = { ...(req.body || {}), ...target };
-    buildHumanVouchTransactions(input, { voucherAddress: walletAddress });
-    if (!(await checkRateLimit(agent.id, 'agent_vouch'))) {
-      return res.status(429).json({ error: 'Vouch rate limit exceeded. Try again later.' });
-    }
-    const result = await createAgentVouch(walletAddress, input, agent.agent_name);
-
-    await createNotification({
-      wallet: target.contributorWallet,
-      agentId: target.contributorAgentId,
-      type: 'vouch',
-      title: 'New Agent Vouch Received',
-      message: `${input.amount} USDC vouch received from agent ${agent.agent_name}`,
-      from: walletAddress,
-      amount: String(input.amount || ''),
-    });
-    emitFeedEvent('agent:vouch', {
-      agentId: agent.id,
-      agentName: agent.agent_name,
-      contributorWallet: target.contributorWallet,
-      contributorAgentId: target.contributorAgentId,
-      amount: String(input.amount),
-      tier: Number(input.tier || 0),
-      txHash: result.txHash,
-    });
-
-    res.json({
-      success: true,
-      ...result,
-      contributorWallet: target.contributorWallet,
-      contributorAgentId: target.contributorAgentId,
-      explorer: `https://testnet.arcscan.app/tx/${result.txHash}`,
-    });
-  } catch (error) {
-    res.status(error.status || 502).json({ error: error.message, txHash: error.txHash });
   }
 });
 
@@ -3562,6 +1822,7 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
     );
 
     // sendAs estimates and provisions the exact Arc gas requirement.
+    await reserveSpend(pool, { wallet: walletAddress, recipient: resolvedTo, amount: amountWei, operation: 'send:' + randomBytes(16).toString('hex') });
     const { txHash } = await onchainEscrow.sendAs(walletAddress, wrapped, `send-usdc:${agent.agent_name}`);
 
     const displayRecipient = toUsername
@@ -3623,34 +1884,11 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
 // the function signatures and constants.
 // ══════════════════════════════════════════════════════
 
-// Module-level caches. quoteCache lets /dex/swap re-use a fresh quote within
-// 60s instead of forcing the agent to round-trip. tokenInfoCache spares us a
-// network hop for repeated symbol/decimals lookups.
-const quoteCache = new Map();        // key = `${agentId}|${tokenIn}|${tokenOut}|${amountIn}` → { quote, ts }
+// Cache token metadata for repeated symbol and decimal lookups.
+        // key = `${agentId}|${tokenIn}|${tokenOut}|${amountIn}` → { quote, ts }
 const tokenInfoCache = new Map();    // key = address → { info, ts }
-const QUOTE_TTL_MS = 60_000;
-const TOKEN_INFO_TTL_MS = 60 * 60 * 1000;
 
-// Look up the USDC-equivalent value of `amountIn` of `tokenIn` so we can enforce
-// per-tx and per-day caps in stable units. tokenIn === NATIVE_TOKEN is treated
-// as 1:1 USDC (it IS USDC on Arc).
-async function priceInUsdc(tokenIn, amountIn) {
-  if (tokenIn === NATIVE_TOKEN || tokenIn.toLowerCase() === NATIVE_TOKEN) {
-    // amountIn is in 18-decimal native USDC units; return USDC integer.
-    return Number(BigInt(amountIn) / 10n ** 18n);
-  }
-  try {
-    const q = await achswapCall('quote_adapter', {
-      token_in: tokenIn,
-      token_out: NATIVE_TOKEN,
-      amount_in: String(amountIn),
-    });
-    if (!q.expected_out) return null;
-    return Number(BigInt(q.expected_out) / 10n ** 18n);
-  } catch {
-    return null;
-  }
-}
+const TOKEN_INFO_TTL_MS = 60 * 60 * 1000;
 
 // POST /api/agents/:id/dex/quote — read-only proxy.
 app.post('/api/agents/:id/dex/quote', requireAuth, async (req, res) => {
@@ -3674,9 +1912,6 @@ app.post('/api/agents/:id/dex/quote', requireAuth, async (req, res) => {
     if (!quote.route_data || !quote.expected_out) {
       return res.status(502).json({ error: 'Achswap returned an empty route — likely no liquidity for this pair' });
     }
-    // Cache for use by /dex/swap.
-    const cacheKey = `${req.auth.agentId}|${inAddr}|${outAddr}|${amountIn}`;
-    quoteCache.set(cacheKey, { quote, ts: Date.now() });
 
     res.json({
       success: true,
@@ -3690,170 +1925,6 @@ app.post('/api/agents/:id/dex/quote', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('Dex quote error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /api/agents/:id/dex/swap — signs and broadcasts.
-app.post('/api/agents/:id/dex/swap', requireAuth, async (req, res) => {
-  try {
-    if (req.auth.agentId !== req.params.id) {
-      return res.status(403).json({ error: 'Can only swap from your own agent wallet' });
-    }
-    const agent = await stmts.getAgentById(req.params.id);
-    if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-    const walletAddress = agent.turnkey_address;
-    if (!walletAddress) {
-      return res.status(400).json({ error: 'Agent has no Turnkey wallet. Use bard_create_wallet first.' });
-    }
-
-    const { tokenIn, tokenOut, amountIn, slippageBps } = req.body || {};
-    if (!tokenIn || !tokenOut || !amountIn) {
-      return res.status(400).json({ error: 'Required: tokenIn, tokenOut, amountIn' });
-    }
-    const slippage = Number.isFinite(slippageBps) ? Number(slippageBps) : 100;
-    if (slippage < 0 || slippage > 500) {
-      return res.status(400).json({ error: 'slippageBps must be 0–500 (max 5%)' });
-    }
-    const inAddr = resolveToken(tokenIn);
-    const outAddr = resolveToken(tokenOut);
-    if (inAddr === outAddr) return res.status(400).json({ error: 'tokenIn and tokenOut must differ' });
-
-    // Per-tx cap: 50 USDC equivalent.
-    const usdcValue = await priceInUsdc(inAddr, amountIn);
-    if (usdcValue === null) {
-      return res.status(400).json({ error: 'Could not price tokenIn in USDC — pair has no liquidity' });
-    }
-    if (usdcValue > 50) {
-      return res.status(400).json({ error: `Per-tx cap: 50 USDC equivalent (got ~${usdcValue} USDC)` });
-    }
-
-    // Rate limit: 10/hr per agent.
-    if (!(await checkRateLimit(req.params.id, 'dex_swap'))) {
-      return res.status(429).json({ error: 'Swap rate limit: 10 per hour per agent' });
-    }
-    // Daily budget: 500 USDC equivalent rolling 24h.
-    if (!(await checkRateLimitN(req.params.id, 'dex_swap_daily_usdc', Math.max(1, usdcValue)))) {
-      return res.status(429).json({ error: 'Daily swap budget exhausted: 500 USDC equivalent per 24h per agent' });
-    }
-
-    // Fetch or reuse cached quote.
-    const cacheKey = `${req.auth.agentId}|${inAddr}|${outAddr}|${amountIn}`;
-    const cached = quoteCache.get(cacheKey);
-    let quote;
-    if (cached && Date.now() - cached.ts < QUOTE_TTL_MS) {
-      quote = cached.quote;
-    } else {
-      quote = await achswapCall('quote_adapter', {
-        token_in: inAddr,
-        token_out: outAddr,
-        amount_in: String(amountIn),
-      });
-      quoteCache.set(cacheKey, { quote, ts: Date.now() });
-    }
-    if (!quote.route_data || !quote.expected_out) {
-      return res.status(502).json({ error: 'Achswap returned an empty route — no liquidity' });
-    }
-    const expectedOut = BigInt(quote.expected_out);
-    const minOut = (expectedOut * BigInt(10000 - slippage)) / 10000n;
-    const routeData = quote.route_data;
-
-    // Sign+send via the wallet provider (self-hosted/hybrid = no Turnkey), the same
-    // abstraction as /send-usdc and escrow. sendAs estimates and provisions gas for
-    // each leg, waits for its receipt, and throws on revert.
-    if (!walletSigningReady()) {
-      return res.status(400).json({ error: 'No wallet provider configured. Cannot sign transactions.' });
-    }
-    const { encodeFunctionData, decodeEventLog } = await import('viem');
-
-    // ERC-20 input → ensure adapter allowance.
-    let approveTxHash = null;
-    if (inAddr !== NATIVE_TOKEN) {
-      const allowance = await arcTestnetClient.readContract({
-        address: inAddr,
-        abi: ERC20_ABI,
-        functionName: 'allowance',
-        args: [walletAddress, ACHSWAP_ADAPTER],
-      });
-      if (BigInt(allowance) < BigInt(amountIn)) {
-        const approveData = encodeFunctionData({
-          abi: ERC20_ABI,
-          functionName: 'approve',
-          args: [ACHSWAP_ADAPTER, MAX_UINT256],
-        });
-        // sendAs waits for the approve receipt before returning, preserving the
-        // approve-before-swap ordering.
-        ({ txHash: approveTxHash } = await onchainEscrow.sendAs(walletAddress, { to: inAddr, data: approveData }, `swap-approve:${agent.agent_name}`));
-        console.log(`[Swap] ${agent.agent_name}: approved adapter to spend ${inAddr} | tx ${approveTxHash}`);
-      }
-    }
-
-    // Build + send the swap (native-token input carries value).
-    const swapData = encodeFunctionData({
-      abi: ADAPTER_ABI,
-      functionName: 'swap',
-      args: [inAddr, outAddr, BigInt(amountIn), minOut, walletAddress, routeData],
-    });
-    const { txHash: swapTxHash, receipt } = await onchainEscrow.sendAs(
-      walletAddress,
-      { to: ACHSWAP_ADAPTER, data: swapData, value: inAddr === NATIVE_TOKEN ? BigInt(amountIn) : 0n },
-      `swap:${agent.agent_name}`,
-    );
-
-    // Parse actualOut from a Transfer event whose `to` is the agent's wallet.
-    let actualOut = null;
-    for (const log of receipt.logs || []) {
-      // Native-out swaps emit no ERC-20 Transfer; skip.
-      if (outAddr === NATIVE_TOKEN) break;
-      if (log.address.toLowerCase() !== outAddr.toLowerCase()) continue;
-      try {
-        const decoded = decodeEventLog({ abi: ERC20_ABI, data: log.data, topics: log.topics });
-        if (decoded.eventName === 'Transfer' &&
-            decoded.args.to.toLowerCase() === walletAddress.toLowerCase()) {
-          actualOut = String(decoded.args.value);
-        }
-      } catch { /* not a Transfer log */ }
-    }
-
-    console.log(`[Swap] ${agent.agent_name}: ${amountIn} ${inAddr.slice(0,6)} → ${actualOut || '?'} ${outAddr.slice(0,6)} | tx ${swapTxHash}`);
-
-    await pool.query('UPDATE agents SET last_active_at = $1 WHERE id = $2', [Math.floor(Date.now() / 1000), agent.id]);
-    emitFeedEvent('agent:dex-swap', {
-      agentId: agent.id,
-      agentName: agent.agent_name,
-      tokenIn: inAddr,
-      tokenOut: outAddr,
-      amountIn: String(amountIn),
-      actualOut,
-      route: quote.route,
-      txHash: swapTxHash,
-    });
-    await createNotification({
-      agentId: agent.id,
-      type: 'swap',
-      title: 'DEX Swap',
-      message: `${agent.agent_name} swapped ${amountIn} ${tokenIn} → ${actualOut || '?'} ${tokenOut}.`,
-      from: walletAddress,
-      amount: String(amountIn),
-    });
-
-    res.json({
-      success: true,
-      from: walletAddress,
-      tokenIn: inAddr,
-      tokenOut: outAddr,
-      amountIn: String(amountIn),
-      minOut: String(minOut),
-      actualOut,
-      slippageBps: slippage,
-      route: quote.route,
-      approveTxHash,
-      swapTxHash,
-      explorer: `https://testnet.arcscan.app/tx/${swapTxHash}`,
-    });
-  } catch (err) {
-    console.error('Dex swap error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -4367,131 +2438,9 @@ app.get('/api/contributions/:id', async (req, res) => {
   });
 });
 
-async function recordHumanContributionEndorsement({ contributionId, wallet, comment }) {
-  const contribution = await stmts.getContributionById(contributionId);
-  if (!contribution) {
-    throw Object.assign(new Error('Contribution not found'), { status: 404 });
-  }
-  if (contribution.status !== 'pending') {
-    throw Object.assign(
-      new Error(`Cannot endorse a ${contribution.status} contribution`),
-      { status: 409 }
-    );
-  }
+app.post('/api/contributions/:id/endorse', requireHuman);
 
-  const endorserWallet = wallet.toLowerCase();
-  const id = `endorse-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  try {
-    await stmts.insertEndorsement({
-      id,
-      contribution_id: contributionId,
-      endorser_wallet: endorserWallet,
-      endorser_type: 'human',
-      comment: String(comment || '').slice(0, 500),
-      signature: '',
-      created_at: new Date().toISOString(),
-    });
-    await stmts.incrementEndorsementCount(contributionId);
-
-    // Auto-verify: requires 5 human endorsements AND at least 1 agent approval
-    const humanCount = Number((await pool.query(
-      `SELECT COUNT(*) AS count
-         FROM endorsements
-        WHERE contribution_id = $1 AND endorser_type = 'human'`,
-      [contributionId]
-    )).rows[0].count);
-    const agentApprovals = (await pool.query(
-      "SELECT COUNT(*) as c FROM agent_verifications WHERE contribution_id = $1 AND result = 'approved'",
-      [contributionId]
-    )).rows[0];
-    const nowVerified = humanCount >= 5 && Number(agentApprovals.c) >= 1;
-    if (nowVerified) {
-      const transitioned = await pool.query(
-        "UPDATE contributions SET status = 'verified' WHERE id = $1 AND status = 'pending' RETURNING id",
-        [contributionId]
-      );
-      if (transitioned.rows[0]) {
-        // Auto-record on-chain mirror
-        const contentHash = '0x' + createHash('sha256').update(contributionId + contribution.proof_hash).digest('hex');
-        const recordId = `record-${Date.now()}`;
-        await stmts.insertRecord({
-          id: recordId,
-          contribution_id: contributionId,
-          agent_id: contribution.agent_id,
-          content_hash: contentHash,
-          tx_hash: '',
-          recorded_at: new Date().toISOString(),
-        });
-        emitFeedEvent('contribution:verified', { contributionId, contentHash });
-      }
-    }
-
-    // Recalculate agent reputation
-    const reputation = await calculateReputation(contribution.agent_id);
-    const saved = await stmts.getContributionById(contributionId);
-
-    // Notify agent owner
-    const agent = await stmts.getAgentById(contribution.agent_id);
-    if (agent) {
-      await stmts.insertNotification({
-        id: `notif-${Date.now()}`, wallet: agent.owner_wallet,
-        type: 'vouch', title: 'Contribution Endorsed',
-        message: `${endorserWallet.slice(0, 8)}... endorsed "${contribution.description || contribution.type}"`,
-        sender: endorserWallet, amount: '',
-        created_at: new Date().toISOString(),
-      });
-    }
-    emitFeedEvent('endorsement:new', { contributionId, endorserWallet, endorsementCount: humanCount });
-    // Notify the contribution owner they got endorsed
-    if (contribution.agent_id) {
-      await createNotification({ agentId: contribution.agent_id, type: 'vouch', title: 'Endorsement Received', message: `Your contribution was endorsed by ${endorserWallet.slice(0,6)}...${endorserWallet.slice(-4)}. (${humanCount} total)`, from: endorserWallet });
-    }
-    return {
-      success: true,
-      endorsementCount: humanCount,
-      agentApprovals: Number(agentApprovals.c),
-      status: saved?.status || contribution.status,
-      reputation,
-    };
-  } catch (err) {
-    if (err.message?.includes('UNIQUE') || err.code === '23505') {
-      throw Object.assign(new Error('Already endorsed this contribution'), { status: 409 });
-    }
-    throw err;
-  }
-}
-
-// Human endorsements are bound to the authenticated BARD account's managed
-// wallet. Body-supplied wallet addresses are intentionally ignored.
-app.post('/api/contributions/:id/endorse', requireHuman, async (req, res) => {
-  try {
-    res.json(await recordHumanContributionEndorsement({
-      contributionId: req.params.id,
-      wallet: req.human.wallet_address,
-      comment: req.body?.comment,
-    }));
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
-
-// Legacy human endorsement alias. Agent verification exclusively uses the
-// authenticated /agent-verify endpoint and its 2-of-N consensus rules.
-app.post('/api/contributions/:id/verify', requireHuman, async (req, res) => {
-  try {
-    const result = await recordHumanContributionEndorsement({
-      contributionId: req.params.id,
-      wallet: req.human.wallet_address,
-      comment: req.body?.comment,
-    });
-    res.json({
-      ...result,
-      endorsements: result.endorsementCount,
-    });
-  } catch (err) {
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
+app.post('/api/contributions/:id/verify', requireHuman);
 
 // Get agent reputation
 app.get('/api/agents/:id/reputation', async (req, res) => {
@@ -4631,8 +2580,7 @@ app.get('/api/records/:contributionId', async (req, res) => {
 // ══════════════════════════════════════════════════════
 
 // POST /api/bounties — authenticated agent creates a bounty from its managed wallet.
-// First-come funding is money-first: the listing is not published until the USDC
-// transfer confirms. Proposal bounties remain unfunded until a proposal is selected.
+// Bounties remain unfunded until an agent proposal is selected.
 app.post('/api/bounties', requireAuth, async (req, res) => {
   let bounty = null;
   try {
@@ -4647,73 +2595,17 @@ app.post('/api/bounties', requireAuth, async (req, res) => {
 
     const input = normalizeBountyInput(req.body);
     const creatorWallet = creator.turnkey_address;
-    bounty = await insertManagedBounty(
-      creatorWallet,
-      input,
-      input.selectionMode === 'proposal' ? 'proposal_open' : 'funding',
-      input.selectionMode === 'proposal' ? 'none' : 'funding'
-    );
-
-    if (input.selectionMode === 'proposal') {
-      emitFeedEvent('bounty:created', bounty);
-      await createNotification({
-        agentId: creator.id,
-        type: 'system',
-        title: 'Bounty Created',
-        message: `Your bounty "${input.title}" is now accepting proposals.`,
-        from: 'BARD System',
-      });
-      return res.json({ success: true, funded: false, bounty });
-    }
-
-    const transfer = await fundManagedEscrow(
-      creatorWallet,
-      SELLER_ADDRESS,
-      input.amountUsdc
-    );
-    let fundedBounty;
-    try {
-      fundedBounty = await finalizeCustodialBountyFunding({
-        bounty,
-        creatorWallet,
-        amountUsdc: input.amountUsdc,
-        txHash: transfer.txHash,
-        actorType: 'agent',
-      });
-    } catch (error) {
-      if (!error.txHash) error.txHash = transfer.txHash;
-      throw error;
-    }
-
-    emitFeedEvent('bounty:created', fundedBounty);
-    emitFeedEvent('escrow:funded', {
-      bountyId: fundedBounty.id,
-      budgetUsdc: input.amountUsdc,
-      mode: 'custodial',
-    });
+    bounty = await insertManagedBounty(creatorWallet, input, 'proposal_open', 'none');
+    emitFeedEvent('bounty:created', bounty);
     await createNotification({
       agentId: creator.id,
       type: 'system',
-      title: 'Bounty Funded',
-      message: `Your bounty "${input.title}" is live with ${input.amountUsdc} USDC in escrow.`,
+      title: 'Bounty Created',
+      message: `Your bounty "${input.title}" is now accepting proposals.`,
       from: 'BARD System',
-      amount: String(input.amountUsdc),
     });
-    return res.json({
-      success: true,
-      funded: true,
-      txHash: transfer.txHash,
-      explorer: `https://testnet.arcscan.app/tx/${transfer.txHash}`,
-      bounty: fundedBounty,
-    });
+    return res.json({ success: true, funded: false, bounty });
   } catch (error) {
-    if (bounty && bounty.status === 'funding' && !error.txHash) {
-      await pool.query(
-        `DELETE FROM bounties
-          WHERE id = $1 AND status = 'funding' AND escrow_status IN ('none', 'funding')`,
-        [bounty.id]
-      ).catch(() => {});
-    }
     return res.status(error.status || 502).json({
       error: error.message,
       bountyId: bounty?.id || null,
@@ -4757,45 +2649,6 @@ app.get('/api/bounties/:id', async (req, res) => {
     ...publicBounty
   } = bounty;
   res.json({ bounty: publicBounty });
-});
-
-async function getHumanManagedBounties(humanWallet, bountyId = null) {
-  return (await pool.query(
-    `SELECT b.*,
-            creator_agent.id AS creator_agent_id,
-            creator_agent.agent_name AS creator_agent_name,
-            provider_agent.agent_name AS provider_agent_name
-       FROM bounties b
-       LEFT JOIN LATERAL (
-         SELECT a.id, a.agent_name
-           FROM agents a
-          WHERE LOWER(a.turnkey_address) = LOWER(b.creator_wallet)
-            AND LOWER(a.owner_wallet) = LOWER($1)
-          ORDER BY a.created_at ASC, a.id ASC
-          LIMIT 1
-       ) creator_agent ON TRUE
-       LEFT JOIN agents provider_agent
-         ON provider_agent.id = COALESCE(b.provider_agent_id, b.assigned_agent_id)
-      WHERE ($2::text IS NULL OR b.id = $2)
-        AND (
-          LOWER(b.creator_wallet) = LOWER($1)
-          OR creator_agent.id IS NOT NULL
-        )
-      ORDER BY b.created_at DESC`,
-    [humanWallet, bountyId]
-  )).rows;
-}
-
-async function getHumanManagedBounty(humanWallet, bountyId) {
-  return (await getHumanManagedBounties(humanWallet, bountyId))[0] || null;
-}
-
-// Authenticated creators receive the complete submission package for review,
-// including bounties created by agents linked to their account.
-app.get('/api/human/bounties/:id', requireHuman, async (req, res) => {
-  const bounty = await getHumanManagedBounty(req.human.wallet_address, req.params.id);
-  if (!bounty) return res.status(404).json({ error: 'Managed bounty not found' });
-  res.json({ bounty });
 });
 
 // Legacy metadata-only assignment is disabled. Agents must authenticate and claim
@@ -5123,12 +2976,12 @@ function normalizeDeliverablePackage(body, bounty) {
     invalidLinks,
   };
   const verificationReport = {
-    status: checks.allCriteriaCovered && invalidLinks === 0 ? 'ready_for_human_review' : 'needs_attention',
+    status: checks.allCriteriaCovered && invalidLinks === 0 ? 'ready_for_agent_review' : 'needs_attention',
     generatedAt: new Date().toISOString(),
     checks,
     criteria: criterionChecks,
     links: linkChecks,
-    note: 'BARD validates package completeness and link format. The human reviewer must still inspect the actual work.',
+    note: 'BARD validates package completeness and link format. The reviewing agent evaluates the work against its acceptance criteria.',
   };
   const canonicalPackage = JSON.stringify({ content, summary, instructions, evidence, artifacts });
 
@@ -5147,12 +3000,13 @@ function normalizeBountyInput(body = {}) {
   const title = String(body.title || '').trim();
   const description = String(body.description || '').trim();
   const bountyType = String(body.bountyType || '');
-  const selectionMode = body.selectionMode === 'proposal' ? 'proposal' : 'first_come';
+  if (body.selectionMode && body.selectionMode !== 'proposal') throw Object.assign(new Error('New Arc jobs require negotiated proposals.'), { status: 400 });
+  const selectionMode = 'proposal';
   const amountUsdc = Number(body.amountUsdc);
   const deadlineMs = Date.parse(body.deadline);
   const proposalDeadlineMs = body.proposalDeadline ? Date.parse(body.proposalDeadline) : null;
   const minReputation = Math.max(0, Math.min(100, Number.parseInt(body.minReputation, 10) || 0));
-  const allowTrustBootstrap = body.allowTrustBootstrap === true;
+  const allowTrustBootstrap = false;
   const rawBootstrapRequirements = body.bootstrapRequirements && typeof body.bootstrapRequirements === 'object'
     ? body.bootstrapRequirements
     : {};
@@ -5234,114 +3088,6 @@ async function insertManagedBounty(wallet, input, status, escrowStatus = 'none')
   return stmts.getBountyById(id);
 }
 
-async function finalizeCustodialBountyFunding({
-  bounty,
-  creatorWallet,
-  amountUsdc,
-  txHash,
-  selectedAgent = null,
-  actorType = 'human',
-}) {
-  const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const fresh = (await client.query(
-      'SELECT * FROM bounties WHERE id = $1 FOR UPDATE',
-      [bounty.id]
-    )).rows[0];
-    if (!fresh || fresh.escrow_status !== 'funding') {
-      throw Object.assign(
-        new Error(`Bounty funding reservation was lost (state: ${fresh?.escrow_status || 'missing'})`),
-        { status: 409 }
-      );
-    }
-    await recordBountyFundingTransaction(client, {
-      txHash,
-      bountyId: bounty.id,
-      funderWallet: creatorWallet,
-      amountUsdc,
-    });
-
-    if (fresh.selection_mode === 'proposal') {
-      if (
-        fresh.status !== 'proposal_selected' ||
-        !fresh.selected_proposal_id ||
-        !selectedAgent
-      ) {
-        throw Object.assign(new Error('Selected proposal is no longer fundable'), { status: 409 });
-      }
-      if (!selectedAgent.turnkey_address) {
-        throw Object.assign(new Error('Selected agent has no managed payment wallet'), { status: 409 });
-      }
-      const providerWallet = selectedAgent.turnkey_address;
-      await client.query(
-        `UPDATE bounties
-            SET escrow_mode = 'custodial',
-                escrow_status = 'claimed',
-                status = 'assigned',
-                escrow_budget_usdc = $1,
-                escrow_tx_hash = $2,
-                provider_agent_id = $3,
-                provider_wallet = $4,
-                expires_at = $5,
-                claimed_at = $6,
-                updated_at = $6
-          WHERE id = $7`,
-        [amountUsdc, txHash, selectedAgent.id, providerWallet, expiresAt, now, bounty.id]
-      );
-      await client.query(
-        `INSERT INTO escrow_events
-           (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
-         VALUES ($1, $2, 'claimed', $3, 'agent', $4, '', $5)`,
-        [
-          `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-c`,
-          bounty.id,
-          selectedAgent.turnkey_address,
-          `Auto-claimed by ${selectedAgent.agent_name} after proposal funding`,
-          now,
-        ]
-      );
-    } else {
-      await client.query(
-        `UPDATE bounties
-            SET status = 'open',
-                escrow_mode = 'custodial',
-                escrow_status = 'funded',
-                escrow_budget_usdc = $1,
-                escrow_tx_hash = $2,
-                expires_at = $3,
-                updated_at = $4
-          WHERE id = $5`,
-        [amountUsdc, txHash, expiresAt, now, bounty.id]
-      );
-    }
-
-    await client.query(
-      `INSERT INTO escrow_events
-         (id, bounty_id, event_type, actor_wallet, actor_type, details, tx_hash, created_at)
-       VALUES ($1, $2, 'funded', $3, $4, $5, $6, $7)`,
-      [
-        `esc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        bounty.id,
-        creatorWallet,
-        actorType,
-        `${amountUsdc} USDC transferred to BARD escrow`,
-        txHash,
-        now,
-      ]
-    );
-    await client.query('COMMIT');
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-  return stmts.getBountyById(bounty.id);
-}
-
 async function getSelectedProposalAgent(bounty) {
   if (bounty.selection_mode !== 'proposal') return null;
   const proposal = await stmts.getProposalById(bounty.selected_proposal_id);
@@ -5384,99 +3130,9 @@ async function reserveBountyFunding(bountyId) {
   return reserved.rows[0];
 }
 
-async function transferAndFundCustodialBounty(bounty, creatorWallet, actorType = 'human') {
-  if (bounty.creator_wallet.toLowerCase() !== creatorWallet.toLowerCase()) {
-    throw Object.assign(new Error('Only the bounty creator can fund it'), { status: 403 });
-  }
-  if (bounty.escrow_status !== 'none') {
-    throw Object.assign(
-      new Error(`Bounty is already in escrow state: ${bounty.escrow_status}`),
-      { status: 409 }
-    );
-  }
-  if (bounty.selection_mode === 'proposal' && (
-    bounty.status !== 'proposal_selected' ||
-    !bounty.selected_proposal_id
-  )) {
-    throw Object.assign(new Error('Select a proposal before funding this bounty'), { status: 409 });
-  }
-  if (bounty.selection_mode !== 'proposal' && bounty.status !== 'open') {
-    throw Object.assign(new Error(`Bounty cannot be funded in status: ${bounty.status}`), { status: 409 });
-  }
-
-  const selectedAgent = await getSelectedProposalAgent(bounty);
-  await reserveBountyFunding(bounty.id);
-
-  const amountUsdc = Number(bounty.amount_usdc);
-  let transfer = null;
-  try {
-    transfer = await fundManagedEscrow(creatorWallet, SELLER_ADDRESS, amountUsdc);
-    const fundedBounty = await finalizeCustodialBountyFunding({
-      bounty,
-      creatorWallet,
-      amountUsdc,
-      txHash: transfer.txHash,
-      selectedAgent,
-      actorType,
-    });
-    return { bounty: fundedBounty, txHash: transfer.txHash, selectedAgent };
-  } catch (error) {
-    if (transfer?.txHash && !error.txHash) error.txHash = transfer.txHash;
-    if (!error.txHash) {
-      await pool.query(
-        `UPDATE bounties
-            SET escrow_status = 'none', updated_at = $1
-          WHERE id = $2 AND escrow_status = 'funding'`,
-        [new Date().toISOString(), bounty.id]
-      ).catch(() => {});
-    }
-    throw error;
-  }
-}
-
-async function prepareExternalBountyFunding(bounty, creatorWallet) {
-  if (bounty.creator_wallet.toLowerCase() !== creatorWallet.toLowerCase()) {
-    throw Object.assign(new Error('Only the bounty creator can fund it'), { status: 403 });
-  }
-  if (bounty.escrow_status !== 'none') {
-    throw Object.assign(
-      new Error(`Bounty is already in escrow state: ${bounty.escrow_status}`),
-      { status: 409 }
-    );
-  }
-  if (bounty.selection_mode === 'proposal' && (
-    bounty.status !== 'proposal_selected' ||
-    !bounty.selected_proposal_id
-  )) {
-    throw Object.assign(new Error('Select a proposal before funding this bounty'), { status: 409 });
-  }
-  if (bounty.selection_mode !== 'proposal' && bounty.status !== 'open') {
-    throw Object.assign(new Error(`Bounty cannot be funded in status: ${bounty.status}`), { status: 409 });
-  }
-
-  await getSelectedProposalAgent(bounty);
-  await reserveBountyFunding(bounty.id);
-  try {
-    return await prepareHumanUsdcTransfer(
-      creatorWallet,
-      SELLER_ADDRESS,
-      Number(bounty.amount_usdc),
-      { maxAmount: 10_000 }
-    );
-  } catch (error) {
-    await pool.query(
-      `UPDATE bounties
-          SET escrow_status = 'none', updated_at = $1
-        WHERE id = $2 AND escrow_status = 'funding'`,
-      [new Date().toISOString(), bounty.id]
-    ).catch(() => {});
-    throw error;
-  }
-}
-
 function agentControlsBounty(agent, bounty) {
   const creator = (bounty.creator_wallet || '').toLowerCase();
-  return [agent?.turnkey_address, agent?.owner_wallet]
+  return [agent?.turnkey_address]
     .filter(Boolean)
     .some((wallet) => wallet.toLowerCase() === creator);
 }
@@ -5849,510 +3505,6 @@ async function refundUnclaimedCustodialBounty({
   }
 }
 
-// Managed humans create and operate bounties through their BARD wallet. First-come
-// bounties transfer funds before becoming visible; proposal bounties fund only after
-// the creator selects a proposal and therefore knows the final price.
-app.get('/api/human/bounties', requireHuman, async (req, res) => {
-  const bounties = await getHumanManagedBounties(req.human.wallet_address);
-  res.json({ bounties });
-});
-
-app.post('/api/human/bounties', requireHuman, async (req, res) => {
-  let bounty = null;
-  let externalRecoveryTxHash = '';
-  try {
-    const input = normalizeBountyInput(req.body);
-    const creatorWallet = req.human.wallet_address;
-    if (
-      humanUsesExternalWallet(req) &&
-      input.selectionMode !== 'proposal'
-    ) {
-      const transaction = buildHumanUsdcTransfer(
-        SELLER_ADDRESS,
-        input.amountUsdc,
-        { maxAmount: 10_000 }
-      );
-      const suppliedTxHash = String(req.body?.txHash || '');
-      if (suppliedTxHash) {
-        if (!/^0x[0-9a-fA-F]{64}$/.test(suppliedTxHash)) {
-          return res.status(400).json({ error: 'Valid funding txHash required' });
-        }
-        externalRecoveryTxHash = suppliedTxHash;
-        const existingFunding = (await pool.query(
-          `SELECT b.*
-             FROM bounty_funding_transactions f
-             JOIN bounties b ON b.id = f.bounty_id
-            WHERE LOWER(f.tx_hash) = LOWER($1)
-            LIMIT 1`,
-          [suppliedTxHash]
-        )).rows[0];
-        if (existingFunding) {
-          return res.json({
-            success: true,
-            funded: true,
-            txHash: suppliedTxHash.toLowerCase(),
-            explorer: `https://testnet.arcscan.app/tx/${suppliedTxHash}`,
-            bounty: existingFunding,
-          });
-        }
-      } else {
-        await prepareHumanUsdcTransfer(
-          creatorWallet,
-          SELLER_ADDRESS,
-          input.amountUsdc,
-          { maxAmount: 10_000 }
-        );
-        bounty = await insertManagedBounty(creatorWallet, input, 'funding', 'funding');
-        return res.status(202).json({
-          signatureRequired: true,
-          walletType: 'external',
-          bountyId: bounty.id,
-          transaction: externalTransactionPayload(transaction),
-        });
-      }
-
-      bounty = await insertManagedBounty(creatorWallet, input, 'funding', 'funding');
-      return res.status(409).json({
-        error: 'Funding transaction requires reconciliation against the reserved bounty',
-        recoverable: true,
-        bountyId: bounty.id,
-        txHash: suppliedTxHash.toLowerCase(),
-      });
-    }
-
-    bounty = await insertManagedBounty(
-      creatorWallet,
-      input,
-      input.selectionMode === 'proposal' ? 'proposal_open' : 'funding',
-      input.selectionMode === 'proposal' ? 'none' : 'funding'
-    );
-
-    if (input.selectionMode === 'proposal') {
-      emitFeedEvent('bounty:created', bounty);
-      await createNotification({
-        wallet: creatorWallet,
-        type: 'system',
-        title: 'Bounty Created',
-        message: `Your bounty "${input.title}" is now accepting proposals.`,
-        from: 'BARD System',
-      });
-      return res.json({ success: true, funded: false, bounty });
-    }
-
-    const transfer = await fundManagedEscrow(creatorWallet, SELLER_ADDRESS, input.amountUsdc);
-    let fundedBounty;
-    try {
-      fundedBounty = await finalizeCustodialBountyFunding({
-        bounty,
-        creatorWallet,
-        amountUsdc: input.amountUsdc,
-        txHash: transfer.txHash,
-      });
-    } catch (error) {
-      if (!error.txHash) error.txHash = transfer.txHash;
-      throw error;
-    }
-
-    emitFeedEvent('bounty:created', fundedBounty);
-    emitFeedEvent('escrow:funded', {
-      bountyId: fundedBounty.id,
-      budgetUsdc: input.amountUsdc,
-      mode: 'custodial',
-    });
-    await createNotification({
-      wallet: creatorWallet,
-      type: 'system',
-      title: 'Bounty Funded',
-      message: `Your bounty "${input.title}" is live with ${input.amountUsdc} USDC in escrow.`,
-      from: 'BARD System',
-      amount: String(input.amountUsdc),
-    });
-    return res.json({
-      success: true,
-      funded: true,
-      txHash: transfer.txHash,
-      explorer: `https://testnet.arcscan.app/tx/${transfer.txHash}`,
-      bounty: fundedBounty,
-    });
-  } catch (error) {
-    if (externalRecoveryTxHash && !error.txHash) {
-      error.txHash = externalRecoveryTxHash;
-    }
-    if (bounty && bounty.status === 'funding' && !error.txHash) {
-      await pool.query(
-        `DELETE FROM bounties
-          WHERE id = $1 AND status = 'funding' AND escrow_status IN ('none', 'funding')`,
-        [bounty.id]
-      ).catch(() => {});
-    }
-    return res.status(error.status || 502).json({
-      error: error.message,
-      bountyId: bounty?.id || null,
-      txHash: error.txHash || null,
-      recoverable: Boolean(error.txHash),
-    });
-  }
-});
-
-app.post('/api/human/bounties/:id/fund', requireHuman, async (req, res) => {
-  try {
-    const bounty = await stmts.getBountyById(req.params.id);
-    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-    if (humanUsesExternalWallet(req)) {
-      const transaction = await prepareExternalBountyFunding(
-        bounty,
-        req.human.wallet_address
-      );
-      return res.status(202).json({
-        signatureRequired: true,
-        walletType: 'external',
-        bountyId: bounty.id,
-        transaction: externalTransactionPayload(transaction),
-      });
-    }
-    const result = await transferAndFundCustodialBounty(bounty, req.human.wallet_address);
-    emitFeedEvent('escrow:funded', {
-      bountyId: bounty.id,
-      budgetUsdc: bounty.amount_usdc,
-      mode: 'custodial',
-    });
-    if (result.selectedAgent) {
-      emitFeedEvent('escrow:claimed', {
-        bountyId: bounty.id,
-        agentId: result.selectedAgent.id,
-        agentName: result.selectedAgent.agent_name,
-      });
-      await createNotification({
-        agentId: result.selectedAgent.id,
-        type: 'system',
-        title: 'Bounty Funded - You Can Start',
-        message: `"${bounty.title}" is funded with ${bounty.amount_usdc} USDC. Begin work and submit your deliverable.`,
-        from: req.human.wallet_address,
-      });
-    }
-    return res.json({
-      success: true,
-      txHash: result.txHash,
-      explorer: `https://testnet.arcscan.app/tx/${result.txHash}`,
-      bounty: result.bounty,
-    });
-  } catch (error) {
-    return res.status(error.status || 502).json({
-      error: error.message,
-      txHash: error.txHash || null,
-      recoverable: Boolean(error.txHash),
-    });
-  }
-});
-
-app.post('/api/human/bounties/:id/fund/abort', requireHuman, async (req, res) => {
-  try {
-    const bounty = await stmts.getBountyById(req.params.id);
-    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-    if (bounty.creator_wallet.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
-      return res.status(403).json({ error: 'Only the bounty creator can abort funding' });
-    }
-    const recorded = (await pool.query(
-      'SELECT 1 FROM bounty_funding_transactions WHERE bounty_id = $1 LIMIT 1',
-      [bounty.id]
-    )).rows[0];
-    if (recorded) {
-      return res.status(409).json({ error: 'Funding is already confirmed and cannot be aborted' });
-    }
-    // The server cannot prove that the browser did not broadcast the prepared
-    // transaction before calling abort. Keep the hidden reservation so a late
-    // transaction hash can always be reconciled instead of orphaning funds.
-    res.json({
-      success: true,
-      retained: bounty.escrow_status === 'funding',
-      message: 'Funding reservation retained for safe retry or reconciliation',
-    });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message });
-  }
-});
-
-app.post('/api/human/bounties/:id/fund/reconcile', requireHuman, async (req, res) => {
-  try {
-    const txHash = String(req.body?.txHash || '');
-    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
-      return res.status(400).json({ error: 'Valid funding txHash required' });
-    }
-    const bounty = await stmts.getBountyById(req.params.id);
-    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-    const creatorWallet = req.human.wallet_address;
-    if (bounty.creator_wallet.toLowerCase() !== creatorWallet.toLowerCase()) {
-      return res.status(403).json({ error: 'Only the bounty creator can reconcile funding' });
-    }
-    if (bounty.escrow_status !== 'funding') {
-      return res.status(409).json({
-        error: `Bounty is not awaiting funding reconciliation (state: ${bounty.escrow_status})`,
-      });
-    }
-
-    const amountUsdc = Number(bounty.amount_usdc);
-    const expectedTransaction = buildHumanUsdcTransfer(
-      SELLER_ADDRESS,
-      amountUsdc,
-      { maxAmount: 10_000 }
-    );
-    const verification = await verifyExactExternalTransaction(
-      txHash,
-      creatorWallet,
-      expectedTransaction.to,
-      expectedTransaction.data
-    );
-    if (!verification.valid) {
-      return res.status(409).json({
-        error: 'Funding transaction is not confirmed yet',
-        details: verification.error,
-        txHash,
-      });
-    }
-
-    let selectedAgent = null;
-    if (bounty.selection_mode === 'proposal') {
-      const proposal = await stmts.getProposalById(bounty.selected_proposal_id);
-      if (!proposal || proposal.status !== 'accepted') {
-        return res.status(409).json({ error: 'Selected proposal is no longer valid' });
-      }
-      selectedAgent = await stmts.getAgentById(proposal.proposer_agent_id);
-      if (!selectedAgent) return res.status(404).json({ error: 'Selected proposer agent not found' });
-    }
-
-    const fundedBounty = await finalizeCustodialBountyFunding({
-      bounty,
-      creatorWallet,
-      amountUsdc,
-      txHash,
-      selectedAgent,
-    });
-    if (bounty.selection_mode !== 'proposal') {
-      emitFeedEvent('bounty:created', fundedBounty);
-      await createNotification({
-        wallet: creatorWallet,
-        type: 'system',
-        title: 'Bounty Funded',
-        message: `Your bounty "${bounty.title}" is live with ${amountUsdc} USDC in escrow.`,
-        from: 'BARD System',
-        amount: String(amountUsdc),
-      });
-    } else if (selectedAgent) {
-      emitFeedEvent('escrow:claimed', {
-        bountyId: bounty.id,
-        agentId: selectedAgent.id,
-        agentName: selectedAgent.agent_name,
-      });
-      await createNotification({
-        agentId: selectedAgent.id,
-        type: 'system',
-        title: 'Bounty Funded - You Can Start',
-        message: `"${bounty.title}" is funded with ${amountUsdc} USDC. Begin work and submit your deliverable.`,
-        from: creatorWallet,
-      });
-    }
-    emitFeedEvent('escrow:funded', {
-      bountyId: bounty.id,
-      budgetUsdc: amountUsdc,
-      mode: 'custodial',
-      reconciled: true,
-    });
-    return res.json({ success: true, reconciled: true, txHash, bounty: fundedBounty });
-  } catch (error) {
-    return res.status(error.status || 502).json({
-      error: error.message,
-      txHash: req.body?.txHash || null,
-    });
-  }
-});
-
-app.post('/api/human/bounties/:id/proposals/:proposalId/accept', requireHuman, async (req, res) => {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const bounty = (await client.query(
-      'SELECT * FROM bounties WHERE id = $1 FOR UPDATE',
-      [req.params.id]
-    )).rows[0];
-    if (!bounty) throw Object.assign(new Error('Bounty not found'), { status: 404 });
-    if (bounty.creator_wallet.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
-      throw Object.assign(new Error('Only the bounty creator can accept proposals'), { status: 403 });
-    }
-    if (bounty.selection_mode !== 'proposal' || bounty.status !== 'proposal_open') {
-      throw Object.assign(
-        new Error(`Bounty is not accepting proposal selections (status: ${bounty.status})`),
-        { status: 409 }
-      );
-    }
-
-    const proposal = (await client.query(
-      'SELECT * FROM bounty_proposals WHERE id = $1 FOR UPDATE',
-      [req.params.proposalId]
-    )).rows[0];
-    if (!proposal) throw Object.assign(new Error('Proposal not found'), { status: 404 });
-    if (proposal.bounty_id !== bounty.id) {
-      throw Object.assign(new Error('Proposal does not belong to this bounty'), { status: 400 });
-    }
-    if (proposal.status !== 'pending') {
-      throw Object.assign(
-        new Error(`Cannot accept proposal in status: ${proposal.status}`),
-        { status: 409 }
-      );
-    }
-
-    const agent = (await client.query(
-      'SELECT * FROM agents WHERE id = $1',
-      [proposal.proposer_agent_id]
-    )).rows[0];
-    if (!agent?.turnkey_address) {
-      throw Object.assign(new Error('Selected agent has no managed payment wallet'), { status: 409 });
-    }
-
-    const now = new Date().toISOString();
-    const acceptedPrice = Number(proposal.proposed_price_usdc);
-    await client.query(
-      `UPDATE bounty_proposals
-          SET status = 'accepted', accepted_at = $1, updated_at = $1
-        WHERE id = $2`,
-      [now, proposal.id]
-    );
-    const { rows: others } = await client.query(
-      `UPDATE bounty_proposals
-          SET status = 'rejected',
-              rejected_at = $1,
-              rejection_reason = 'Another proposal was selected',
-              updated_at = $1
-        WHERE bounty_id = $2 AND status = 'pending' AND id <> $3
-        RETURNING proposer_agent_id`,
-      [now, bounty.id, proposal.id]
-    );
-    await client.query(
-      `UPDATE bounties
-          SET selected_proposal_id = $1,
-              status = 'proposal_selected',
-              amount_usdc = $2,
-              updated_at = $3
-        WHERE id = $4`,
-      [proposal.id, String(acceptedPrice), now, bounty.id]
-    );
-    await client.query('COMMIT');
-
-    await logEscrowEvent(
-      bounty.id,
-      'proposal_accepted',
-      req.human.wallet_address,
-      'human',
-      `Proposal ${proposal.id} accepted at ${acceptedPrice} USDC`,
-      ''
-    );
-    await createNotification({
-      agentId: proposal.proposer_agent_id,
-      type: 'system',
-      title: 'Proposal Accepted',
-      message: `Your proposal for "${bounty.title}" was accepted. The creator is funding it now.`,
-      from: req.human.wallet_address,
-    });
-    for (const other of others) {
-      await createNotification({
-        agentId: other.proposer_agent_id,
-        type: 'system',
-        title: 'Proposal Not Selected',
-        message: `Your proposal for "${bounty.title}" was not selected.`,
-        from: req.human.wallet_address,
-      });
-    }
-    emitFeedEvent('proposal:accepted', { bountyId: bounty.id, proposalId: proposal.id });
-    return res.json({
-      success: true,
-      bounty: await stmts.getBountyById(bounty.id),
-      acceptedProposalId: proposal.id,
-      rejectedProposalCount: others.length,
-    });
-  } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
-    return res.status(error.status || 500).json({ error: error.message });
-  } finally {
-    client.release();
-  }
-});
-
-app.post('/api/human/bounties/:id/proposals/:proposalId/reject', requireHuman, async (req, res) => {
-  try {
-    const bounty = await stmts.getBountyById(req.params.id);
-    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-    if (bounty.creator_wallet.toLowerCase() !== req.human.wallet_address.toLowerCase()) {
-      return res.status(403).json({ error: 'Only the bounty creator can reject proposals' });
-    }
-    if (bounty.status !== 'proposal_open') {
-      return res.status(409).json({ error: `Cannot reject proposals in status: ${bounty.status}` });
-    }
-    const proposal = await stmts.getProposalById(req.params.proposalId);
-    if (!proposal) return res.status(404).json({ error: 'Proposal not found' });
-    if (proposal.bounty_id !== bounty.id) {
-      return res.status(400).json({ error: 'Proposal does not belong to this bounty' });
-    }
-    if (proposal.status !== 'pending') {
-      return res.status(409).json({ error: `Cannot reject proposal in status: ${proposal.status}` });
-    }
-
-    const reason = String(req.body?.reason || '').trim().slice(0, 1000);
-    await stmts.rejectProposal({
-      id: proposal.id,
-      rejected_at: new Date().toISOString(),
-      rejection_reason: reason,
-    });
-    await createNotification({
-      agentId: proposal.proposer_agent_id,
-      type: 'system',
-      title: 'Proposal Rejected',
-      message: reason
-        ? `Your proposal for "${bounty.title}" was rejected: ${reason}`
-        : `Your proposal for "${bounty.title}" was rejected.`,
-      from: req.human.wallet_address,
-    });
-    return res.json({ success: true });
-  } catch (error) {
-    return res.status(error.status || 500).json({ error: error.message });
-  }
-});
-
-app.post('/api/human/bounties/:id/cancel', requireHuman, async (req, res) => {
-  try {
-    const bounty = await stmts.getBountyById(req.params.id);
-    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-    const creatorWallet = req.human.wallet_address;
-    if (bounty.creator_wallet.toLowerCase() !== creatorWallet.toLowerCase()) {
-      return res.status(403).json({ error: 'Only the bounty creator can cancel it' });
-    }
-
-    if (
-      (bounty.status === 'open' && ['funded', 'refunding'].includes(bounty.escrow_status)) ||
-      (bounty.status === 'cancelled' && bounty.escrow_status === 'refunded')
-    ) {
-      const result = await refundUnclaimedCustodialBounty({
-        bounty,
-        creatorWallet,
-        actorType: 'human',
-        suppliedTxHash: req.body?.txHash,
-      });
-      return res.json({ success: true, ...result });
-    }
-
-    const result = await cancelUnfundedBounty({
-      bountyId: bounty.id,
-      creatorWallet,
-      actorType: 'human',
-    });
-    return res.json({ success: true, refunded: result.refunded });
-  } catch (error) {
-    return res.status(error.status || 502).json({
-      error: error.message,
-      txHash: error.txHash || null,
-      recoverable: Boolean(error.recoverable || error.txHash),
-    });
-  }
-});
-
 // ── On-chain escrow eligibility ──
 // A wallet can back an on-chain escrow leg only if the platform Turnkey org can
 // sign for it — i.e. it's the turnkey_address of some agent in our DB. Returns
@@ -6393,6 +3545,13 @@ async function fundSelectedProposalOnchain(
   eligibility,
   { resumeJobId = null, fundTxHash = null } = {}
 ) {
+  const bid = await stmts.getProposalById(bounty.selected_proposal_id);
+  if (!bid) throw new Error('An accepted ACL proposal is required.');
+  const terms = jobTerms(bounty, bid, eligibility.providerWallet);
+  await verifyAgreement(terms, bid.acl_offer, true);
+  if (terms.message.client.toLowerCase() !== eligibility.creatorWallet.toLowerCase() ||
+      parseUnits(String(bounty.amount_usdc), 6) !== BigInt(terms.message.amount) ||
+      BigInt(terms.message.expiresAt) <= BigInt(Math.floor(Date.now()/1000))) throw new Error('Funding differs from the signed job.');
   if (bounty.escrow_status === 'none') {
     await reserveBountyFunding(bounty.id);
   } else if (bounty.escrow_status !== 'funding') {
@@ -6403,26 +3562,26 @@ async function fundSelectedProposalOnchain(
   }
 
   const amountUsdc = Number(bounty.amount_usdc);
-  const platformFeeBps = Math.max(
-    0,
-    Math.min(10_000, Number.parseInt(process.env.PLATFORM_FEE_BPS || '0', 10) || 0)
-  );
-  const platformFeeUsdc = platformFeeBps > 0
-    ? Math.floor(amountUsdc * platformFeeBps / 10_000 * 1e6) / 1e6
-    : 0;
+  const platformFee = terms.task.extensions.platformFee;
+  const platformFeeUsdc = Number(formatUnits(BigInt(platformFee.amount), 6));
 
   let jobId;
   let txs;
   try {
+    await reserveSpend(pool, { wallet: eligibility.creatorWallet, recipient: commerceAddress, amount: terms.message.amount, operation: 'job:' + bounty.id });
+    if (BigInt(platformFee.amount) > 0n) await reserveSpend(pool, { wallet: eligibility.creatorWallet, recipient: feeAddress, amount: platformFee.amount, operation: 'fee:' + bounty.id });
     const fundingInput = {
       creatorWallet: eligibility.creatorWallet,
       providerWallet: eligibility.providerWallet,
       earningsUsdc: amountUsdc,
+      earningsUnits: terms.message.amount,
       platformFeeUsdc,
-      maxFeeBps: platformFeeBps,
+      platformFeeUnits: platformFee.amount,
+      maxFeeBps: platformFee.bps,
+      feeRecipient: platformFee.recipient,
       evaluator: SELLER_ADDRESS,
-      expirySeconds: 72 * 3600,
-      description: bounty.title || 'BARD bounty',
+      expiresAt: Number(terms.message.expiresAt),
+      description: terms.message.taskSpecHash,
     };
     ({ jobId, txs } = resumeJobId
       ? await onchainEscrow.resumeAndFund({
@@ -6473,7 +3632,7 @@ async function fundSelectedProposalOnchain(
   }
 
   const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Number(terms.message.expiresAt) * 1000).toISOString();
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -6829,121 +3988,32 @@ app.post('/api/bounties/:id/fund', requireAuth, async (req, res) => {
       }
 
       const selectedAgent = await getSelectedProposalAgent(bounty);
-      const creatorWallet = creator.turnkey_address;
-
-      let result;
-      if (bounty.escrow_status === 'funding' && suppliedOnchainJobId) {
-        const eligibility = selectedAgent
-          ? await onchainEscrowEligible(bounty, selectedAgent)
-          : { eligible: false };
-        if (!eligibility.eligible) {
-          return res.status(409).json({
-            error: `Partial on-chain funding cannot resume: ${eligibility.reason || 'wallet signing unavailable'}`,
-          });
-        }
-        result = await fundSelectedProposalOnchain(
-          bounty,
-          selectedAgent,
-          eligibility,
-          {
-            resumeJobId: suppliedOnchainJobId,
-            fundTxHash: suppliedTxHash || null,
-          }
-        );
-      } else if (bounty.escrow_status === 'funding') {
-        if (!suppliedTxHash) {
-          return res.status(409).json({
-            error: 'Funding is awaiting reconciliation. Retry with the original txHash or onchainJobId.',
-            recoverable: true,
-          });
-        }
-        const verification = await verifyTransaction(
-          suppliedTxHash,
-          creatorWallet,
-          SELLER_ADDRESS,
-          amountUsdc
-        );
-        if (!verification.valid) {
-          return res.status(409).json({
-            error: 'Funding transaction is not confirmed or does not match this bounty',
-            details: verification.error,
-            txHash: suppliedTxHash,
-          });
-        }
-        const fundedBounty = await finalizeCustodialBountyFunding({
-          bounty,
-          creatorWallet,
-          amountUsdc,
-          txHash: suppliedTxHash,
-          selectedAgent,
-          actorType: 'agent',
-        });
-        return res.json({
-          success: true,
-          reconciled: true,
-          txHash: suppliedTxHash,
-          bounty: fundedBounty,
-        });
-      } else if (bounty.escrow_status !== 'none') {
-        return res.status(409).json({
-          error: `Bounty is already in escrow state: ${bounty.escrow_status}`,
-        });
-      } else {
-        const eligibility = selectedAgent
-          ? await onchainEscrowEligible(bounty, selectedAgent)
-          : { eligible: false };
-        if (suppliedOnchainJobId) {
-          if (!eligibility.eligible) {
-            return res.status(409).json({
-              error: `Partial on-chain funding cannot resume: ${eligibility.reason || 'wallet signing unavailable'}`,
-            });
-          }
-          result = await fundSelectedProposalOnchain(
-            bounty,
-            selectedAgent,
-            eligibility,
-            {
-              resumeJobId: suppliedOnchainJobId,
-              fundTxHash: suppliedTxHash || null,
-            }
-          );
-        } else if (!suppliedTxHash && eligibility.eligible) {
-          result = await fundSelectedProposalOnchain(
-            bounty,
-            selectedAgent,
-            eligibility
-          );
-        } else if (suppliedTxHash) {
-          const verification = await verifyTransaction(
-            suppliedTxHash,
-            creatorWallet,
-            SELLER_ADDRESS,
-            amountUsdc
-          );
-          if (!verification.valid) {
-            return res.status(400).json({
-              error: 'Funding transaction verification failed',
-              details: verification.error,
-            });
-          }
-          await reserveBountyFunding(bounty.id);
-          const fundedBounty = await finalizeCustodialBountyFunding({
-            bounty,
-            creatorWallet,
-            amountUsdc,
-            txHash: suppliedTxHash,
-            selectedAgent,
-            actorType: 'agent',
-          });
-          result = { bounty: fundedBounty, txHash: suppliedTxHash, selectedAgent };
-        } else {
-          result = await transferAndFundCustodialBounty(
-            bounty,
-            creatorWallet,
-            'agent'
-          );
-        }
+      const eligibility = selectedAgent
+        ? await onchainEscrowEligible(bounty, selectedAgent)
+        : { eligible: false };
+      if (!eligibility.eligible) {
+        return res.status(409).json({ error: 'Arc escrow and two managed agent wallets are required.' });
       }
+      if (suppliedOnchainJobId && String(bounty.onchain_job_id || '') !== suppliedOnchainJobId) {
+        return res.status(409).json({ error: 'Recovery job does not match this bounty.' });
+      }
+      if (suppliedTxHash && !suppliedOnchainJobId) {
+        return res.status(409).json({ error: 'Custodial funding is retired.' });
+      }
+      if (bounty.escrow_status === 'funding' && !suppliedOnchainJobId) {
+        return res.status(409).json({
+          error: 'Funding is awaiting reconciliation. Retry with the original txHash or onchainJobId.',
+          recoverable: true,
+        });
+      }
+      if (!['none', 'funding'].includes(bounty.escrow_status)) {
+        return res.status(409).json({ error: `Bounty is already in escrow state: ${bounty.escrow_status}` });
+      }
+      const creatorWallet = creator.turnkey_address;
+      const result = await fundSelectedProposalOnchain(bounty, selectedAgent, eligibility, {
+        resumeJobId: suppliedOnchainJobId || null,
+        fundTxHash: suppliedTxHash || null,
+      });
 
       emitFeedEvent('escrow:funded', {
         bountyId: bounty.id,
@@ -6989,135 +4059,8 @@ app.post('/api/bounties/:id/fund', requireAuth, async (req, res) => {
 });
 
 // POST /api/bounties/:id/claim — Agent accepts a funded bounty
-app.post('/api/bounties/:id/claim', requireAuth, async (req, res) => {
-  // Actor is the authenticated agent — no more optional/skippable callerWallet check.
-  const agentId = req.auth.agentId;
-
-  const agent = await stmts.getAgentById(agentId);
-  if (!agent) return res.status(404).json({ error: 'Agent not found' });
-
-  if (!(await checkRateLimit(agentId, 'escrow_claim'))) return res.status(429).json({ error: 'Rate limit exceeded' });
-
-  const bounty = await stmts.getBountyById(req.params.id);
-  if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-  if (bounty.selection_mode === 'proposal') {
-    return res.status(409).json({
-      error: 'This bounty uses proposal selection. Submit a proposal via POST /api/bounties/:id/proposals instead.',
-      hint: 'Use bard_submit_proposal MCP tool or the proposal endpoint.'
-    });
-  }
-  if (bounty.status !== 'open' || bounty.escrow_status !== 'funded') {
-    return res.status(409).json({ error: 'Bounty is not funded and available for claiming' });
-  }
-  const eligibility = await evaluateBountyEligibility(agent, bounty);
-  if (!eligibility.eligible) {
-    return res.status(403).json({
-      error: `Agent does not meet this bounty's Bard reputation or owner-assurance requirements`,
-      eligibility,
-    });
-  }
-  if (agentControlsBounty(agent, bounty)) {
-    return res.status(409).json({ error: 'An agent cannot claim its own bounty' });
-  }
-
-  // Require a managed payment wallet for funded bounties.
-  if (!agent.turnkey_address) {
-    return res.status(400).json({
-      error: 'Agent must have a managed wallet to receive payment from funded bounties.',
-      action_required: 'create_wallet',
-      hint: 'Use bard_create_wallet or POST /api/agents/:id/create-wallet first.'
-    });
-  }
-
-  const now = new Date().toISOString();
-  // Reset expiry from claim time (agent gets full 72h to deliver)
-  const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
-  const claimed = await pool.query(
-    `UPDATE bounties
-        SET provider_agent_id = $1,
-            provider_wallet = $2,
-            escrow_status = 'claimed',
-            status = 'assigned',
-            claimed_at = $3,
-            expires_at = $4,
-            updated_at = $3
-      WHERE id = $5 AND status = 'open' AND escrow_status = 'funded'
-      RETURNING *`,
-    [agentId, agent.turnkey_address, now, expiresAt, req.params.id]
-  );
-  if (!claimed.rows[0]) {
-    return res.status(409).json({
-      error: 'Bounty was already claimed by another agent',
-    });
-  }
-  if (eligibility.path === 'ethos_owner_assurance') {
-    await recordTrustBootstrapUse(agent, bounty, 'claim');
-  }
-  await logEscrowEvent(req.params.id, 'claimed', agent.owner_wallet, 'agent', `Claimed by ${agent.agent_name}`, '');
-
-  await createNotification({ wallet: bounty.creator_wallet, type: 'system', title: 'Agent Claimed Bounty', message: `${agent.agent_name} accepted your bounty "${bounty.title}".`, from: agent.owner_wallet });
-  emitFeedEvent('escrow:claimed', { bountyId: req.params.id, agentId, agentName: agent.agent_name });
-
-  // If this is a swarm agent, execute the swarm immediately.
-  // DORMANT: skip execution entirely while the swarm feature is on hold. The
-  // claim still succeeds; the bounty simply isn't auto-worked by the swarm.
-  let swarmResult = null;
-  if (SWARMS_ENABLED && agent.agent_type === 'swarm' && agent.swarm_config) {
-    try {
-      swarmResult = await executeSwarm(agent, bounty.description, req.params.id);
-
-      // Store execution ID
-      await pool.query('UPDATE bounties SET swarm_execution_id = $1 WHERE id = $2', [swarmResult.executionId, req.params.id]);
-
-      // If sync response, auto-submit deliverable
-      if (swarmResult.status === 'completed' && swarmResult.deliverable) {
-        const deliverable = normalizeDeliverablePackage(
-          {
-            content: swarmResult.deliverable,
-            summary: `Swarm agent ${agent.agent_name} completed the requested work.`,
-          },
-          bounty
-        );
-        await stmts.submitBountyDeliverable({
-          deliverable_hash: deliverable.serverHash,
-          deliverable_content: deliverable.content,
-          deliverable_summary: deliverable.summary,
-          deliverable_evidence: JSON.stringify(deliverable.evidence),
-          deliverable_instructions: deliverable.instructions,
-          deliverable_artifacts: JSON.stringify(deliverable.artifacts),
-          verification_report: JSON.stringify(deliverable.verificationReport),
-          submitted_at: now,
-          updated_at: now,
-          id: req.params.id,
-        });
-        await logEscrowEvent(req.params.id, 'submitted', agent.owner_wallet, 'agent', `Swarm deliverable auto-submitted`, '');
-        await createNotification({
-          wallet: bounty.creator_wallet,
-          type: 'system',
-          title: 'Swarm Completed',
-          message: `Swarm agent "${agent.agent_name}" completed your bounty "${bounty.title}".`,
-          from: agent.owner_wallet
-        });
-      }
-    } catch (swarmError) {
-      console.error('Swarm execution failed:', swarmError);
-      // Don't fail the claim - just log the error
-      await createNotification({
-        wallet: bounty.creator_wallet,
-        type: 'system',
-        title: 'Swarm Execution Failed',
-        message: `Swarm agent "${agent.agent_name}" failed to execute: ${swarmError.message}`,
-        from: 'BARD System'
-      });
-    }
-  }
-
-  res.json({
-    success: true,
-    bounty: await stmts.getBountyById(req.params.id),
-    swarm_execution_id: swarmResult?.executionId,
-    swarm_status: swarmResult?.status
-  });
+app.post('/api/bounties/:id/claim', requireAuth, (_req, res) => {
+  res.status(410).json({ error: 'First-come claiming has been retired. Submit signed terms with bard_submit_proposal.' });
 });
 
 // POST /api/bounties/:id/deliver — Agent submits deliverable
@@ -7143,7 +4086,20 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'proofHash must be a 32-byte hex value' });
   }
 
-  const hash = proofHash || deliverable.serverHash;
+  let hash = proofHash || deliverable.serverHash;
+  if (bounty.selected_proposal_id) {
+    try {
+      const bid = await stmts.getProposalById(bounty.selected_proposal_id);
+      const terms = jobTerms(bounty, bid, agent.turnkey_address);
+      const signer = await getWalletProvider(pool).getAccount(agent.turnkey_address);
+      const attestation = await attestDelivery(terms, bid.acl_offer, deliverable.serverHash, signer);
+      if (proofHash && proofHash.toLowerCase() !== attestation.deliveryHash) throw new Error('Delivery hash does not match signed evidence.');
+      deliverable.verificationReport.acl = attestation;
+      hash = attestation.deliveryHash;
+    } catch (error) {
+      return res.status(409).json({ error: error.message });
+    }
+  }
   const now = new Date().toISOString();
 
   // On-chain: record the deliverable on the escrow contract (Funded → Submitted)
@@ -7177,7 +4133,7 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
     }
   }
 
-  await stmts.submitBountyDeliverable({
+  const savedDelivery = await stmts.submitBountyDeliverable({
     deliverable_hash: hash,
     deliverable_content: deliverable.content,
     deliverable_summary: deliverable.summary,
@@ -7189,6 +4145,7 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
     updated_at: now,
     id: req.params.id,
   });
+  if (!savedDelivery.changes) return res.status(409).json({ error: 'Job state changed during submission.' });
   await logEscrowEvent(req.params.id, 'submitted', bounty.provider_wallet, 'agent', `Deliverable submitted (hash: ${hash.slice(0, 16)}...)${submitTx ? ` [on-chain ${submitTx}]` : ''}`, submitTx);
 
   await createNotification({ wallet: bounty.creator_wallet, type: 'system', title: 'Deliverable Submitted', message: `Agent submitted work for "${bounty.title}". Review it now.`, from: bounty.provider_wallet });
@@ -7196,6 +4153,22 @@ app.post('/api/bounties/:id/deliver', requireAuth, async (req, res) => {
 
   res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
 });
+
+async function verifyStoredDelivery(db, bounty) {
+  const bid = (await db.query('SELECT * FROM bounty_proposals WHERE id = $1', [bounty.selected_proposal_id])).rows[0];
+  if (!bid) throw new Error('Signed proposal missing.');
+  const terms = jobTerms(bounty, bid, bounty.provider_wallet);
+  const canonical = JSON.stringify({
+    content: bounty.deliverable_content, summary: bounty.deliverable_summary,
+    instructions: bounty.deliverable_instructions,
+    evidence: parseStoredJson(bounty.deliverable_evidence, []),
+    artifacts: parseStoredJson(bounty.deliverable_artifacts, []),
+  });
+  const packageHash = '0x' + createHash('sha256').update(canonical).digest('hex');
+  const proof = parseStoredJson(bounty.verification_report, {}).acl;
+  await verifyDelivery(terms, bid.acl_offer, proof, packageHash);
+  if (bounty.deliverable_hash !== proof.deliveryHash) throw new Error('Stored delivery hash changed.');
+}
 
 async function releaseBountyOnCreatorApproval({
   bountyId,
@@ -7258,6 +4231,7 @@ async function releaseBountyOnCreatorApproval({
       throw Object.assign(new Error('Provider agent has no payment wallet'), { status: 409 });
     }
 
+    await verifyStoredDelivery(client, bounty);
     let agentEarnings = Number(bounty.escrow_budget_usdc || 0);
     let platformFee = 0;
     if (bounty.swarm_execution_id) {
@@ -7543,129 +4517,6 @@ app.post('/api/bounties/:id/agent-review', requireAuth, async (req, res) => {
     }
     return res.status(error.status || 409).json({ error: error.message });
   }
-});
-
-// POST /api/human/bounties/:id/review — Authenticated human creator reviews work.
-app.post('/api/human/bounties/:id/review', requireHuman, async (req, res) => {
-  const clientWallet = req.human.wallet_address;
-  const decision = String(req.body?.decision || '');
-  const reason = String(req.body?.reason || '').trim().slice(0, 2000);
-  if (!decision) return res.status(400).json({ error: 'decision (approved/rejected) required' });
-  if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'decision must be approved or rejected' });
-  if (!(await checkRateLimit(clientWallet, 'escrow_review'))) return res.status(429).json({ error: 'Rate limit exceeded' });
-
-  const bounty = await stmts.getBountyById(req.params.id);
-  if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-  if (bounty.creator_wallet.toLowerCase() !== clientWallet.toLowerCase()) return res.status(403).json({ error: 'Only bounty creator can review' });
-  if (bounty.escrow_status !== 'submitted') return res.status(409).json({ error: 'No deliverable to review' });
-
-  if (decision === 'approved') {
-    try {
-      const result = await releaseBountyOnCreatorApproval({
-        bountyId: bounty.id,
-        creatorHuman: req.human,
-        reason,
-      });
-      return res.json({
-        success: true,
-        paid: true,
-        txHash: result.txHash || result.bounty?.release_tx_hash || null,
-        message: result.reconciled
-          ? 'Bounty payment was already completed.'
-          : 'Deliverable approved and payment released to the provider agent.',
-        bounty: result.bounty,
-      });
-    } catch (error) {
-      if (error.txHash) {
-        return res.status(202).json({
-          success: true,
-          pending: true,
-          txHash: error.txHash,
-          onchainJobId: bounty.onchain_job_id ? String(bounty.onchain_job_id) : null,
-          message: 'Payment was broadcast and is awaiting confirmation. Retry this approval to reconcile it.',
-          details: error.message,
-        });
-      }
-      return res.status(error.status || 409).json({ error: error.message });
-    }
-  }
-
-  if (!reason) {
-    return res.status(400).json({ error: 'A revision reason is required when rejecting work' });
-  }
-
-  const now = new Date().toISOString();
-  // Rejection — allow 1 revision
-  if ((bounty.revision_count || 0) >= 1) {
-    // Already revised once — escalate to platform
-    await stmts.clientReviewBounty({ client_decision: 'rejected', client_decision_at: now, escrow_status: 'disputed', updated_at: now, id: req.params.id });
-    await logEscrowEvent(req.params.id, 'disputed', clientWallet, 'human', `Client rejected after revision: ${reason}`, '');
-    await createNotification({ agentId: bounty.provider_agent_id, type: 'system', title: 'Escalated to Platform', message: `Client rejected your revision for "${bounty.title}". Platform will decide.`, from: clientWallet });
-  } else {
-    await stmts.incrementBountyRevision({ updated_at: now, id: req.params.id });
-    await logEscrowEvent(req.params.id, 'client_rejected', clientWallet, 'human', `Revision requested: ${reason}`, '');
-    await createNotification({ agentId: bounty.provider_agent_id, type: 'system', title: 'Revision Requested', message: `Client requested revision for "${bounty.title}": ${reason}`, from: clientWallet });
-  }
-
-  emitFeedEvent('escrow:reviewed', { bountyId: req.params.id, decision });
-  res.json({ success: true, bounty: await stmts.getBountyById(req.params.id) });
-});
-
-// POST /api/human/bounties/:id/request-verification — Ask an independent
-// platform verifier to decide a submitted bounty when the creator lacks the
-// expertise to evaluate it directly.
-app.post('/api/human/bounties/:id/request-verification', requireHuman, async (req, res) => {
-  const clientWallet = req.human.wallet_address;
-  const note = String(req.body?.note || '').trim().slice(0, 2000);
-  if (!(await checkRateLimit(clientWallet, 'escrow_review'))) {
-    return res.status(429).json({ error: 'Rate limit exceeded' });
-  }
-
-  const bounty = await getHumanManagedBounty(clientWallet, req.params.id);
-  if (!bounty) return res.status(403).json({ error: 'Only bounty creator can request verification' });
-  if (bounty.escrow_status !== 'submitted') {
-    return res.status(409).json({ error: 'Independent review is only available for submitted work' });
-  }
-
-  const now = new Date().toISOString();
-  const requested = await pool.query(
-    `UPDATE bounties
-        SET verification_requested_at = COALESCE(verification_requested_at, $1),
-            verification_request_note = $2,
-            updated_at = $1
-      WHERE id = $3 AND escrow_status = 'submitted'
-      RETURNING *`,
-    [now, note, bounty.id]
-  );
-  if (!requested.rows[0]) {
-    return res.status(409).json({ error: 'The bounty is no longer awaiting review' });
-  }
-  await logEscrowEvent(
-    bounty.id,
-    'independent_review_requested',
-    clientWallet,
-    'human',
-    note || 'Creator requested independent review',
-    ''
-  );
-  await Promise.all([
-    runBestEffort(`independent review operator notification for ${bounty.id}`, () => createNotification({
-      wallet: PLATFORM_OWNER_WALLET,
-      type: 'system',
-      title: 'Independent Bounty Review Requested',
-      message: `Review requested for "${bounty.title}". ${note || 'No additional note.'}`,
-      from: clientWallet,
-    })),
-    runBestEffort(`independent review agent notification for ${bounty.id}`, () => createNotification({
-      agentId: bounty.provider_agent_id,
-      type: 'system',
-      title: 'Independent Review Requested',
-      message: `The creator requested independent verification for "${bounty.title}". Escrow remains locked pending a decision.`,
-      from: clientWallet,
-    })),
-  ]);
-  emitFeedEvent('escrow:verification_requested', { bountyId: bounty.id });
-  res.json({ success: true, bounty: requested.rows[0] });
 });
 
 // ══════════════════════════════════════════════════════
@@ -8053,6 +4904,7 @@ app.post('/api/bounties/:id/platform-verify', requireTrustedServiceOrOperator, a
       throw new Error(`Race condition: bounty now in state ${fresh ? fresh.escrow_status : 'missing'}`);
     }
 
+    if (decision === 'approved') await verifyStoredDelivery(client, fresh);
     // Record verification decision (audit trail)
     const vId = `vd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await client.query(
@@ -8308,15 +5160,17 @@ app.get('/api/bounties/:id/events', async (req, res) => {
 
 // Build a client-friendly on-chain escrow summary (null for custodial/unfunded
 // bounties). Gives the frontend + MCP job id, ArcScan links, and the platform fee
-// without them having to know the contract layout. Fee is the configured rate
-// applied to the funded budget (display estimate; the exact fee is settled on-chain
-// at release and recorded in the escrow_events trail).
+// without them having to know the contract layout. Fees come from the accepted
+// signatures, so operator configuration changes do not change the displayed cost.
 const ARC_EXPLORER = 'https://testnet.arcscan.app';
-function onchainEscrowSummary(bounty) {
+async function onchainEscrowSummary(bounty) {
   if (!bounty || bounty.escrow_mode !== 'onchain' || !bounty.onchain_job_id) return null;
-  const feeBps = Math.max(0, Math.min(10000, parseInt(process.env.PLATFORM_FEE_BPS || '0', 10) || 0));
+  const bid = await stmts.getProposalById(bounty.selected_proposal_id);
+  if (!bid) throw new Error('Signed proposal missing.');
+  const terms = jobTerms(bounty, bid, bid.acl_offer?.message?.provider);
+  await verifyAgreement(terms, bid.acl_offer, true);
+  const fee = terms.task.extensions.platformFee;
   const budget = parseFloat(bounty.escrow_budget_usdc || bounty.amount_usdc || 0) || 0;
-  const platformFeeUsdc = feeBps > 0 ? Math.floor(budget * feeBps / 10000 * 1e6) / 1e6 : 0;
   const contract = process.env.AGENTIC_COMMERCE_ADDRESS || null;
   const tx = (h) => (h ? `${ARC_EXPLORER}/tx/${h}` : null);
   return {
@@ -8324,8 +5178,9 @@ function onchainEscrowSummary(bounty) {
     jobId: String(bounty.onchain_job_id),
     status: bounty.escrow_status,
     budgetUsdc: budget,
-    feeBps,
-    platformFeeUsdc,
+    feeBps: fee.bps,
+    platformFeeUsdc: Number(formatUnits(BigInt(fee.amount), 6)),
+    feeRecipient: fee.recipient,
     contract,
     fundTx: bounty.escrow_tx_hash || null,
     releaseTx: bounty.release_tx_hash || null,
@@ -8343,7 +5198,11 @@ app.get('/api/bounties/:id/escrow', async (req, res) => {
   if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
   const events = await stmts.getEscrowEvents(req.params.id);
   const decisions = await stmts.getVerificationDecisions(req.params.id);
-  res.json({ bounty, events, decisions, onchain: onchainEscrowSummary(bounty) });
+  try {
+    res.json({ bounty, events, decisions, onchain: await onchainEscrowSummary(bounty) });
+  } catch (error) {
+    res.status(409).json({ error: error.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════
@@ -8390,7 +5249,7 @@ app.post('/api/bounties/:id/proposals', requireAuth, async (req, res) => {
     const bounty = await stmts.getBountyById(req.params.id);
     if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
     if (bounty.selection_mode !== 'proposal') {
-      return res.status(409).json({ error: 'This bounty is first-come — use POST /api/bounties/:id/claim instead' });
+      return res.status(409).json({ error: 'Only proposal bounties are supported on this deployment.' });
     }
     if (bounty.status !== 'proposal_open') {
       return res.status(409).json({ error: `Bounty is not accepting proposals (status: ${bounty.status})` });
@@ -8431,7 +5290,11 @@ app.post('/api/bounties/:id/proposals', requireAuth, async (req, res) => {
 
     const id = `proposal-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
+    if (!agent.turnkey_address) return res.status(409).json({ error: 'Create an agent wallet before proposing.' });
+    const terms = jobTerms(bounty, { id, plan, proposed_price_usdc: price, estimated_hours: hours }, agent.turnkey_address);
+    const signer = await getWalletProvider(pool).getAccount(agent.turnkey_address);
     await stmts.insertProposal({
+      acl_offer: { ...terms, providerSignature: await signer.signTypedData(typedAgreement(terms)) },
       id, bounty_id: req.params.id,
       proposer_agent_id: agent.id,
       proposer_wallet: (agent.owner_wallet || '').toLowerCase(),
@@ -8441,9 +5304,6 @@ app.post('/api/bounties/:id/proposals', requireAuth, async (req, res) => {
       portfolio_refs: JSON.stringify(refs),
       created_at: now, updated_at: now,
     });
-    if (eligibility.path === 'ethos_owner_assurance') {
-      await recordTrustBootstrapUse(agent, bounty, 'proposal');
-    }
 
     await createNotification({
       wallet: bounty.creator_wallet,
@@ -8477,23 +5337,6 @@ app.get('/api/bounties/:id/proposals', requireAuth, async (req, res) => {
       ? proposals
       : proposals.filter((p) => p.proposer_agent_id === agent.id);
 
-    res.json({ proposals: visible, isCreator });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/human/bounties/:id/proposals — Authenticated human view.
-app.get('/api/human/bounties/:id/proposals', requireHuman, async (req, res) => {
-  try {
-    const callerWallet = req.human.wallet_address.toLowerCase();
-    const bounty = await stmts.getBountyById(req.params.id);
-    if (!bounty) return res.status(404).json({ error: 'Bounty not found' });
-    const proposals = await stmts.getProposalsByBounty(req.params.id);
-    const isCreator = bounty.creator_wallet.toLowerCase() === callerWallet;
-    const visible = isCreator
-      ? proposals
-      : proposals.filter((p) => (p.proposer_wallet || '').toLowerCase() === callerWallet);
     res.json({ proposals: visible, isCreator });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -8562,7 +5405,11 @@ app.put('/api/bounties/:id/proposals/:proposalId', requireAuth, async (req, res)
     }
 
     const now = new Date().toISOString();
+    const proposer = await stmts.getAgentById(req.auth.agentId);
+    const terms = jobTerms(bounty, { id: proposal.id, plan: newPlan, proposed_price_usdc: newPrice, estimated_hours: newHours }, proposer.turnkey_address);
+    const signer = await getWalletProvider(pool).getAccount(proposer.turnkey_address);
     await stmts.updateProposal({
+      acl_offer: { ...terms, providerSignature: await signer.signTypedData(typedAgreement(terms)) },
       id: req.params.proposalId,
       plan: newPlan,
       proposed_price_usdc: newPrice,
@@ -8680,6 +5527,13 @@ app.post('/api/bounties/:id/proposals/:proposalId/accept', requireAuth, async (r
     const now = new Date().toISOString();
     const acceptedPrice = parseFloat(propRow.proposed_price_usdc);
 
+    const terms = jobTerms(bountyRow, propRow, selectedAgent.turnkey_address);
+    await verifyAgreement(terms, propRow.acl_offer);
+    if (BigInt(terms.message.expiresAt) <= BigInt(Math.floor(Date.now()/1000))) throw new Error('Proposal expired.');
+    const signer = await getWalletProvider(pool).getAccount(callerWallet);
+    const signed = { ...propRow.acl_offer, clientSignature: await signer.signTypedData(typedAgreement(terms)) };
+    await verifyAgreement(terms, signed, true);
+    await client.query('UPDATE bounty_proposals SET acl_offer = $1 WHERE id = $2', [signed, propRow.id]);
     // Mark this proposal accepted
     await client.query(
       `UPDATE bounty_proposals SET status = 'accepted', accepted_at = $1, updated_at = $1 WHERE id = $2`,
@@ -8881,14 +5735,6 @@ app.post('/api/bounties/:id/messages', requireAuth, async (req, res) => {
   });
 });
 
-// POST /api/human/bounties/:id/messages — Authenticated human thread message.
-app.post('/api/human/bounties/:id/messages', requireHuman, async (req, res) => (
-  sendBountyMessage(req, res, {
-    agentId: null,
-    wallets: [req.human.wallet_address],
-  })
-));
-
 async function getBountyMessages(req, res, actor) {
   try {
     const proposalId = req.query.proposalId;
@@ -8933,342 +5779,8 @@ app.get('/api/bounties/:id/messages', requireAuth, async (req, res) => {
   });
 });
 
-// GET /api/human/bounties/:id/messages?proposalId=... — Authenticated human thread.
-app.get('/api/human/bounties/:id/messages', requireHuman, async (req, res) => (
-  getBountyMessages(req, res, {
-    agentId: null,
-    wallets: [req.human.wallet_address],
-  })
-));
-
-// ══════════════════════════════════════════════════════
-// ── Swarms API Integration ──
-// ══════════════════════════════════════════════════════
-
-// POST /api/swarms/estimate — Estimate swarm execution cost
-app.post('/api/swarms/estimate', requireSwarmsEnabled, requireAuth, async (req, res) => {
-  try {
-    const { agentId, task } = req.body;
-    if (!agentId || !task) {
-      return res.status(400).json({ error: 'agentId and task required' });
-    }
-
-    const agent = await stmts.getAgentById(agentId);
-    if (!agent) {
-      return res.status(404).json({ error: 'Agent not found' });
-    }
-
-    if (agent.agent_type !== 'swarm' || !agent.swarm_config) {
-      return res.status(400).json({ error: 'Agent is not a swarm type' });
-    }
-
-    // Parse swarm config
-    let swarmConfig;
-    try {
-      swarmConfig = typeof agent.swarm_config === 'string'
-        ? JSON.parse(agent.swarm_config)
-        : agent.swarm_config;
-    } catch (err) {
-      return res.status(500).json({ error: 'Invalid swarm configuration' });
-    }
-
-    // Calculate estimated cost based on historical data
-    const { rows: avgCosts } = await pool.query(
-      `SELECT
-        AVG(swarms_cost_usd) as avg_swarms_cost,
-        AVG(total_charged_usd) as avg_total_cost,
-        COUNT(*) as execution_count
-      FROM swarm_executions
-      WHERE agent_id = $1 AND status = 'completed'`,
-      [agentId]
-    );
-
-    const historicalData = avgCosts[0];
-    const hasHistory = parseInt(historicalData.execution_count) > 0;
-
-    // Estimate based on history or defaults
-    let estimatedSwarmsCost;
-    if (hasHistory) {
-      estimatedSwarmsCost = parseFloat(historicalData.avg_swarms_cost);
-    } else {
-      // Rough estimate: $0.10 per agent in swarm
-      const agentCount = swarmConfig.agents?.length || 1;
-      estimatedSwarmsCost = agentCount * 0.10;
-    }
-
-    // Calculate platform markup
-    const isPlatformOwned = agent.is_platform_owned === 1;
-    const platformMarkup = isPlatformOwned ? estimatedSwarmsCost * (SWARMS_PLATFORM_MARKUP_PCT / 100) : 0;
-    const totalEstimated = estimatedSwarmsCost + platformMarkup;
-
-    res.json({
-      agent_id: agentId,
-      agent_name: agent.agent_name,
-      swarm_type: swarmConfig.swarm_type || 'SequentialWorkflow',
-      agent_count: swarmConfig.agents?.length || 0,
-      estimated_swarms_cost_usd: estimatedSwarmsCost.toFixed(2),
-      platform_markup_usd: platformMarkup.toFixed(2),
-      platform_markup_pct: isPlatformOwned ? SWARMS_PLATFORM_MARKUP_PCT : 0,
-      total_estimated_usd: totalEstimated.toFixed(2),
-      based_on_history: hasHistory,
-      historical_executions: parseInt(historicalData.execution_count) || 0,
-      note: hasHistory
-        ? `Estimate based on ${historicalData.execution_count} completed executions`
-        : 'Estimate based on agent count (no execution history)'
-    });
-  } catch (error) {
-    console.error('Cost estimation error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// POST /api/swarms/validate-key — Test a user's Swarms API key
-app.post('/api/swarms/validate-key', requireSwarmsEnabled, requireHuman, async (req, res) => {
-  const { apiKey } = req.body;
-  if (!apiKey) return res.status(400).json({ error: 'apiKey required' });
-
-  try {
-    // Test the key by calling Swarms API health check
-    const response = await fetch(`${SWARMS_API_BASE}/v1/models/available`, {
-      method: 'GET',
-      headers: {
-        'x-api-key': apiKey
-      }
-    });
-
-    if (response.ok) {
-      res.json({ valid: true });
-    } else {
-      const errorText = await response.text();
-      res.json({ valid: false, error: `API key validation failed: ${response.status} ${errorText}` });
-    }
-  } catch (error) {
-    res.json({ valid: false, error: error.message });
-  }
-});
-
-// GET /api/swarms/executions/:id — Poll swarm execution status
-app.get('/api/swarms/executions/:id', requireSwarmsEnabled, requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query('SELECT * FROM swarm_executions WHERE id = $1', [id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Execution not found' });
-    }
-
-    const execution = result.rows[0];
-    const caller = await stmts.getAgentById(req.auth.agentId);
-    const bounty = await stmts.getBountyById(execution.bounty_id);
-    if (!caller || !bounty) {
-      return res.status(404).json({ error: 'Execution owner context not found' });
-    }
-    if (caller.id !== execution.agent_id && !agentControlsBounty(caller, bounty)) {
-      return res.status(403).json({ error: 'You cannot view this swarm execution' });
-    }
-
-    // Return execution details with progress info
-    res.json({
-      execution: {
-        id: execution.id,
-        bounty_id: execution.bounty_id,
-        agent_id: execution.agent_id,
-        swarm_type: execution.swarm_type,
-        task: execution.task,
-        status: execution.status,
-        swarms_cost_usd: execution.swarms_cost_usd,
-        platform_markup_usd: execution.platform_markup_usd,
-        total_charged_usd: execution.total_charged_usd,
-        started_at: execution.started_at,
-        completed_at: execution.completed_at,
-        created_at: execution.created_at,
-        // Include response if completed
-        response: execution.status === 'completed' ? execution.swarms_api_response : null
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching swarm execution:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// POST /api/swarms/executions/:id/cancel — Cancel a running swarm execution
-app.post('/api/swarms/executions/:id/cancel', requireSwarmsEnabled, requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // Fetch execution
-    const result = await pool.query('SELECT * FROM swarm_executions WHERE id = $1', [id]);
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Execution not found' });
-    }
-
-    const execution = result.rows[0];
-
-    // Check if execution is cancellable
-    if (execution.status !== 'running' && execution.status !== 'pending') {
-      return res.status(400).json({
-        error: `Cannot cancel execution with status: ${execution.status}`,
-        current_status: execution.status
-      });
-    }
-
-    // Verify caller owns the bounty or the agent
-    const bounty = await stmts.getBountyById(execution.bounty_id);
-    if (!bounty) {
-      return res.status(404).json({ error: 'Associated bounty not found' });
-    }
-
-    const caller = await stmts.getAgentById(req.auth.agentId);
-    if (!caller) return res.status(404).json({ error: 'Calling agent not found' });
-
-    // Authorization: the executing swarm agent or the bounty creator agent.
-    const isCreator = agentControlsBounty(caller, bounty);
-    const isExecutionAgent = caller.id === execution.agent_id;
-    if (!isCreator && !isExecutionAgent) {
-      return res.status(403).json({
-        error: 'Only the bounty creator or executing swarm agent can cancel this execution'
-      });
-    }
-    const callerWallet = caller.turnkey_address || caller.owner_wallet || '';
-
-    // Update execution status to cancelled
-    const now = new Date().toISOString();
-    await pool.query(
-      `UPDATE swarm_executions
-       SET status = 'cancelled', completed_at = $1
-       WHERE id = $2`,
-      [now, id]
-    );
-
-    // Update bounty status back to claimed (can be re-submitted)
-    await pool.query(
-      `UPDATE bounties
-       SET escrow_status = 'claimed', deliverable_content = NULL, deliverable_hash = NULL,
-           submitted_at = NULL, updated_at = $1
-       WHERE id = $2`,
-      [now, execution.bounty_id]
-    );
-
-    // Log escrow event
-    await logEscrowEvent(
-      execution.bounty_id,
-      'execution_cancelled',
-      callerWallet || '',
-      'agent',
-      `Swarm execution ${id} cancelled by ${isCreator ? 'bounty creator' : 'executing agent'}`,
-      ''
-    );
-
-    res.json({
-      success: true,
-      message: 'Swarm execution cancelled',
-      execution_id: id,
-      bounty_id: execution.bounty_id,
-      cancelled_by: isCreator ? 'bounty_creator' : 'agent_owner'
-    });
-  } catch (error) {
-    console.error('Error cancelling swarm execution:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// POST /api/swarms/webhook — Receive async execution results from Swarms API
-app.post('/api/swarms/webhook', requireSwarmsEnabled, requireSwarmsWebhookSecret, async (req, res) => {
-  try {
-    const signature = String(
-      req.headers['x-swarms-signature'] || req.headers['x-webhook-signature'] || ''
-    );
-    if (!signature) {
-      console.error('Webhook signature missing');
-      return res.status(401).json({ error: 'Webhook signature required' });
-    }
-
-    // Verify HMAC over the exact request bytes. Re-serializing req.body can
-    // change whitespace or key ordering and reject a legitimate webhook.
-    const payload = req.rawBody || Buffer.alloc(0);
-    const expectedSignature = createHmac('sha256', SWARMS_WEBHOOK_SECRET)
-      .update(payload)
-      .digest('hex');
-    const providedSignature = signature.startsWith('sha256=')
-      ? signature.slice(7)
-      : signature;
-    if (!/^[0-9a-fA-F]{64}$/.test(providedSignature)) {
-      return res.status(401).json({ error: 'Invalid webhook signature' });
-    }
-    const expBuf = Buffer.from(expectedSignature, 'hex');
-    const providedBuf = Buffer.from(providedSignature, 'hex');
-    if (!timingSafeEqual(expBuf, providedBuf)) {
-      console.error('Webhook signature verification failed');
-      return res.status(401).json({ error: 'Invalid webhook signature' });
-    }
-
-    const { execution_id, status, result, cost_usd } = req.body;
-
-    if (!execution_id) {
-      return res.status(400).json({ error: 'execution_id required' });
-    }
-
-    // Find the execution record
-    const execResult = await pool.query('SELECT * FROM swarm_executions WHERE id = $1', [execution_id]);
-    if (execResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Execution not found' });
-    }
-
-    const execution = execResult.rows[0];
-    const now = new Date().toISOString();
-
-    // Calculate costs
-    const swarmsCostUsd = cost_usd || 0;
-    const agentResult = await pool.query('SELECT is_platform_owned FROM agents WHERE id = $1', [execution.agent_id]);
-    const isPlatformOwned = agentResult.rows[0]?.is_platform_owned === 1;
-    const platformMarkupUsd = isPlatformOwned ? swarmsCostUsd * (SWARMS_PLATFORM_MARKUP_PCT / 100) : 0;
-    const totalChargedUsd = swarmsCostUsd + platformMarkupUsd;
-
-    // Update execution record
-    await pool.query(
-      `UPDATE swarm_executions
-       SET status = $1, swarms_api_response = $2, swarms_cost_usd = $3,
-           platform_markup_usd = $4, total_charged_usd = $5, completed_at = $6
-       WHERE id = $7`,
-      [status, JSON.stringify(req.body), swarmsCostUsd, platformMarkupUsd, totalChargedUsd, now, execution_id]
-    );
-
-    // If completed, update bounty with deliverable
-    if (status === 'completed' && result) {
-      const deliverable = typeof result === 'string' ? result : JSON.stringify(result);
-      const hash = '0x' + createHash('sha256').update(deliverable).digest('hex');
-
-      await pool.query(
-        `UPDATE bounties SET deliverable_content = $1, deliverable_hash = $2,
-         escrow_status = 'submitted', submitted_at = $3, updated_at = $4
-         WHERE id = $5`,
-        [deliverable, hash, now, now, execution.bounty_id]
-      );
-
-      await logEscrowEvent(execution.bounty_id, 'submitted', '', 'agent', 'Swarm webhook: deliverable submitted', '');
-
-      // Notify client
-      const bountyResult = await pool.query('SELECT creator_wallet, title FROM bounties WHERE id = $1', [execution.bounty_id]);
-      if (bountyResult.rows.length > 0) {
-        const bounty = bountyResult.rows[0];
-        await createNotification({
-          wallet: bounty.creator_wallet,
-          type: 'system',
-          title: 'Swarm Completed',
-          message: `Swarm execution completed for "${bounty.title}". Review the deliverable.`,
-          from: 'BARD System'
-        });
-      }
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Webhook processing error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+// Preserve a clear failure for old clients without dormant execution handlers.
+app.use('/api/swarms', swarmsUnavailable);
 
 // ══════════════════════════════════════════════════════
 // ── Marketplace & Skill Registry ──
@@ -9440,7 +5952,7 @@ app.post('/api/auth/verify', async (req, res) => {
   }
 
   const challenge = await stmts.getChallenge(challengeId);
-  if (!challenge) return res.status(404).json({ error: 'Challenge not found' });
+  if (!challenge || challenge.scope !== 'agent:full') return res.status(404).json({ error: 'Agent authentication challenge not found' });
   if (challenge.used) return res.status(409).json({ error: 'Challenge already used' });
   if (new Date(challenge.expires_at) < new Date()) {
     return res.status(410).json({ error: 'Challenge expired. Request a new one.' });
@@ -9464,12 +5976,12 @@ app.post('/api/auth/verify', async (req, res) => {
   if (agentId) {
     agent = await stmts.getAgentById(agentId);
     if (!agent) return res.status(404).json({ error: 'Agent not found' });
-    if (agent.owner_wallet.toLowerCase() !== wallet.toLowerCase()) {
+    if (![agent.turnkey_address, agent.agent_public_key].some(a => a?.toLowerCase() === wallet.toLowerCase())) {
       return res.status(403).json({ error: 'Wallet does not own this agent' });
     }
   } else {
     // Find first agent owned by wallet
-    const agents = await stmts.getAgentsByOwner(wallet);
+    const { rows: agents } = await pool.query('SELECT * FROM agents WHERE LOWER(turnkey_address) = LOWER($1) OR LOWER(agent_public_key) = LOWER($1) ORDER BY id LIMIT 1', [wallet]);
     if (agents.length === 0) return res.status(404).json({ error: 'No agents found for this wallet. Register an agent first.' });
     agent = agents[0];
     agentId = agent.id;

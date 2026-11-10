@@ -13,7 +13,6 @@ function mockEthos({ verificationStatus = null, score = 1540, level = 'reputable
         links: { profile: 'https://app.ethos.network/profile/owner' },
         stats: {
           review: { received: { positive: 6, neutral: 1, negative: 0 } },
-          vouch: { received: { count: 4 } },
         },
       }), { status: 200 });
     }
@@ -37,7 +36,7 @@ const verified = await getOwnerAssurance(address, {
 assert.equal(verified.humanVerified, true);
 assert.equal(verified.relationship, 'verified_owner');
 assert.deepEqual(verified.reviews, { positive: 6, neutral: 1, negative: 0 });
-assert.equal(verified.vouchesReceived, 4);
+assert.equal(Object.hasOwn(verified, 'vouchesReceived'), false);
 
 let requested = false;
 const independent = await getOwnerAssurance('0x0000000000000000000000000000000000000000', {

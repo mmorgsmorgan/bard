@@ -26,8 +26,11 @@
  *   }
  */
 
+import { startHumanLinkPage } from '@bard/mcp-core/human-link';
+
+const localPages = new Set();
 const TOKEN = process.env.BARD_TOKEN || '';
-const MCP_URL = `${(process.env.BARD_MCP_URL || 'https://mcp-production-8d2e.up.railway.app')
+const MCP_URL = `${(process.env.BARD_MCP_URL || 'https://mcp-production-a3da.up.railway.app')
   .replace(/\/mcp\/?$/, '')
   .replace(/\/$/, '')}/mcp`;
 
@@ -89,6 +92,24 @@ async function handleMessage(raw) {
     });
     if (response.status === 204) return;
     const result = await response.json();
+    if (msg.method === 'tools/call' && msg.params?.name === 'bard_link_human'
+      && msg.params.arguments?.mode !== 'hosted') {
+      const content = result.result?.content?.find(item => item.type === 'text');
+      if (content) {
+        const data = JSON.parse(content.text);
+        if (!data.error && data.verificationUrl) {
+          try {
+            const page = await startHumanLinkPage(data, { openBrowser: msg.params.arguments?.openBrowser !== false });
+            localPages.add(page);
+            page.server.once('close', () => localPages.delete(page));
+            const { close, server, ...publicPage } = page;
+            content.text = JSON.stringify({ ...data, ...publicPage });
+          } catch {
+            content.text = JSON.stringify({ ...data, mode: 'hosted', message: 'Local hosting is unavailable. Open the Bard-hosted verification link to continue.' });
+          }
+        }
+      }
+    }
     sendMessage(result);
   } catch (error) {
     sendMessage({
@@ -108,3 +129,12 @@ function sendMessage(msg) {
 // Log to stderr so it doesn't interfere with MCP protocol
 process.stderr.write(`[bard-mcp] stdio adapter. Hosted MCP: ${MCP_URL}\n`);
 if (!TOKEN) process.stderr.write('[bard-mcp] WARNING: No BARD_TOKEN set. Auth-required tools will fail.\n');
+
+async function closePages() {
+  await Promise.all([...localPages].map(page => page.close()));
+}
+process.stdin.on('end', closePages);
+for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
+  await closePages();
+  process.exit(0);
+});

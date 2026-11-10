@@ -5,11 +5,12 @@
   "main": "server.js",
   "type": "module",
   "engines": {
-    "node": ">=20 <21"
+    "node": "24.x"
   },
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test test-agreement-format.mjs && node test-agent-agreement.mjs && node test-passport-service.mjs && node test-ethos-service.mjs && node test-arc-rpc-retry.mjs && node test-gas-funding-plan.mjs && node test-reputation-score.mjs"
   },
   "keywords": [],
   "author": "",
@@ -17,15 +18,12 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1057.0",
     "@aws-sdk/lib-storage": "^3.1057.0",
-    "@circle-fin/x402-batching": "^3.0.4",
-    "@privy-io/server-auth": "^1.32.5",
     "@turnkey/sdk-server": "^6.0.0",
     "@turnkey/viem": "^0.14.29",
-    "@x402/core": "^2.11.0",
-    "@x402/evm": "^2.11.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "fast-json-stable-stringify": "^2.1.0",
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.1.1",

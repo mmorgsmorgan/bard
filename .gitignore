@@ -32,7 +32,11 @@ sdk/dist/
 *.original.tsx
 *.original.css
 *.original.js
+*.pre-*
+contracts/broadcast/**/dry-run/
 frontend/src/app/page.monolog.tsx
 frontend/src/app/page.redesign.tsx
 Screenshot*.png
 railway-backend-vars.txt
+.vercel
+.env*

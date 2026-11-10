@@ -1,20 +1,36 @@
 #!/usr/bin/env node
 
-import 'dotenv/config';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import net from 'node:net';
+import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import jwt from 'jsonwebtoken';
-import { pool } from './db.js';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+if (!process.env.BARD_TEST_DATABASE_URL) throw new Error('Supply an isolated BARD_TEST_DATABASE_URL.');
+process.env.DATABASE_URL = process.env.BARD_TEST_DATABASE_URL;
+process.env.DOTENV_CONFIG_PATH = '/dev/null';
+process.env.NODE_ENV = 'test';
+const { pool } = await import('./db.js');
 
 const MCP_SECRET = randomBytes(32).toString('hex');
 const JWT_SECRET = randomBytes(32).toString('hex');
 const SWARMS_WEBHOOK_SECRET = randomBytes(32).toString('hex');
+const testEnv = {
+  PATH: process.env.PATH,
+  HOME: process.env.HOME,
+  DATABASE_URL: process.env.BARD_TEST_DATABASE_URL,
+  DOTENV_CONFIG_PATH: '/dev/null',
+  NODE_ENV: 'test',
+  WALLET_PROVIDER: 'local',
+  WALLET_MASTER_KEY: randomBytes(32).toString('hex'),
+  ARC_TESTNET_RPC: 'http://127.0.0.1:1',
+};
 const createdAgentIds = [];
 const createdAgentNames = [];
 let server;
 let mcpServer;
+let ethosServer;
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -137,6 +153,7 @@ async function cleanup() {
       [createdAgentNames.map((name) => `${name} has been registered on BARD.`)]
     );
   }
+  if (ethosServer) await new Promise(resolve => ethosServer.close(resolve));
   await pool.end();
 }
 
@@ -149,12 +166,19 @@ async function run() {
   const mcpPort = await getFreePort();
   const baseUrl = `http://127.0.0.1:${backendPort}`;
   const mcpUrl = `http://127.0.0.1:${mcpPort}`;
+  ethosServer = createServer((_req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ username: 'test-human', humanVerificationStatus: 'UNVERIFIED', score: 1500 }));
+  });
+  await new Promise(resolve => ethosServer.listen(0, '127.0.0.1', resolve));
   const output = [];
   server = spawn(process.execPath, ['server.js'], {
     cwd: new URL('.', import.meta.url),
     env: {
-      ...process.env,
+      ...testEnv,
       PORT: String(backendPort),
+      BARD_PUBLIC_API_URL: baseUrl,
+      ETHOS_API_BASE: `http://127.0.0.1:${ethosServer.address().port}`,
       NODE_ENV: 'test',
       JWT_SECRET,
       MCP_INTERNAL_SECRET: MCP_SECRET,
@@ -177,7 +201,7 @@ async function run() {
   mcpServer = spawn(process.execPath, ['mcp-server/server.js'], {
     cwd: new URL('..', import.meta.url),
     env: {
-      ...process.env,
+      ...testEnv,
       PORT: String(mcpPort),
       BARD_API: baseUrl,
       MCP_INTERNAL_SECRET: MCP_SECRET,
@@ -208,6 +232,39 @@ async function run() {
   assert.equal(JSON.parse(mcpIdentityText).agentId, agentA.agentId);
   pass('hosted MCP tool succeeds through the real HMAC producer');
 
+  const link = await request(mcpUrl, '/mcp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${agentA.token}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'bard_link_human', arguments: { mode: 'hosted' } } }),
+  });
+  assert.equal(link.data?.result?.isError, undefined, JSON.stringify(link.data));
+  const linkData = JSON.parse(link.data.result.content[0].text);
+  const linkUrl = new URL(linkData.verificationUrl);
+  assert.equal(linkUrl.origin, baseUrl);
+  const browserToken = linkUrl.hash.slice(1);
+  const browserHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${browserToken}` };
+  const browserSession = await request(baseUrl, '/api/human-links/session', { headers: browserHeaders });
+  assert.equal(browserSession.status, 200);
+  assert.equal(browserSession.data.agentId, agentA.agentId);
+  const owner = privateKeyToAccount(generatePrivateKey());
+  const challenge = await request(baseUrl, '/api/human-links/challenge', {
+    method: 'POST', headers: browserHeaders, body: JSON.stringify({ wallet: owner.address, providers: ['ethos'] }),
+  });
+  assert.equal(challenge.status, 200);
+  const signature = await owner.signMessage({ message: challenge.data.message });
+  const completed = await request(baseUrl, '/api/human-links/complete', {
+    method: 'POST', headers: browserHeaders, body: JSON.stringify({ challengeId: challenge.data.challengeId, signature }),
+  });
+  assert.equal(completed.status, 200, JSON.stringify(completed.data));
+  assert.equal(completed.data.links[0].profileLinked, true);
+  assert.equal(completed.data.links[0].humanVerified, false);
+  const tokenMisuse = await request(baseUrl, `/api/agents/${agentA.agentId}/human-link-session`, {
+    method: 'POST', headers: browserHeaders, body: '{}',
+  });
+  assert.equal(tokenMisuse.status, 401);
+  assert.equal((await request(baseUrl, '/verify-human')).status, 200);
+  pass('real hosted MCP creates a browser link that completes without granting agent authority');
+
   const direct = await request(baseUrl, '/api/auth/me', {
     headers: { Authorization: `Bearer ${agentA.token}` },
   });
@@ -226,24 +283,24 @@ async function run() {
   const unauthenticatedUpload = await request(baseUrl, '/api/upload/pfp', {
     method: 'POST',
   });
-  assert.equal(unauthenticatedUpload.status, 401);
-  pass('human uploads require a BARD human session before file parsing');
+  assert.equal(unauthenticatedUpload.status, 410);
+  pass('human uploads stay retired before file parsing');
 
   const directSwarmEstimate = await request(baseUrl, '/api/swarms/estimate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId: agentB.agentId, task: 'test' }),
   });
-  assert.equal(directSwarmEstimate.status, 401);
-  pass('swarm estimate is no longer public');
+  assert.equal(directSwarmEstimate.status, 503);
+  pass('retired swarm estimation stays unavailable even with the legacy flag enabled');
 
   const unsignedWebhook = await request(baseUrl, '/api/swarms/webhook', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ execution_id: 'unknown', status: 'completed' }),
   });
-  assert.equal(unsignedWebhook.status, 401);
-  pass('swarm webhook fails closed without a valid signature');
+  assert.equal(unsignedWebhook.status, 503);
+  pass('retired swarm webhook cannot write a deliverable');
 
   const mePath = '/api/auth/me';
   const validHeaders = mcpHeaders({
@@ -315,9 +372,8 @@ async function run() {
   const delegated = await request(baseUrl, mePath, {
     headers: { Authorization: `Bearer ${delegatedToken}` },
   });
-  assert.equal(delegated.status, 200);
-  assert.equal(delegated.data?.agentId, agentA.agentId);
-  pass('human-agent-session direct frontend delegation still succeeds');
+  assert.equal(delegated.status, 403);
+  pass('retired human-agent-session tokens remain rejected');
 
   const commitmentBody = JSON.stringify({
     agentId: agentB.agentId,

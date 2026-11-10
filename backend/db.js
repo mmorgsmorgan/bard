@@ -15,6 +15,8 @@
 // values before insert/lookup (they already do).
 
 import pg from 'pg';
+import { spendingSchema } from './vcr-spending.js';
+import { humanLinkSchema } from './human-link.js';
 
 const { Pool } = pg;
 
@@ -65,86 +67,6 @@ export async function initSchema() {
   // sent in dependency order. Postgres handles ALTER TABLE ... ADD COLUMN IF NOT
   // EXISTS natively (9.6+), so no try/catch needed for column adds.
   const statements = [
-    // ── profiles ──
-    `CREATE TABLE IF NOT EXISTS profiles (
-      wallet TEXT PRIMARY KEY,
-      username TEXT UNIQUE NOT NULL,
-      display_name TEXT DEFAULT '',
-      bio TEXT DEFAULT '',
-      profile_type TEXT DEFAULT 'human',
-      ecosystems TEXT DEFAULT '[]',
-      farcaster TEXT DEFAULT '',
-      github TEXT DEFAULT '',
-      x TEXT DEFAULT '',
-      discord TEXT DEFAULT '',
-      linkedin TEXT DEFAULT '',
-      pfp TEXT DEFAULT '',
-      created_at TEXT DEFAULT (NOW()::text)
-    )`,
-
-    // ── human accounts ──
-    // Privy proves identity. Email accounts use a BARD-managed wallet; wallet
-    // logins keep the verified external wallet as their primary signer.
-    `CREATE TABLE IF NOT EXISTS human_accounts (
-      id TEXT PRIMARY KEY,
-      privy_did TEXT UNIQUE NOT NULL,
-      email TEXT DEFAULT NULL,
-      email_verified_at TEXT DEFAULT NULL,
-      login_wallet TEXT DEFAULT NULL,
-      wallet_type TEXT DEFAULT NULL,
-      wallet_id TEXT UNIQUE DEFAULT NULL,
-      wallet_address TEXT UNIQUE DEFAULT NULL,
-      legacy_wallet_id TEXT DEFAULT NULL,
-      legacy_wallet_address TEXT DEFAULT NULL,
-      created_at TEXT DEFAULT (NOW()::text),
-      updated_at TEXT DEFAULT (NOW()::text)
-    )`,
-    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS email_verified_at TEXT DEFAULT NULL`,
-    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS wallet_type TEXT DEFAULT NULL`,
-    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS legacy_wallet_id TEXT DEFAULT NULL`,
-    `ALTER TABLE human_accounts ADD COLUMN IF NOT EXISTS legacy_wallet_address TEXT DEFAULT NULL`,
-    `CREATE INDEX IF NOT EXISTS idx_human_accounts_wallet
-       ON human_accounts (LOWER(wallet_address))
-       WHERE wallet_address IS NOT NULL`,
-    `CREATE INDEX IF NOT EXISTS idx_human_accounts_legacy_wallet
-       ON human_accounts (LOWER(legacy_wallet_address))
-       WHERE legacy_wallet_address IS NOT NULL`,
-    `CREATE TABLE IF NOT EXISTS human_otp_codes (
-      id BIGSERIAL PRIMARY KEY,
-      human_id TEXT NOT NULL REFERENCES human_accounts(id),
-      code_hash TEXT NOT NULL,
-      purpose TEXT NOT NULL DEFAULT 'key_export',
-      attempts INTEGER DEFAULT 0,
-      consumed INTEGER DEFAULT 0,
-      expires_at TIMESTAMPTZ NOT NULL,
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )`,
-    `CREATE INDEX IF NOT EXISTS idx_human_otp_active
-       ON human_otp_codes(human_id, purpose, consumed, created_at DESC)`,
-    `CREATE TABLE IF NOT EXISTS human_security_events (
-      id TEXT PRIMARY KEY,
-      human_id TEXT NOT NULL REFERENCES human_accounts(id),
-      wallet_address TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      ip_address TEXT DEFAULT '',
-      user_agent TEXT DEFAULT '',
-      created_at TIMESTAMPTZ DEFAULT NOW()
-    )`,
-    `CREATE INDEX IF NOT EXISTS idx_human_security_events
-       ON human_security_events(human_id, created_at DESC)`,
-    `CREATE TABLE IF NOT EXISTS human_tx_confirmations (
-      tx_hash TEXT NOT NULL,
-      action TEXT NOT NULL,
-      human_id TEXT NOT NULL REFERENCES human_accounts(id),
-      resource_id TEXT DEFAULT '',
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      PRIMARY KEY (tx_hash, action)
-    )`,
-    `ALTER TABLE human_tx_confirmations
-       ADD COLUMN IF NOT EXISTS resource_id TEXT DEFAULT ''`,
-    `CREATE INDEX IF NOT EXISTS idx_human_tx_confirmations_human
-       ON human_tx_confirmations(human_id, created_at DESC)`,
-
     // ── proofs ──
     // Note: file_url and submitted_by are included in initial schema so we no
     // longer need the runtime ALTER TABLE migrations that existed in the old code.
@@ -190,18 +112,6 @@ export async function initSchema() {
       created_at TEXT DEFAULT (NOW()::text)
     )`,
 
-    // ── payments ──
-    // Only place AUTOINCREMENT was used. Postgres equivalent: BIGSERIAL.
-    `CREATE TABLE IF NOT EXISTS payments (
-      id BIGSERIAL PRIMARY KEY,
-      payer TEXT NOT NULL,
-      amount TEXT NOT NULL,
-      network TEXT DEFAULT '',
-      endpoint TEXT DEFAULT '',
-      transaction_id TEXT DEFAULT '',
-      created_at TEXT DEFAULT (NOW()::text)
-    )`,
-
     // ── agents (core reputation table) ──
     `CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
@@ -219,6 +129,7 @@ export async function initSchema() {
       erc8004_minted_at TEXT DEFAULT NULL,
       created_at TEXT DEFAULT (NOW()::text)
     )`,
+    `ALTER TABLE agents ADD COLUMN IF NOT EXISTS ethos_owner_wallet TEXT`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS specializations TEXT DEFAULT '[]'`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS hourly_rate_usdc DOUBLE PRECISION DEFAULT 0`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS availability TEXT DEFAULT 'available'`,
@@ -229,6 +140,7 @@ export async function initSchema() {
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS turnkey_address TEXT DEFAULT NULL`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS swarm_config TEXT DEFAULT NULL`,
     `ALTER TABLE agents ADD COLUMN IF NOT EXISTS is_platform_owned INTEGER DEFAULT 0`,
+    ...humanLinkSchema,
 
     // ── contributions ──
     `CREATE TABLE IF NOT EXISTS contributions (
@@ -338,7 +250,7 @@ export async function initSchema() {
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS submitted_at TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS released_at TEXT`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS swarm_execution_id TEXT`,
-    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selection_mode TEXT DEFAULT 'first_come'`,
+    `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selection_mode TEXT DEFAULT 'proposal'`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS selected_proposal_id TEXT DEFAULT NULL`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS proposal_deadline TEXT DEFAULT NULL`,
     `ALTER TABLE bounties ADD COLUMN IF NOT EXISTS allow_trust_bootstrap INTEGER DEFAULT 0`,
@@ -407,6 +319,8 @@ export async function initSchema() {
       UNIQUE(bounty_id, proposer_agent_id)
     )`,
 
+    `ALTER TABLE bounty_proposals ADD COLUMN IF NOT EXISTS acl_offer JSONB`,
+    spendingSchema,
     // ── bounty_messages (creator <-> proposer thread) ──
     `CREATE TABLE IF NOT EXISTS bounty_messages (
       id TEXT PRIMARY KEY,
@@ -571,8 +485,6 @@ export async function initSchema() {
     `CREATE INDEX IF NOT EXISTS idx_proofs_contributor ON proofs(contributor)`,
     `CREATE INDEX IF NOT EXISTS idx_portfolio_wallet ON portfolio(wallet)`,
     `CREATE INDEX IF NOT EXISTS idx_notifications_wallet ON notifications(wallet)`,
-    `CREATE INDEX IF NOT EXISTS idx_profiles_username ON profiles(username)`,
-    `CREATE INDEX IF NOT EXISTS idx_payments_payer ON payments(payer)`,
     `CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_wallet)`,
     `CREATE INDEX IF NOT EXISTS idx_contributions_agent ON contributions(agent_id)`,
     `CREATE INDEX IF NOT EXISTS idx_contributions_status ON contributions(status)`,
@@ -653,7 +565,7 @@ export async function initSchema() {
 //
 // Call-site shape:
 //   before: stmts.getAgentById.get(id)        → after: await stmts.getAgentById(id)
-//   before: stmts.getAllProfiles.all()        → after: await stmts.getAllProfiles()
+//   before: stmts.getAgentById.get(id)        → after: await stmts.getAgentById(id)
 //   before: stmts.insertAgent.run({id, ...}) → after: await stmts.insertAgent({id, ...})
 //
 // .get()-shaped queries return a single row or undefined.
@@ -661,124 +573,6 @@ export async function initSchema() {
 // .run()-shaped queries return { changes, rowCount }.
 
 export const stmts = {
-  // ── Human accounts ──
-  getHumanAccountById: async (id) => one(
-    'SELECT * FROM human_accounts WHERE id = $1',
-    [id]
-  ),
-  getHumanAccountByPrivyDid: async (privyDid) => one(
-    'SELECT * FROM human_accounts WHERE privy_did = $1',
-    [privyDid]
-  ),
-  getHumanAccountByWallet: async (wallet) => one(
-    'SELECT * FROM human_accounts WHERE LOWER(wallet_address) = LOWER($1)',
-    [wallet]
-  ),
-  insertHumanAccount: async (p) => run(
-    `INSERT INTO human_accounts
-       (id, privy_did, email, email_verified_at, login_wallet, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $6)
-     ON CONFLICT (privy_did) DO UPDATE SET
-       email = COALESCE(EXCLUDED.email, human_accounts.email),
-       email_verified_at = COALESCE(EXCLUDED.email_verified_at, human_accounts.email_verified_at),
-       login_wallet = COALESCE(EXCLUDED.login_wallet, human_accounts.login_wallet),
-       updated_at = EXCLUDED.updated_at`,
-    [
-      p.id,
-      p.privy_did,
-      p.email || null,
-      p.email_verified_at || null,
-      p.login_wallet || null,
-      p.created_at,
-    ]
-  ),
-  attachHumanWallet: async (p) => run(
-    `UPDATE human_accounts
-        SET wallet_id = $1, wallet_address = LOWER($2), updated_at = $3
-      WHERE id = $4 AND wallet_address IS NULL`,
-    [p.wallet_id, p.wallet_address, p.updated_at, p.id]
-  ),
-
-  // ── Profiles ──
-  upsertProfile: async (p) => run(
-    `WITH matched AS (
-       SELECT wallet
-         FROM profiles
-        WHERE LOWER(wallet) = LOWER($1)
-        LIMIT 1
-     ),
-     updated AS (
-       UPDATE profiles AS current
-          SET username = $2,
-              display_name = $3,
-              bio = $4,
-              profile_type = $5,
-              ecosystems = $6,
-              farcaster = $7,
-              github = $8,
-              x = $9,
-              discord = $10,
-              linkedin = $11,
-              pfp = $12
-         FROM matched
-        WHERE current.wallet = matched.wallet
-       RETURNING current.wallet
-     ),
-     inserted AS (
-       INSERT INTO profiles
-         (wallet, username, display_name, bio, profile_type, ecosystems,
-          farcaster, github, x, discord, linkedin, pfp, created_at)
-       SELECT LOWER($1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-        WHERE NOT EXISTS (SELECT 1 FROM updated)
-       ON CONFLICT (wallet) DO UPDATE SET
-         username = EXCLUDED.username,
-         display_name = EXCLUDED.display_name,
-         bio = EXCLUDED.bio,
-         profile_type = EXCLUDED.profile_type,
-         ecosystems = EXCLUDED.ecosystems,
-         farcaster = EXCLUDED.farcaster,
-         github = EXCLUDED.github,
-         x = EXCLUDED.x,
-         discord = EXCLUDED.discord,
-         linkedin = EXCLUDED.linkedin,
-         pfp = EXCLUDED.pfp
-       RETURNING profiles.wallet
-     )
-     SELECT wallet FROM updated
-     UNION ALL
-     SELECT wallet FROM inserted`,
-    [p.wallet, p.username, p.display_name, p.bio, p.profile_type, p.ecosystems, p.farcaster, p.github, p.x, p.discord, p.linkedin, p.pfp, p.created_at]
-  ),
-  getProfileByWallet: async (wallet) => one(
-    'SELECT * FROM profiles WHERE LOWER(wallet) = LOWER($1) LIMIT 1',
-    [wallet]
-  ),
-  getProfileByUsername: async (username) => one(
-    'SELECT * FROM profiles WHERE LOWER(username) = LOWER($1) LIMIT 1',
-    [username]
-  ),
-  getAllProfiles: async () => many('SELECT * FROM profiles ORDER BY created_at DESC'),
-
-  // ── Proofs ──
-  insertProof: async (p) => run(
-    `INSERT INTO proofs (id, title, ecosystem, contribution_type, description, external_links, contributor, status, timestamp)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     ON CONFLICT (id) DO NOTHING`,
-    [p.id, p.title, p.ecosystem, p.contribution_type, p.description, p.external_links, p.contributor, p.status, p.timestamp]
-  ),
-  getProofById: async (id) => one('SELECT * FROM proofs WHERE id = $1', [id]),
-  getProofsByWallet: async (wallet) => many('SELECT * FROM proofs WHERE contributor = $1 ORDER BY timestamp DESC', [wallet]),
-
-  // ── Portfolio ──
-  insertPortfolio: async (p) => run(
-    `INSERT INTO portfolio (id, wallet, title, description, category, image_url, external_link, github_repo, tags, created_at, sort_order)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     ON CONFLICT (id) DO NOTHING`,
-    [p.id, p.wallet, p.title, p.description, p.category, p.image_url, p.external_link, p.github_repo, p.tags, p.created_at, p.sort_order]
-  ),
-  getPortfolioByWallet: async (wallet) => many('SELECT * FROM portfolio WHERE wallet = $1 ORDER BY sort_order ASC', [wallet]),
-  deletePortfolio: async (id) => run('DELETE FROM portfolio WHERE id = $1', [id]),
-  updatePortfolioOrder: async (sortOrder, id) => run('UPDATE portfolio SET sort_order = $1 WHERE id = $2', [sortOrder, id]),
 
   // ── Notifications ──
   insertNotification: async (n) => run(
@@ -787,17 +581,6 @@ export const stmts = {
     [n.id, n.wallet, n.type, n.title, n.message, n.sender, n.amount, n.created_at]
   ),
   getNotificationsByWallet: async (wallet) => many('SELECT * FROM notifications WHERE wallet = $1 ORDER BY created_at DESC LIMIT 50', [wallet]),
-  markRead: async (id) => run('UPDATE notifications SET read = 1 WHERE id = $1', [id]),
-  markAllRead: async (wallet) => run('UPDATE notifications SET read = 1 WHERE wallet = $1', [wallet]),
-
-  // ── Payments ──
-  insertPayment: async (p) => run(
-    `INSERT INTO payments (payer, amount, network, endpoint, transaction_id, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [p.payer, p.amount, p.network, p.endpoint, p.transaction_id, p.created_at]
-  ),
-  getPaymentsByPayer: async (payer) => many('SELECT * FROM payments WHERE payer = $1 ORDER BY created_at DESC LIMIT 50', [payer]),
-  getPaymentStats: async () => one('SELECT COUNT(*) as total_payments, COALESCE(SUM(CAST(amount AS DOUBLE PRECISION)), 0) as total_amount FROM payments'),
 
   // ── Agents ──
   insertAgent: async (p) => run(
@@ -808,12 +591,10 @@ export const stmts = {
   getAgentById: async (id) => one('SELECT * FROM agents WHERE id = $1', [id]),
   getAgentByName: async (name) => one('SELECT * FROM agents WHERE LOWER(agent_name) = LOWER($1) LIMIT 1', [name]),
   getAgentsByOwner: async (owner) => many('SELECT * FROM agents WHERE LOWER(owner_wallet) = LOWER($1) ORDER BY created_at DESC', [owner]),
-  getAllAgents: async (status) => many('SELECT * FROM agents WHERE status = $1 ORDER BY reputation_score DESC', [status]),
   updateAgentReputation: async (score, totalContributions, totalEndorsements, id) => run(
     'UPDATE agents SET reputation_score = $1, total_contributions = $2, total_endorsements = $3 WHERE id = $4',
     [score, totalContributions, totalEndorsements, id]
   ),
-  updateAgentStatus: async (status, id) => run('UPDATE agents SET status = $1 WHERE id = $2', [status, id]),
 
   // ── Contributions ──
   insertContribution: async (p) => run(
@@ -823,20 +604,12 @@ export const stmts = {
   ),
   getContributionById: async (id) => one('SELECT * FROM contributions WHERE id = $1', [id]),
   getContributionsByAgent: async (agentId) => many('SELECT * FROM contributions WHERE agent_id = $1 ORDER BY created_at DESC', [agentId]),
-  getContributionsByStatus: async (status) => many('SELECT * FROM contributions WHERE status = $1 ORDER BY created_at DESC LIMIT 50', [status]),
   getRecentContributions: async (limit) => many(
     'SELECT c.*, a.agent_name, a.owner_wallet FROM contributions c JOIN agents a ON c.agent_id = a.id ORDER BY c.created_at DESC LIMIT $1',
     [limit]
   ),
-  updateContributionStatus: async (status, id) => run('UPDATE contributions SET status = $1 WHERE id = $2', [status, id]),
-  incrementEndorsementCount: async (id) => run('UPDATE contributions SET endorsement_count = endorsement_count + 1 WHERE id = $1', [id]),
 
   // ── Endorsements ──
-  insertEndorsement: async (p) => run(
-    `INSERT INTO endorsements (id, contribution_id, endorser_wallet, endorser_type, comment, signature, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [p.id, p.contribution_id, p.endorser_wallet, p.endorser_type, p.comment, p.signature, p.created_at]
-  ),
   getEndorsementsByContribution: async (contributionId) => many(
     'SELECT * FROM endorsements WHERE contribution_id = $1 ORDER BY created_at DESC',
     [contributionId]
@@ -849,10 +622,6 @@ export const stmts = {
      WHERE e.endorser_wallet = $1
      ORDER BY e.created_at DESC LIMIT 50`,
     [wallet]
-  ),
-  countEndorsementsByContribution: async (contributionId) => one(
-    'SELECT COUNT(*) as count FROM endorsements WHERE contribution_id = $1',
-    [contributionId]
   ),
 
   // ── Agent State ──
@@ -884,12 +653,6 @@ export const stmts = {
   ),
 
   // ── Record Board ──
-  insertRecord: async (p) => run(
-    `INSERT INTO recorded_contributions (id, contribution_id, agent_id, content_hash, tx_hash, recorded_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (contribution_id) DO NOTHING`,
-    [p.id, p.contribution_id, p.agent_id, p.content_hash, p.tx_hash, p.recorded_at]
-  ),
   getRecordByContribution: async (contributionId) => one(
     'SELECT * FROM recorded_contributions WHERE contribution_id = $1',
     [contributionId]
@@ -911,7 +674,7 @@ export const stmts = {
       p.id, p.creator_wallet, p.title, p.description, p.bounty_type, p.amount_usdc, p.deadline,
       p.min_reputation, p.acceptance_criteria || '[]', p.created_at, p.updated_at,
       p.status || 'open',
-      p.selection_mode || 'first_come',
+      p.selection_mode || 'proposal',
       p.proposal_deadline || null,
       p.escrow_status || 'none',
       p.allow_trust_bootstrap ? 1 : 0,
@@ -957,52 +720,8 @@ export const stmts = {
     'SELECT * FROM bounties WHERE assigned_agent_id = $1 ORDER BY created_at DESC',
     [agentId]
   ),
-  countActiveTrustBootstrapUses: async (ownerWallet) => one(
-    `SELECT COUNT(*) AS count
-       FROM agent_trust_bootstrap_uses u
-       JOIN bounties b ON b.id = u.bounty_id
-      WHERE LOWER(u.owner_wallet) = LOWER($1)
-        AND (
-          (u.mode = 'claim' AND b.status IN ('assigned', 'submitted', 'verified'))
-          OR
-          (u.mode = 'proposal' AND EXISTS (
-            SELECT 1
-              FROM bounty_proposals p
-             WHERE p.bounty_id = u.bounty_id
-               AND p.proposer_agent_id = u.agent_id
-               AND p.status IN ('pending', 'accepted')
-          ))
-        )`,
-    [ownerWallet]
-  ),
-  insertTrustBootstrapUse: async (p) => run(
-    `INSERT INTO agent_trust_bootstrap_uses (id, owner_wallet, agent_id, bounty_id, mode, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (owner_wallet, bounty_id) DO NOTHING`,
-    [p.id, p.owner_wallet, p.agent_id, p.bounty_id, p.mode, p.created_at]
-  ),
-  updateBountyStatus: async (p) => run(
-    'UPDATE bounties SET status = $1, updated_at = $2 WHERE id = $3',
-    [p.status, p.updated_at, p.id]
-  ),
-  assignBounty: async (p) => run(
-    'UPDATE bounties SET assigned_agent_id = $1, status = $2, updated_at = $3 WHERE id = $4',
-    [p.agent_id, p.status, p.updated_at, p.id]
-  ),
-  completeBounty: async (p) => run(
-    'UPDATE bounties SET contribution_id = $1, status = $2, updated_at = $3 WHERE id = $4',
-    [p.contribution_id, p.status, p.updated_at, p.id]
-  ),
 
   // ── Escrow lifecycle ──
-  updateBountyEscrow: async (p) => run(
-    `UPDATE bounties SET escrow_status = $1, escrow_budget_usdc = $2, escrow_tx_hash = $3, expires_at = $4, updated_at = $5 WHERE id = $6`,
-    [p.escrow_status, p.escrow_budget_usdc, p.escrow_tx_hash, p.expires_at, p.updated_at, p.id]
-  ),
-  claimBountyEscrow: async (p) => run(
-    `UPDATE bounties SET provider_agent_id = $1, provider_wallet = $2, escrow_status = 'claimed', status = 'assigned', claimed_at = $3, updated_at = $4 WHERE id = $5`,
-    [p.provider_agent_id, p.provider_wallet, p.claimed_at, p.updated_at, p.id]
-  ),
   submitBountyDeliverable: async (p) => run(
     `UPDATE bounties
         SET deliverable_hash = $1,
@@ -1018,7 +737,7 @@ export const stmts = {
             status = 'submitted',
             submitted_at = $8,
             updated_at = $9
-      WHERE id = $10`,
+      WHERE id = $10 AND escrow_status IN ('claimed', 'submitted')`,
     [
       p.deliverable_hash,
       p.deliverable_content,
@@ -1035,23 +754,6 @@ export const stmts = {
   clientReviewBounty: async (p) => run(
     `UPDATE bounties SET client_decision = $1, client_decision_at = $2, escrow_status = $3, updated_at = $4 WHERE id = $5`,
     [p.client_decision, p.client_decision_at, p.escrow_status, p.updated_at, p.id]
-  ),
-  verifyBountyEscrow: async (p) => run(
-    `UPDATE bounties SET verifier_wallet = $1, verifier_decision = $2, verifier_reason = $3, escrow_status = $4, updated_at = $5 WHERE id = $6`,
-    [p.verifier_wallet, p.verifier_decision, p.verifier_reason, p.escrow_status, p.updated_at, p.id]
-  ),
-  releaseBountyEscrow: async (p) => run(
-    `UPDATE bounties SET release_tx_hash = $1, escrow_status = 'released', status = 'completed', released_at = $2, updated_at = $3 WHERE id = $4`,
-    [p.release_tx_hash, p.released_at, p.updated_at, p.id]
-  ),
-  refundBountyEscrow: async (p) => run(
-    `UPDATE bounties
-        SET refund_tx_hash = $1,
-            escrow_status = 'refunded',
-            status = 'cancelled',
-            updated_at = $2
-      WHERE id = $3`,
-    [p.refund_tx_hash, p.updated_at, p.id]
   ),
   incrementBountyRevision: async (p) => run(
     `UPDATE bounties
@@ -1071,10 +773,6 @@ export const stmts = {
             updated_at = $1
       WHERE id = $2`,
     [p.updated_at, p.id]
-  ),
-  getFundedBounties: async (limit) => many(
-    "SELECT * FROM bounties WHERE escrow_status = 'funded' ORDER BY created_at DESC LIMIT $1",
-    [limit]
   ),
   getMarketplaceBounties: async (limit) => many(
     `SELECT * FROM bounties
@@ -1101,11 +799,6 @@ export const stmts = {
   ),
 
   // ── Verification decisions ──
-  insertVerificationDecision: async (p) => run(
-    `INSERT INTO verification_decisions (id, bounty_id, verifier_wallet, verifier_type, decision, reasoning, reasoning_hash, stage, tx_hash, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [p.id, p.bounty_id, p.verifier_wallet, p.verifier_type, p.decision, p.reasoning, p.reasoning_hash, p.stage, p.tx_hash, p.created_at]
-  ),
   getVerificationDecisions: async (bountyId) => many(
     'SELECT * FROM verification_decisions WHERE bounty_id = $1 ORDER BY created_at DESC',
     [bountyId]
@@ -1146,10 +839,6 @@ export const stmts = {
      WHERE s.status = 'active' AND a.status = 'active' AND s.category = $1
      ORDER BY a.reputation_score DESC LIMIT $2`,
     [category, limit]
-  ),
-  incrementSkillCompletions: async (amount, agentId, status) => run(
-    'UPDATE agent_skills SET total_completions = total_completions + 1, total_earned_usdc = total_earned_usdc + $1 WHERE agent_id = $2 AND status = $3',
-    [amount, agentId, status]
   ),
 
   // ── Auth ──
@@ -1220,9 +909,9 @@ export const stmts = {
 
   // ── Bounty proposals (hybrid mode) ──
   insertProposal: async (p) => run(
-    `INSERT INTO bounty_proposals (id, bounty_id, proposer_agent_id, proposer_wallet, plan, proposed_price_usdc, estimated_hours, portfolio_refs, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-    [p.id, p.bounty_id, p.proposer_agent_id, p.proposer_wallet, p.plan, p.proposed_price_usdc, p.estimated_hours || 0, p.portfolio_refs || '[]', p.created_at, p.updated_at]
+    `INSERT INTO bounty_proposals (id, bounty_id, proposer_agent_id, proposer_wallet, plan, proposed_price_usdc, estimated_hours, portfolio_refs, created_at, updated_at, acl_offer)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [p.id, p.bounty_id, p.proposer_agent_id, p.proposer_wallet, p.plan, p.proposed_price_usdc, p.estimated_hours || 0, p.portfolio_refs || '[]', p.created_at, p.updated_at, p.acl_offer || null]
   ),
   getProposalById: async (id) => one('SELECT * FROM bounty_proposals WHERE id = $1', [id]),
   getProposalsByBounty: async (bountyId) => many(
@@ -1248,25 +937,17 @@ export const stmts = {
   ),
   updateProposal: async (p) => run(
     `UPDATE bounty_proposals
-     SET plan = $1, proposed_price_usdc = $2, estimated_hours = $3, portfolio_refs = $4, updated_at = $5
+     SET plan = $1, proposed_price_usdc = $2, estimated_hours = $3, portfolio_refs = $4, updated_at = $5, acl_offer = $7
      WHERE id = $6 AND status = 'pending'`,
-    [p.plan, p.proposed_price_usdc, p.estimated_hours || 0, p.portfolio_refs || '[]', p.updated_at, p.id]
+    [p.plan, p.proposed_price_usdc, p.estimated_hours || 0, p.portfolio_refs || '[]', p.updated_at, p.id, p.acl_offer || null]
   ),
   withdrawProposal: async (p) => run(
     `UPDATE bounty_proposals SET status = 'withdrawn', withdrawn_at = $1, updated_at = $1 WHERE id = $2 AND status = 'pending'`,
     [p.withdrawn_at, p.id]
   ),
-  acceptProposal: async (p) => run(
-    `UPDATE bounty_proposals SET status = 'accepted', accepted_at = $1, updated_at = $1 WHERE id = $2 AND status = 'pending'`,
-    [p.accepted_at, p.id]
-  ),
   rejectProposal: async (p) => run(
     `UPDATE bounty_proposals SET status = 'rejected', rejected_at = $1, rejection_reason = $2, updated_at = $1 WHERE id = $3 AND status IN ('pending', 'accepted')`,
     [p.rejected_at, p.rejection_reason || '', p.id]
-  ),
-  setBountySelectedProposal: async (p) => run(
-    `UPDATE bounties SET selected_proposal_id = $1, status = $2, amount_usdc = $3, updated_at = $4 WHERE id = $5`,
-    [p.selected_proposal_id, p.status, p.amount_usdc, p.updated_at, p.id]
   ),
 
   // ── Bounty messages (creator <-> proposer threads) ──

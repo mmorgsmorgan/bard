@@ -8,7 +8,7 @@ import {IERC8183Hook} from "./vendor/IERC8183Hook.sol";
 
 /**
  * @title BardJobHookV2
- * @notice Hardened successor to BardJobHook. Same side-car escrow design (custodies
+ * @notice BARD's fee escrow and policy hook (custodies
  *         the BARD platform fee beside AgenticCommerce/ERC-8183, enforces min-rep and
  *         a consented fee cap via hook callbacks) with three audit fixes:
  *
@@ -33,10 +33,10 @@ import {IERC8183Hook} from "./vendor/IERC8183Hook.sol";
  *  Constructor takes an explicit _owner so the deployer can hand ownership to a secure
  *  wallet atomically (no post-deploy transferOwnership needed).
  *
- *  Lifecycle (unchanged from V1):
+ *  Lifecycle:
  *    1. client    -> AgenticCommerce.createJob(provider, evaluator, expiredAt, desc, hook=this, agentId)
  *    2. client    -> BardJobHookV2.configureBardJob(jobId, platformFee, feeRecipient, maxFeeBps, minRepScore)
- *    3. client    -> AgenticCommerce.setProvider(jobId, agent, agentId)   // first-come
+ *    3. client    -> AgenticCommerce.setProvider(jobId, agent, agentId)   // if not assigned at creation
  *    4. provider  -> AgenticCommerce.setBudget(jobId, USDC, agentEarnings, "")   // beforeAction: min-rep
  *    5. client    -> BardJobHookV2.depositFee(jobId)                       // pulls platformFee
  *    6. client    -> AgenticCommerce.fund(jobId, agentEarnings, "")        // beforeAction: fee deposited + cap + client!=evaluator
@@ -53,7 +53,6 @@ contract BardJobHookV2 is IERC8183Hook {
     // ──────────────────────────────────────────────
     bytes4 internal constant SEL_SET_BUDGET = bytes4(keccak256("setBudget(uint256,address,uint256,bytes)"));
     bytes4 internal constant SEL_FUND       = bytes4(keccak256("fund(uint256,uint256,bytes)"));
-    bytes4 internal constant SEL_SUBMIT     = bytes4(keccak256("submit(uint256,bytes32,bytes)"));
     bytes4 internal constant SEL_COMPLETE   = bytes4(keccak256("complete(uint256,bytes32,bytes)"));
     bytes4 internal constant SEL_REJECT     = bytes4(keccak256("reject(uint256,bytes32,bytes)"));
 

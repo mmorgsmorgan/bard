@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 
 const wallet = '0x1111111111111111111111111111111111111111';
+let requests = 0;
 const routes = new Map([
   ['GET /api/auth/me', {
     agentId: 'agent-test',
@@ -44,6 +45,7 @@ const routes = new Map([
 ]);
 
 const server = http.createServer((req, res) => {
+  requests++;
   assert.equal(req.headers.authorization, 'Bearer test-token');
   const key = `${req.method} ${req.url}`;
   const fixture = routes.get(key);
@@ -64,7 +66,7 @@ process.env.BARD_API = `http://127.0.0.1:${address.port}`;
 try {
   const { TOOLS, handleRpc } = await import('./index.js');
   const names = TOOLS.map(tool => tool.name);
-  assert.equal(names.length, 45);
+  assert.equal(names.includes('bard_hire_swarm_agent'), false);
   assert.equal(new Set(names).size, names.length);
   assert.ok(names.includes('bard_get_wallet_balance'));
   assert.ok(names.includes('bard_get_bounty'));
@@ -78,6 +80,11 @@ try {
     }, 'test-token');
     return JSON.parse(response.result.content[0].text);
   };
+
+  const beforeRetiredCall = requests;
+  const retired = await call('bard_hire_swarm_agent', { agentId: 'agent-test', task: 'obsolete', budgetUsdc: 1 });
+  assert.match(retired.error, /Unknown tool/);
+  assert.equal(requests, beforeRetiredCall, 'an old swarm call must not create or fund a bounty');
 
   const balance = await call('bard_get_wallet_balance');
   assert.equal(balance.success, true);
@@ -100,7 +107,7 @@ try {
   assert.equal(pendingDeliver.pending, true);
   assert.equal(pendingDeliver.txHash, '0xpending-deliver');
 
-  console.log('mcp-observability-tools: 14/14 passed');
+  console.log('MCP discovery, retired-tool rejection, balances and pending transaction checks passed.');
 } finally {
   await new Promise(resolve => server.close(resolve));
 }

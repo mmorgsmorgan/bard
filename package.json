@@ -4,6 +4,14 @@
   "version": "0.1.0",
   "description": "BARD — Agent reputation + bounty marketplace platform",
   "type": "module",
+  "scripts": {
+    "test": "npm test --workspaces --if-present"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "^8.5.23"
+    }
+  },
   "workspaces": [
     "shared/mcp",
     "backend",
@@ -14,6 +22,6 @@
     "sdk"
   ],
   "engines": {
-    "node": ">=20 <21"
+    "node": "24.x"
   }
 }

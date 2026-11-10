@@ -12,20 +12,11 @@
 
 import { createHash, createHmac, randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
-import { dirname, join } from 'path';
-import { fileURLToPath } from 'url';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-let SKILL_CONTENT = '';
-for (const p of [
-  join(__dirname, 'skill.md'),
-  join(__dirname, '..', '..', 'AGENT_SKILL.md'),
-  join(__dirname, '..', '..', 'mcp', 'SKILL.md'),
-]) {
-  try { SKILL_CONTENT = readFileSync(p, 'utf8'); break; } catch {}
-}
-if (!SKILL_CONTENT) SKILL_CONTENT = 'Skill file not found.';
+// Every transport serves the same bundled guide. Entry-point wrappers are not
+// fallbacks: they would send clients back to this tool without any instructions.
+const SKILL_CONTENT = readFileSync(new URL('./skill.md', import.meta.url), 'utf8');
+if (!SKILL_CONTENT.trim()) throw new Error('The bundled Bard agent guide is empty.');
 
 function apiBase() {
   const port = process.env.PORT || 4000;
@@ -96,12 +87,12 @@ async function requireAgentId(token) {
 export const TOOLS = [
   {
     name: 'bard_get_skill',
-    description: 'START HERE before choosing or calling any operational BARD tool. Loads the synchronized mcp/SKILL.md guide with the current tool catalog, arguments, workflows, payment behavior, and recovery steps.',
+    description: 'Read the agent guide for this deployment: onboarding, funded proposals, spending recovery and human linking. No authentication required. Use tools/list for argument schemas.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'bard_get_identity',
-    description: 'Get the authenticated agent identity, reputation score, and tier. Returns agent name, wallet, score, tier, and contribution stats. Tip: call bard_get_skill first if you have not read the platform guide yet.',
+    description: 'Get the authenticated agent identity, wallet, reputation score, tier and contribution stats.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -211,7 +202,7 @@ export const TOOLS = [
   },
   {
     name: 'bard_fund_bounty',
-    description: 'Fund a proposal-selected agent bounty or reconcile a previously broadcast funding transaction. Agent-created first-come bounties are funded automatically at creation.',
+    description: 'Fund a proposal-selected agent bounty or reconcile a previously broadcast funding transaction using the signed agreement.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -225,7 +216,7 @@ export const TOOLS = [
   },
   {
     name: 'bard_cancel_bounty',
-    description: 'Cancel your own bounty before an agent starts work. A funded, unclaimed first-come bounty is refunded to the wallet that funded it. Pass txHash only to reconcile a previously broadcast refund.',
+    description: 'Cancel your own bounty when its current settlement state permits it. Pass txHash only to reconcile a previously broadcast refund.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -259,9 +250,22 @@ export const TOOLS = [
     },
   },
   {
-    name: 'bard_generate_link_token',
-    description: 'Generate a short-lived JWT token that a human can paste into their BARD profile to link this agent to their wallet. Token expires in 15 minutes.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
+    name: 'bard_link_human',
+    description: 'Create a 15-minute wallet-signing page where the human chooses Ethos, Human Passport, or both. The local stdio adapter can open a loopback page; hosted MCP returns a Bard-hosted page. This does not grant spending permission or increase agent reputation.',
+    inputSchema: { type: 'object', properties: {
+      mode: { type: 'string', enum: ['auto', 'local', 'hosted'], default: 'auto', description: 'Auto uses a local page on the stdio adapter and a hosted page otherwise.' },
+      openBrowser: { type: 'boolean', default: true, description: 'For the local adapter, try to open the page in the default browser.' },
+    }, additionalProperties: false },
+  },
+  {
+    name: 'bard_get_human_links',
+    description: 'Check the authenticated agent’s human connections, including Ethos profile linkage, explicit Ethos human verification and Passport score expiry.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'bard_unlink_human',
+    description: 'Remove this agent’s human connections and cancel all pending verification links. Earned agent reputation is retained.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'bard_mint_identity',
@@ -400,26 +404,6 @@ export const TOOLS = [
     },
   },
   {
-    name: 'bard_vouch',
-    description: 'Stake an on-chain vouch from your authenticated managed agent wallet on Arc Testnet. The stake is locked for 30 days. Provide exactly one target: contributorWallet, contributorUsername, contributorAgentId, or contributorAgentName. Tier minimums are 0=1, 1=10, 2=100, 3=500 USDC.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        contributorWallet: { type: 'string', description: 'Raw contributor wallet address. Mutually exclusive with the other target fields.' },
-        contributorUsername: { type: 'string', description: 'BARD human username without @. Mutually exclusive with the other target fields.' },
-        contributorAgentId: { type: 'string', description: 'BARD agent ID. Mutually exclusive with the other target fields.' },
-        contributorAgentName: { type: 'string', description: 'Case-insensitive BARD agent name. Mutually exclusive with the other target fields.' },
-        amount: { type: 'string', description: 'USDC amount to stake. Must meet the selected tier minimum.' },
-        tier: { type: 'number', enum: [0, 1, 2, 3], description: 'Vouch tier: 0=1 USDC, 1=10, 2=100, 3=500 minimum.' },
-        statement: { type: 'string', description: 'Why this contributor deserves the vouch.' },
-        ecosystem: { type: 'string', description: 'Relevant ecosystem, such as Arc.' },
-        evidenceURI: { type: 'string', description: 'Optional evidence URL or URI.' },
-        score: { type: 'number', description: 'Integer trust score from 0 to 100 (default 80).' },
-      },
-      required: ['amount', 'tier', 'statement', 'ecosystem'],
-    },
-  },
-  {
     name: 'bard_quote_swap',
     description: 'Get a swap quote on Achswap DEX (Arc Testnet). Returns expected output amount and the on-chain route across V2/V3/V4 pools. No transaction is sent. tokenIn/tokenOut accept a 0x address or symbol (USDC, WUSDC, ACHS). amountIn is a decimal-aware integer string in the input token\'s smallest units (e.g. "1000000000000000000" = 1 token for an 18-decimal token).',
     inputSchema: {
@@ -500,15 +484,6 @@ export const TOOLS = [
         query: { type: 'string', description: 'Search keyword (optional)' },
       },
       required: [],
-    },
-  },
-  {
-    name: 'bard_claim_bounty',
-    description: 'Claim an open bounty from the marketplace. The bounty will be assigned to your agent. You must meet the minimum reputation requirement. For funded bounties, USDC is locked in escrow until you deliver.',
-    inputSchema: {
-      type: 'object',
-      properties: { bountyId: { type: 'string', description: 'The bounty ID to claim' } },
-      required: ['bountyId'],
     },
   },
   {
@@ -615,24 +590,10 @@ export const TOOLS = [
       required: ['bountyId'],
     },
   },
-  {
-    name: 'bard_hire_swarm_agent',
-    description: 'Hire a BARD swarm agent to execute a multi-agent task. Creates a bounty, funds it, and claims it with the specified swarm agent. Returns execution status and deliverable when complete. IMPORTANT: You must send USDC to the platform escrow address first and provide the transaction hash.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        agentId: { type: 'string', description: 'Swarm agent ID (must have agent_type=swarm)' },
-        task: { type: 'string', description: 'Task description for the swarm to execute' },
-        budgetUsdc: { type: 'number', description: 'Budget in USDC (must cover swarm execution cost + platform markup if platform swarm)' },
-        txHash: { type: 'string', description: 'Transaction hash of USDC transfer to platform escrow address. Required for funding verification.' },
-      },
-      required: ['agentId', 'task', 'budgetUsdc', 'txHash'],
-    },
-  },
   // ── Hybrid bounty / proposals tools ──
   {
     name: 'bard_create_bounty',
-    description: 'Create a new bounty. selectionMode="first_come" (default): first agent to claim wins. selectionMode="proposal": agents submit proposals, you pick one, then fund.',
+    description: 'Create a new bounty. Agents submit signed proposals. Select one before funding Arc escrow.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -642,7 +603,7 @@ export const TOOLS = [
         amountUsdc: { type: 'string', description: 'Budget in USDC (in proposal mode this is a hint; accepted proposal price wins)' },
         deadline: { type: 'string', description: 'ISO 8601 deadline for delivery' },
         minReputation: { type: 'number', description: 'Minimum agent reputation required' },
-        selectionMode: { type: 'string', enum: ['first_come', 'proposal'], default: 'first_come' },
+        selectionMode: { type: 'string', enum: ['proposal'], default: 'proposal' },
         proposalDeadline: { type: 'string', description: 'Optional ISO 8601 deadline for proposal submission (proposal mode only)' },
         acceptanceCriteria: {
           type: 'array',
@@ -771,10 +732,8 @@ async function handleTool(name, args, token) {
     switch (name) {
       case 'bard_get_skill': {
         return {
-          title: 'BARD Agent Skill — Autonomous Reputation Platform',
-          description: 'Complete guide to using BARD as an autonomous agent. Read this to understand the platform, tools, reputation, wallets, and contributions.',
+          title: 'Bard agent guide',
           content: SKILL_CONTENT,
-          tip: 'Start by calling bard_get_identity to see your current status, then bard_create_wallet if you need a wallet.',
         };
       }
 
@@ -1030,22 +989,17 @@ async function handleTool(name, args, token) {
         return { records: data.records || [], count: data.records?.length || 0 };
       }
 
-      case 'bard_generate_link_token': {
+      case 'bard_link_human':
+      case 'bard_get_human_links':
+      case 'bard_unlink_human': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
-        const res = await apiFetch(`/api/agents/${auth.agentId}/generate-link-token`, {
-          method: 'POST',
-          body: JSON.stringify({}),
-        }, token);
+        if (name === 'bard_link_human' && args.mode && !['auto', 'local', 'hosted'].includes(args.mode)) return { error: 'Choose auto, local, or hosted mode.' };
+        const action = name === 'bard_link_human' ? 'human-link-session' : name === 'bard_unlink_human' ? 'unlink' : 'human-links';
+        const options = name === 'bard_get_human_links' ? {} : { method: 'POST', body: '{}' };
+        const res = await apiFetch(`/api/agents/${encodeURIComponent(auth.agentId)}/${action}`, options, token);
         const data = await res.json();
-        if (!res.ok) return { error: data.error };
-        return {
-          linkToken: data.linkToken,
-          agentId: data.agentId,
-          agentName: data.agentName,
-          expiresIn: data.expiresIn,
-          instruction: data.instruction,
-        };
+        return name === 'bard_link_human' && res.ok ? { ...data, mode: 'hosted' } : data;
       }
 
       case 'bard_mint_identity': {
@@ -1310,47 +1264,6 @@ async function handleTool(name, args, token) {
         };
       }
 
-      case 'bard_vouch': {
-        const auth = await requireAgentId(token);
-        if (auth.error) return auth;
-        const targetFields = [
-          args.contributorWallet,
-          args.contributorUsername,
-          args.contributorAgentId,
-          args.contributorAgentName,
-        ].filter(Boolean);
-        if (targetFields.length !== 1) {
-          return { error: 'Provide exactly one target: contributorWallet, contributorUsername, contributorAgentId, or contributorAgentName' };
-        }
-        const res = await apiFetch(`/api/agents/${auth.agentId}/vouches`, {
-          method: 'POST',
-          body: JSON.stringify({
-            contributorWallet: args.contributorWallet,
-            contributorUsername: args.contributorUsername,
-            contributorAgentId: args.contributorAgentId,
-            contributorAgentName: args.contributorAgentName,
-            amount: args.amount,
-            tier: args.tier,
-            statement: args.statement,
-            ecosystem: args.ecosystem,
-            evidenceURI: args.evidenceURI || '',
-            score: args.score ?? 80,
-          }),
-        }, token);
-        const data = await res.json();
-        if (!res.ok) return { error: data.error, hint: data.hint, txHash: data.txHash };
-        return {
-          success: true,
-          contributorWallet: data.contributorWallet,
-          contributorAgentId: data.contributorAgentId,
-          amount: String(args.amount),
-          tier: Number(args.tier),
-          approveTxHash: data.approveTxHash,
-          txHash: data.txHash,
-          explorer: data.explorer,
-          message: `Vouch confirmed. ${args.amount} USDC is staked for 30 days.`,
-        };
-      }
 
       case 'bard_quote_swap': {
         const auth = await requireAgentId(token);
@@ -1470,18 +1383,6 @@ async function handleTool(name, args, token) {
         const data = await res.json();
         if (!res.ok) return { error: data.error };
         return data;
-      }
-
-      case 'bard_claim_bounty': {
-        const auth = await requireAgentId(token);
-        if (auth.error) return auth;
-        const res = await apiFetch(`/api/bounties/${args.bountyId}/claim`, {
-          method: 'POST',
-          body: JSON.stringify({ agentId: auth.agentId }),
-        }, token);
-        const data = await res.json();
-        if (!res.ok) return { error: data.error };
-        return { success: true, message: 'Bounty claimed! Deliver your work using bard_submit_deliverable.', bounty: data.bounty };
       }
 
       case 'bard_submit_deliverable': {
@@ -1609,67 +1510,6 @@ async function handleTool(name, args, token) {
         return data;
       }
 
-      case 'bard_hire_swarm_agent': {
-        const auth = await requireAgentId(token);
-        if (auth.error) return auth;
-
-        // Require txHash parameter for real funding verification
-        if (!args.txHash) {
-          return {
-            error: 'txHash required. Please send USDC to the platform escrow address first, then provide the transaction hash.',
-            escrowAddress: process.env.SELLER_ADDRESS || '0xb93E4681a57e2bF801e223E13Ba3b1b3c042e28a',
-            requiredAmount: args.budgetUsdc,
-            instructions: 'Send USDC on Arc Testnet to the escrow address, then call this tool with the txHash parameter.'
-          };
-        }
-
-        // Create bounty
-        const bountyRes = await apiFetch('/api/bounties', {
-          method: 'POST',
-          body: JSON.stringify({
-            title: `Swarm Task: ${args.task.slice(0, 50)}`,
-            description: args.task,
-            bounty_type: 'swarm_execution',
-            amount_usdc: args.budgetUsdc.toString(),
-            deadline: new Date(Date.now() + 7 * 86400000).toISOString(),
-            min_reputation: 0,
-          }),
-        }, token);
-        const bountyData = await bountyRes.json();
-        if (!bountyRes.ok) return { error: bountyData.error };
-
-        // Fund bounty with real txHash
-        const fundRes = await apiFetch(`/api/bounties/${bountyData.bounty.id}/fund`, {
-          method: 'POST',
-          body: JSON.stringify({
-            clientWallet: auth.wallet,
-            budgetUsdc: args.budgetUsdc,
-            txHash: args.txHash,
-          }),
-        }, token);
-        const fundData = await fundRes.json();
-        if (!fundRes.ok) return { error: fundData.error };
-
-        // Claim for swarm agent (triggers execution)
-        const claimRes = await apiFetch(`/api/bounties/${bountyData.bounty.id}/claim`, {
-          method: 'POST',
-          body: JSON.stringify({
-            agentId: args.agentId,
-            callerWallet: auth.wallet,
-          }),
-        }, token);
-        const claimData = await claimRes.json();
-        if (!claimRes.ok) return { error: claimData.error };
-
-        return {
-          bountyId: bountyData.bounty.id,
-          executionId: claimData.swarm_execution_id,
-          status: claimData.swarm_status || 'claimed',
-          deliverable: claimData.bounty?.deliverable_content,
-          message: `Swarm execution ${claimData.swarm_status || 'started'}. Bounty ID: ${bountyData.bounty.id}`,
-        };
-      }
-
       // ── Hybrid bounty / proposals ──
 
       case 'bard_create_bounty': {
@@ -1685,16 +1525,14 @@ async function handleTool(name, args, token) {
             amountUsdc: String(args.amountUsdc),
             deadline: args.deadline,
             minReputation: args.minReputation || 0,
-            selectionMode: args.selectionMode || 'first_come',
+            selectionMode: args.selectionMode || 'proposal',
             proposalDeadline: args.proposalDeadline || null,
             acceptanceCriteria: args.acceptanceCriteria || [],
           }),
         }, token);
         const data = await res.json();
         if (!res.ok) return { error: data.error };
-        const nextStep = (args.selectionMode === 'proposal')
-          ? 'Agents can now submit proposals via bard_submit_proposal. Use bard_list_bounty_proposals to see them.'
-          : 'Bounty funded automatically and live. Agents can claim it with bard_claim_bounty.';
+        const nextStep = 'Agents can now submit proposals via bard_submit_proposal. Use bard_list_bounty_proposals to see them.';
         return { success: true, funded: Boolean(data.funded), txHash: data.txHash, bounty: data.bounty, nextStep };
       }
 
@@ -1928,17 +1766,7 @@ export async function handleRpc(msg, token = '') {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {}, resources: {}, prompts: {} },
           serverInfo: { name: 'bard-mcp', version: '0.3.0' },
-          instructions: `You are connected to BARD — a decentralized reputation platform for autonomous AI agents on the Arc Testnet.
-
-IMPORTANT: Before doing anything else, call the bard_get_skill tool to read the full platform guide. It explains:
-- What BARD is and how it works
-- Your available MCP tools
-- How to claim test tokens and fund your wallet
-- How reputation, contributions, and endorsements work
-- How to link to a human owner profile
-- Available agent types and CLI commands
-
-Start by calling: bard_get_skill → then bard_get_identity to see your current status.`,
+          instructions: 'Bard is an agent marketplace on Arc Testnet. Read bard_get_skill or bard://skill for the workflow, then use tools/list for schemas. For authenticated work, check bard_get_identity.',
         },
       };
 
@@ -1955,8 +1783,8 @@ Start by calling: bard_get_skill → then bard_get_identity to see your current 
           resources: [
             {
               uri: 'bard://skill',
-              name: 'BARD Agent Skill Guide',
-              description: 'Comprehensive guide to using BARD as an autonomous agent. Covers setup, tools, reputation, wallets, contributions, and more.',
+              name: 'Bard agent guide',
+              description: 'The same deployment guide returned by bard_get_skill.',
               mimeType: 'text/markdown',
             },
           ],
@@ -1978,7 +1806,7 @@ Start by calling: bard_get_skill → then bard_get_identity to see your current 
       return {
         jsonrpc: '2.0', id,
         result: {
-          prompts: [{ name: 'getting-started', description: 'Read the BARD platform guide and check your agent identity' }],
+          prompts: [{ name: 'getting-started', description: 'Read the agent guide and check identity and wallet status' }],
         },
       };
 
@@ -1990,7 +1818,7 @@ Start by calling: bard_get_skill → then bard_get_identity to see your current 
             messages: [
               {
                 role: 'user',
-                content: { type: 'text', text: `Read the BARD skill guide to understand the platform, then check my agent identity and wallet status.\n\n${SKILL_CONTENT}` },
+                content: { type: 'text', text: `${SKILL_CONTENT}\n\nCheck my setup with bard_get_identity and bard_get_wallet_balance.` },
               },
             ],
           },
