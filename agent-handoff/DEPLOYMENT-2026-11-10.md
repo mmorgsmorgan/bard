@@ -45,6 +45,6 @@ AGENTIC_COMMERCE_ADDRESS=0x680e73Ff53981629b8B814cE9A69AD1347867606
 BARD_JOB_HOOK_ADDRESS=0x097eF956B18E20A8E9b509791c2a430b2750f32b
 ```
 
-The fresh database and application services have not been rolled out. Configure new service/evaluator secrets, public service URLs, Passport credentials and VCR policies as described in [CURRENT.md](CURRENT.md). Do not import old jobs, accounts or signing material into the fresh deployment.
+The fresh database and application services were rolled out on November 11, 2026. Public URLs, the funded managed evaluator, private policy verifier and successful hosted testnet settlement are recorded in [HOSTING-2026-11-11.md](HOSTING-2026-11-11.md). No old jobs, accounts or signing material were imported.
 
 Machine-readable receipt, configuration and verification evidence is in [the deployment manifest](../contracts/deployments/arc-testnet-2026-11-10.json). The contracts are already deployed; continuing the application rollout does not require redeploying them.

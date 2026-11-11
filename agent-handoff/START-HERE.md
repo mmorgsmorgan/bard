@@ -18,7 +18,9 @@ The folder is a coordination record, not a file lock. Use separate worktrees for
 
 ## Locations
 
-Project /home/chief/bard
+Active release checkout /home/chief/.local/share/bard-github-20261110/checkout
+Original dirty workspace /home/chief/bard (preserve unrelated work; hosted policy changes are not merged here)
+Public deployment https://bard-six.vercel.app
 Windows path \\wsl.localhost\Ubuntu\home\chief\bard
 Reference repos /home/chief/ACL and /home/chief/VCR-Protocol
 Bard baseline commit 7b901bc. Many current changes predate this conversation.

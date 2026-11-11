@@ -2,7 +2,7 @@
 
 Use **Vercel for the Next.js website and Railway for the API, hosted MCP, private VCR verifier and PostgreSQL**. The backend runs escrow expiry, reconciliation, reputation and wallet audit workers, so it needs a persistent service. Keep one backend replica until worker coordination supports multiple instances. Public browsing and previews must remain accessible without a hosting-provider sign-in.
 
-This guide prepares the application rollout. The [Arc Testnet contracts](../agent-handoff/DEPLOYMENT-2026-11-10.md) are already deployed and verified; use those addresses. Create a fresh database with no imported accounts, jobs or wallet keys.
+The application rollout completed on November 11, 2026. The public website is [bard-six.vercel.app](https://bard-six.vercel.app); API and MCP endpoints and verified checks are in [the hosting record](../agent-handoff/HOSTING-2026-11-11.md). The [Arc Testnet contracts](../agent-handoff/DEPLOYMENT-2026-11-10.md) remain deployed and verified. Future deployments must retain this database's wallet master key and contract configuration.
 
 ## Runtime and service settings
 
@@ -11,14 +11,18 @@ The server workspaces and `.nvmrc` pin Node **24.x**, which is supported by both
 | Service | Provider | Root directory | Configuration | Start / health |
 | --- | --- | --- | --- | --- |
 | Website | Vercel | `frontend` | `frontend/vercel.json`, Next.js preset, Node 24 | Managed by Vercel |
-| API and workers | Railway | `/` | `/backend/railway.json`, Railpack | `node backend/server.js`, `/api/health` |
-| Hosted MCP | Railway | `/` | `/railway.json`, Railpack | `node mcp-server/server.js`, `/health` |
-| Private VCR verifier | Railway | `/` | `/vcr-service/railway.json`, Railpack | `node vcr-service/server.js`, `/health` |
+| API and workers | Railway | `/` | Service settings, Railpack | `node backend/server.js`, `/api/health` |
+| Hosted MCP | Railway | `/` | Service settings, Railpack | `node mcp-server/server.js`, `/health` |
+| Private VCR verifier | Railway | `/` | Service settings, Railpack | `node vcr-service/server.js`, `/health` |
 | Database | Railway | Managed PostgreSQL service | Fresh database, retained storage and backups | Private connection from API |
 
 For Vercel, enable **Include source files outside of the Root Directory in the Build Step**. The checked-in install command runs `npm ci --prefix ..` from `frontend`, installing the complete workspace from its lockfile. The build command is `npm run build`. Disable deployment protection for any production or preview URL intended for public sharing.
 
-For both Railway application services, keep the root at `/` even when selecting a nested config file. Railpack reads the root Node version and lockfile. Leave Railway's assigned `PORT` available; both servers read it.
+For all three Railway application services, keep the root at `/`. Railpack reads the root Node version and lockfile. Set the start commands and health paths above directly in service settings, with a 100-second health timeout, one replica, application sleeping disabled and `ON_FAILURE` restarts capped at 10. The rollout uses port 8080.
+
+New Railway services reject `railwayConfigFile` because Config as Code is deprecated. The old JSON files have been removed; this rollout clears that setting and uses the API-managed service settings. Railway's replacement for projects that need a checked-in infrastructure definition is [Infrastructure as Code](https://docs.railway.com/infrastructure-as-code). Do not apply an incomplete project definition that could remove the database or volumes.
+
+Vercel automatically builds pushes to `codex/bard-agent-marketplace-20261110`. Railway services were uploaded from that checked-out revision with explicit project, environment and service selectors; a GitHub push does not redeploy them.
 
 ## Redeploying an existing Vercel project
 
@@ -142,4 +146,4 @@ Do not connect this release to an old production database. Do not automatically 
 - [Railway monorepo deployments](https://docs.railway.com/guides/monorepo)
 - [Railpack Node.js detection and configuration](https://railpack.com/languages/node/)
 
-Provider settings were checked on November 10, 2026. Hosting still requires configuration and deployment; a GitHub push alone does not publish the application.
+Provider settings and live application checks were verified on November 11, 2026. The private verifier and database have no public service domains. A fresh faucet-funded hosted job completed with one payout, and concurrent direct-send retries transferred once. The hosted human-link page was checked; real Ethos/Passport claims remain separate verification.

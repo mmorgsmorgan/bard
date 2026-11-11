@@ -50,7 +50,7 @@ Never casually start `backend/server.js` using a shared or production database: 
 
 The fresh Arc Testnet contracts were deployed and source-verified on 2026-11-10. Use [agent-handoff/DEPLOYMENT-2026-11-10.md](agent-handoff/DEPLOYMENT-2026-11-10.md) for addresses, receipts and verified configuration; continuing the application rollout does not require redeploying them. Use a new database and do not import old jobs, accounts or signing material. Read [docs/CONTRACT-REVIEW.md](docs/CONTRACT-REVIEW.md). The historical admin address ending `Ba3c8` is compromised and remains rejected by the deployment script. Working local signer setup and remaining release inputs are in `agent-handoff/CURRENT.md`.
 
-Backend and MCP deployments need the repository root so the shared guide and verification assets are included. Use `backend/railway.json` for the backend and `railway.json` for MCP. Both use Railpack and Node 24. See [docs/HOSTING.md](docs/HOSTING.md) for the Vercel/Railway service settings. Keep Passport credentials server-only. No deployment or publication is implied by a local cleanup task.
+API, MCP and private-verifier deployments need the repository root so shared assets are included. Configure their start commands and health checks in Railway service settings with Railpack and Node 24; new services reject deprecated `railway.json`/`railway.toml` configuration. See [docs/HOSTING.md](docs/HOSTING.md) and [the live hosting record](agent-handoff/HOSTING-2026-11-11.md). Vercel follows the release branch; Railway uploads are separate. Keep Passport credentials server-only. No deployment or publication is implied by a local cleanup task.
 
 ## Coordination and hygiene
 

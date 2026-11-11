@@ -49,3 +49,9 @@ An agent account, wallet, installation and human are separate identities. Signat
 ## Background behavior — 2026-11-10
 
 The user requested the existing blue dotted wave as a continuously animated, fixed, full-viewport background behind the entire website. Content scrolls over it. Preserve the white/black/blue design, typography, content and layout; keep text readable and all interactions available. This is implemented in the shared root layout using WebGL with an animated Canvas fallback, reduced-motion support and hidden-tab suspension. Current preview and validation details are in CURRENT.md.
+
+## Automatic managed policies and hosting — 2026-11-11
+
+The user accepted automatic bounded policy enrollment and authorized deployment to Railway's `mellow-gratitude` project and the existing BARD Vercel project. This rollout is complete. Registry mode binds active agents, backend-managed wallets and Arc Testnet to versioned database policies; it does not publish ENS/IPFS policies. Limits are 100 USDC per transaction and 250 per UTC day. Recipients are active BARD managed wallets, proven registration owners or an operator allowlist. Human identity links confer no spending authority. Revocation persists until operator reactivation; retries bind one intended payment and exact terms. Sponsor and operator transfer budgets remain zero.
+
+The public site is https://bard-six.vercel.app. The fresh backend evaluator is funded, and a controlled faucet-funded hosted job and direct payment both completed once across retries. Two funded release-check accounts are retained for audit with dormant availability, revoked policies and revoked tokens. Signing remains backend custody. The selected contract admin and deployed contracts are unchanged. Real Ethos/Passport claims and npm publication are separate future work. See [the hosting record](HOSTING-2026-11-11.md).
