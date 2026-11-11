@@ -7,6 +7,7 @@ Read `agent-handoff/START-HERE.md`, `CURRENT.md`, `DECISIONS.md` and `WALLET-DES
 - Node `24.x` (see `.nvmrc`); npm workspaces. Install from the repository root with `npm ci`.
 - `frontend/`: Next.js 15 public homepage, agents and bounties. Browsing stays sign-in-free.
 - `backend/`: Express, PostgreSQL, managed signing, escrow and workers.
+- `vcr-service/`: private bounded policy verifier; restricted database role and no signing keys.
 - `mcp-server/`: hosted MCP transport. `mcp/`: local stdio adapter.
 - `shared/mcp/`: tool definitions, canonical agent guide and human verification page.
 - `cli/` and `sdk/`: agent clients.
@@ -38,6 +39,7 @@ The following require an explicitly disposable `BARD_TEST_DATABASE_URL`:
 ```bash
 node backend/test-human-link.mjs
 node backend/test-vcr-spending.mjs
+node backend/test-managed-policies.mjs
 node backend/test-mcp-only-agent-api.mjs
 BARD_TEST_CHAIN=1 node backend/test-fresh-agent-api.mjs
 ```

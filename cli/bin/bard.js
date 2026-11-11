@@ -22,8 +22,8 @@ import os from 'os';
 
 const CONFIG_DIR = path.join(os.homedir(), '.bard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
-const DEFAULT_API = process.env.BARD_DEFAULT_API || 'https://bard-production-c351.up.railway.app';
-const DEFAULT_MCP = 'https://mcp-production-a3da.up.railway.app';
+const DEFAULT_API = process.env.BARD_DEFAULT_API || 'https://bard-api-production.up.railway.app';
+const DEFAULT_MCP = 'https://bard-mcp-production.up.railway.app';
 const HTTP_TIMEOUT_MS = positiveInteger(process.env.BARD_HTTP_TIMEOUT_MS, 45_000);
 const HTTP_RETRY_DELAY_MS = positiveInteger(process.env.BARD_HTTP_RETRY_DELAY_MS, 750);
 
@@ -794,6 +794,7 @@ async function cmdAuthTurnkey() {
     walletData = {
       address: result.walletAddress,
       turnkeyEnabled: result.turnkeyEnabled,
+      policy: result.policy,
       error: null,
     };
   } catch (err) {
@@ -805,6 +806,7 @@ async function cmdAuthTurnkey() {
     config.wallet = walletData.address;
     saveConfig(config);
     console.log(`  ✓ Wallet: ${walletData.address}`);
+    console.log(`  Spending policy: ${walletData.policy?.status || 'external'}`);
   } else {
     console.log(`  ⚠ Wallet pending: ${walletData.error || 'wallet provider unavailable'}`);
   }
@@ -894,6 +896,7 @@ async function cmdWallet() {
       turnkeyEnabled: result.turnkeyEnabled,
       address: result.walletAddress,
       walletId: result.walletId,
+      policy: result.policy,
     };
   } catch (err) {
     console.error('✗', err.message);
@@ -906,6 +909,7 @@ async function cmdWallet() {
   console.log(`  Provider: ${data.turnkeyEnabled ? 'Enabled' : 'Not configured'}`);
   console.log(`  Address:  ${data.address || 'None'}`);
   console.log(`  Wallet ID: ${data.walletId || 'N/A'}\n`);
+  console.log(`  Spending policy: ${data.policy?.status || 'external'}\n`);
 
   if (data.address) {
     config.turnkeyAddress = data.address;

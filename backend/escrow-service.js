@@ -24,6 +24,9 @@ import {
   buildRejectCalldata, buildClaimRefundCalldata, buildRefundFeeCalldata,
   getJob as readJob, getFeeMeta as readFeeMeta,
 } from './erc8183-client.js';
+import { registryEnabled, withActiveWallet } from './vcr-registry.js';
+import { reserveSpend } from './vcr-spending.js';
+import { reservePlatformSpend } from './platform-budget.js';
 
 const ARC_RPC = process.env.ARC_TESTNET_RPC || 'https://rpc.testnet.arc.network';
 const SELLER_ADDRESS = process.env.SELLER_ADDRESS; // platform / evaluator wallet (Turnkey)
@@ -220,23 +223,32 @@ async function signerFor(address) {
  * Sign+send one calldata leg as `signer`, wait for the receipt, and throw on revert.
  * @returns {Promise<{txHash: string, receipt: object}>}
  */
-export async function sendAs(signer, { to, data, value = 0n }, label = 'tx') {
+export async function sendAs(signer, { to, data, value = 0n }, label = 'tx', options = {}) {
   if (!signer) throw new Error(`escrow-service: missing signer for ${label}`);
   return withArcTransactionPacing(() => withWalletQueue(signer, async () => {
-    const wc = await signerFor(signer);
-    const gasFunding = await ensureGasForTransaction(signer, { to, data, value }, { label });
-    const txHash = await wc.sendTransaction({
-      to,
-      data,
-      value,
-      gas: gasFunding.gasLimit,
-      gasPrice: gasFunding.bufferedGasPrice,
-    });
-    const receipt = await waitForReceipt(txHash, label);
-    if (receipt.status !== 'success') {
-      throw new Error(`escrow-service: ${label} reverted (tx ${txHash})`);
+    const broadcast = async connection => {
+      const { pool } = await import('./db.js');
+      const wc = await signerFor(signer);
+      if (options.spendRequest) await reserveSpend(pool,options.spendRequest,{ connection });
+      if (options.expectedPolicy && connection) {
+        const current = (await connection.query('SELECT policy_hash FROM vcr_policies WHERE wallet=$1',[signer.toLowerCase()])).rows[0];
+        if (current?.policy_hash !== options.expectedPolicy.policyHash) throw new Error('VCR policy changed during escrow funding. Retry funding to reauthorize.');
+      }
+      const gasFunding = await ensureGasForTransaction(signer, { to, data, value }, { label });
+      await options.beforeBroadcast?.();
+      const txHash = await wc.sendTransaction({ to,data,value,gas:gasFunding.gasLimit,gasPrice:gasFunding.bufferedGasPrice });
+      try {
+        await options.onBroadcast?.(txHash);
+        const receipt = await waitForReceipt(txHash, label);
+        if (receipt.status !== 'success') throw Object.assign(new Error(`escrow-service: ${label} reverted (tx ${txHash})`),{ reverted:true });
+        return { txHash, receipt, gasFunding };
+      } catch (err) { err.txHash = txHash; throw err; }
+    };
+    if (registryEnabled() && signer.toLowerCase() !== SELLER_ADDRESS?.toLowerCase()) {
+      const { policyOperationPool } = await import('./db.js');
+      return withActiveWallet(policyOperationPool,signer,broadcast);
     }
-    return { txHash, receipt, gasFunding };
+    return broadcast();
   }));
 }
 
@@ -340,6 +352,7 @@ async function assertSponsorCanTopUp(recipient, topUpWei, label) {
     error.balanceWei = sponsorBalance.toString();
     throw error;
   }
+  return { sponsorRequired, gas: buffered(transferGas,GAS_LIMIT_BUFFER_BPS), gasPrice: buffered(gasPrice,GAS_PRICE_BUFFER_BPS) };
 }
 
 /**
@@ -371,10 +384,12 @@ export async function ensureGasForTransaction(address, tx, { label = 'transactio
   return withWalletQueue(SELLER_ADDRESS, async () => {
     const refreshed = await estimateTransactionFunding(address, tx, label);
     if (refreshed.topUpWei === 0n) return { ...refreshed, funded: false };
-    await assertSponsorCanTopUp(address, refreshed.topUpWei, label);
+    const sponsor = await assertSponsorCanTopUp(address, refreshed.topUpWei, label);
+    const { pool } = await import('./db.js');
+    await reservePlatformSpend(pool,{ kind:'gas',wallet:address,amount:sponsor.sponsorRequired });
 
     const wc = await signerFor(SELLER_ADDRESS);
-    const txHash = await wc.sendTransaction({ to: address, value: refreshed.topUpWei });
+    const txHash = await wc.sendTransaction({ to: address, value: refreshed.topUpWei, gas:sponsor.gas,gasPrice:sponsor.gasPrice });
     try {
       await waitForReceipt(txHash, `gas top-up for ${address}`);
     } catch (error) {
@@ -410,8 +425,11 @@ export async function ensureGas(address, minNativeWei = 2_000_000_000_000_000n, 
   const bal = await nativeBalance(address);
   if (bal >= minNativeWei) return { funded: false, balance: bal };
   if (!SELLER_ADDRESS) throw new Error('ensureGas: SELLER_ADDRESS not set for gas top-up');
+  const sponsor = await assertSponsorCanTopUp(address,topUpWei,'gas top-up');
+  const { pool } = await import('./db.js');
+  await reservePlatformSpend(pool,{ kind:'gas',wallet:address,amount:sponsor.sponsorRequired });
   const wc = await signerFor(SELLER_ADDRESS);
-  const txHash = await wc.sendTransaction({ to: address, value: topUpWei });
+  const txHash = await wc.sendTransaction({ to: address, value: topUpWei,gas:sponsor.gas,gasPrice:sponsor.gasPrice });
   await waitForReceipt(txHash, `gas top-up for ${address}`);
   return { funded: true, txHash, balance: await nativeBalance(address) };
 }
@@ -487,7 +505,7 @@ export async function openAndFund(p) {
         description: p.description || 'BARD bounty',
         providerAgentId: 0n,
       });
-      const r = await sendAs(p.creatorWallet, cd, 'createJob');
+      const r = await sendAs(p.creatorWallet, cd, 'createJob', { expectedPolicy:p.spendingPolicy });
       txs.createJob = r.txHash;
       jobId = await jobIdFromReceipt(r.receipt);
     }
@@ -498,13 +516,13 @@ export async function openAndFund(p) {
         jobId, platformFee: feeWei, feeRecipient,
         maxFeeBps: p.maxFeeBps || 0, minRepScore: p.minRepScore || 0,
       });
-      txs.configure = (await sendAs(p.creatorWallet, cd, 'configureBardJob')).txHash;
+      txs.configure = (await sendAs(p.creatorWallet, cd, 'configureBardJob', { expectedPolicy:p.spendingPolicy })).txHash;
     }
 
     // 3. setProvider (creator).
     {
       const cd = buildSetProviderCalldata({ jobId, provider: p.providerWallet, agentId: p.providerAgentId || 0n });
-      txs.setProvider = (await sendAs(p.creatorWallet, cd, 'setProvider')).txHash;
+      txs.setProvider = (await sendAs(p.creatorWallet, cd, 'setProvider', { expectedPolicy:p.spendingPolicy })).txHash;
     }
 
     // 4. setBudget (provider).
@@ -516,17 +534,17 @@ export async function openAndFund(p) {
     // 5. depositFee (creator): approve hook then deposit.
     if (feeWei > 0n) {
       const approve = buildApproveCalldata({ spender: BARD_JOB_HOOK_ADDRESS, amount: feeWei });
-      txs.approveFee = (await sendAs(p.creatorWallet, approve, 'approve(hook,fee)')).txHash;
+      txs.approveFee = (await sendAs(p.creatorWallet, approve, 'approve(hook,fee)', { expectedPolicy:p.spendingPolicy })).txHash;
       const deposit = buildDepositFeeCalldata({ jobId });
-      txs.depositFee = (await sendAs(p.creatorWallet, deposit, 'depositFee')).txHash;
+      txs.depositFee = (await sendAs(p.creatorWallet, deposit, 'depositFee', { expectedPolicy:p.spendingPolicy })).txHash;
     }
 
     // 6. fund (creator): approve AgenticCommerce then fund.
     {
       const approve = buildApproveCalldata({ spender: AGENTIC_COMMERCE_ADDRESS, amount: earningsWei });
-      txs.approveBudget = (await sendAs(p.creatorWallet, approve, 'approve(ac,budget)')).txHash;
+      txs.approveBudget = (await sendAs(p.creatorWallet, approve, 'approve(ac,budget)', { expectedPolicy:p.spendingPolicy })).txHash;
       const fund = buildFundCalldata({ jobId, expectedBudget: earningsWei });
-      txs.fund = (await sendAs(p.creatorWallet, fund, 'fund')).txHash;
+      txs.fund = (await sendAs(p.creatorWallet, fund, 'fund', { expectedPolicy:p.spendingPolicy })).txHash;
     }
 
     return { jobId, txs };
@@ -585,7 +603,7 @@ export async function resumeAndFund(p) {
         maxFeeBps: p.maxFeeBps || 0,
         minRepScore: p.minRepScore || 0,
       });
-      txs.configure = (await sendAs(p.creatorWallet, cd, 'configureBardJob(resume)')).txHash;
+      txs.configure = (await sendAs(p.creatorWallet, cd, 'configureBardJob(resume)', { expectedPolicy:p.spendingPolicy })).txHash;
     }
 
     if (sameAddress(job.provider, zeroAddress)) {
@@ -594,7 +612,7 @@ export async function resumeAndFund(p) {
         provider: p.providerWallet,
         agentId: p.providerAgentId || 0n,
       });
-      txs.setProvider = (await sendAs(p.creatorWallet, cd, 'setProvider(resume)')).txHash;
+      txs.setProvider = (await sendAs(p.creatorWallet, cd, 'setProvider(resume)', { expectedPolicy:p.spendingPolicy })).txHash;
     } else if (!sameAddress(job.provider, p.providerWallet)) {
       throw new Error(`escrow-service: job ${jobId} is assigned to a different provider`);
     }
@@ -617,11 +635,11 @@ export async function resumeAndFund(p) {
         amount: feeWei,
       });
       txs.approveFee = (
-        await sendAs(p.creatorWallet, approve, 'approve(hook,fee,resume)')
+        await sendAs(p.creatorWallet, approve, 'approve(hook,fee,resume)', { expectedPolicy:p.spendingPolicy })
       ).txHash;
       const deposit = buildDepositFeeCalldata({ jobId });
       txs.depositFee = (
-        await sendAs(p.creatorWallet, deposit, 'depositFee(resume)')
+        await sendAs(p.creatorWallet, deposit, 'depositFee(resume)', { expectedPolicy:p.spendingPolicy })
       ).txHash;
     }
 
@@ -632,10 +650,10 @@ export async function resumeAndFund(p) {
         amount: earningsWei,
       });
       txs.approveBudget = (
-        await sendAs(p.creatorWallet, approve, 'approve(ac,budget,resume)')
+        await sendAs(p.creatorWallet, approve, 'approve(ac,budget,resume)', { expectedPolicy:p.spendingPolicy })
       ).txHash;
       const fund = buildFundCalldata({ jobId, expectedBudget: earningsWei });
-      txs.fund = (await sendAs(p.creatorWallet, fund, 'fund(resume)')).txHash;
+      txs.fund = (await sendAs(p.creatorWallet, fund, 'fund(resume)', { expectedPolicy:p.spendingPolicy })).txHash;
     } else if (p.fundTxHash) {
       txs.fund = p.fundTxHash;
     } else {

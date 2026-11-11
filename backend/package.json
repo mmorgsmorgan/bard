@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test test-agreement-format.mjs && node test-agent-agreement.mjs && node test-passport-service.mjs && node test-ethos-service.mjs && node test-arc-rpc-retry.mjs && node test-gas-funding-plan.mjs && node test-reputation-score.mjs"
+    "test": "node --test test-agreement-format.mjs test-vcr-policy.mjs && node test-agent-agreement.mjs && node test-passport-service.mjs && node test-ethos-service.mjs && node test-arc-rpc-retry.mjs && node test-gas-funding-plan.mjs && node test-reputation-score.mjs"
   },
   "keywords": [],
   "author": "",

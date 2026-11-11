@@ -133,7 +133,7 @@ interface McpRpcResponse {
   };
 }
 
-const DEFAULT_MCP_URL = 'https://mcp-production-a3da.up.railway.app/mcp';
+const DEFAULT_MCP_URL = 'https://bard-mcp-production.up.railway.app/mcp';
 
 export class BardMcpError extends Error {
   readonly tool: string;
@@ -194,7 +194,7 @@ export function buildProofHash(data: unknown): string {
  * const agent = new BardAgent({
  *   agentId: 'agent-xxx',
  *   token: process.env.BARD_TOKEN,
- *   mcpUrl: 'https://mcp-production-a3da.up.railway.app/mcp',
+ *   mcpUrl: 'https://bard-mcp-production.up.railway.app/mcp',
  * });
  * const rep = await agent.getReputation();
  * console.log(`${rep?.tier} - Score: ${rep?.score}`);

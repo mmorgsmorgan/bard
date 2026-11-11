@@ -1,11 +1,45 @@
+import { CHAIN, callVerifier, policyError, policyHash } from './vcr-policy.js';
+import { registryEnabled, checkRegistrySpend, policyLockKey } from './vcr-registry.js';
+
 export const spendingSchema = `CREATE TABLE IF NOT EXISTS vcr_reservations (
   operation TEXT NOT NULL, day DATE NOT NULL, wallet TEXT NOT NULL,
   policy_name TEXT NOT NULL, recipient TEXT NOT NULL, amount NUMERIC NOT NULL CHECK(amount > 0),
-  PRIMARY KEY(operation, day))`;
+  PRIMARY KEY(operation, day));
+  ALTER TABLE vcr_reservations ADD COLUMN IF NOT EXISTS policy_hash TEXT;
+  ALTER TABLE vcr_reservations ADD COLUMN IF NOT EXISTS policy_version INTEGER;
+  ALTER TABLE vcr_reservations ADD COLUMN IF NOT EXISTS request_hash TEXT;
+  CREATE INDEX IF NOT EXISTS vcr_budget_day ON vcr_reservations(policy_name,day);`;
+
+async function reserveRegistrySpend(pool, request, options) {
+  const spend = { ...request, wallet: request.wallet?.toLowerCase(), recipient: request.recipient?.toLowerCase(),
+    amount: String(request.amount), token: 'USDC', chain: CHAIN };
+  const db = options.connection || await (options.lockPool || pool).connect();
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [policyLockKey(spend.wallet)]);
+    const local = await checkRegistrySpend(db,spend);
+    const verified = await callVerifier('/v1/verify',spend,options);
+    if (verified?.allowed !== true || verified.requestHash !== policyHash(spend) ||
+        verified.policyId !== local.policyId || verified.policyHash !== local.policyHash ||
+        verified.policyVersion !== local.policyVersion || verified.day !== local.day ||
+        verified.dailyLimit !== local.dailyLimit) throw policyError('VCR decision does not match the reserved policy.', 'vcr_unavailable', 503);
+    // The remote and local check must address the same UTC accounting window.
+    const day = (await db.query("SELECT to_char((clock_timestamp() AT TIME ZONE 'UTC')::date,'YYYY-MM-DD') AS day")).rows[0].day;
+    if (day !== local.day) throw policyError('VCR day changed during verification. Retry the same operation.', 'vcr_unavailable', 503);
+    await db.query(`INSERT INTO vcr_reservations(operation,day,wallet,policy_name,recipient,amount,policy_hash,policy_version,request_hash)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING`,
+      [spend.operation,day,spend.wallet,local.policyId,spend.recipient,spend.amount,local.policyHash,local.policyVersion,local.requestHash]);
+    await db.query('COMMIT');
+    return { ...local, operation: spend.operation };
+  } catch (err) { await db.query('ROLLBACK'); throw err; }
+  finally { if (!options.connection) db.release(); }
+}
 
 // Failed or ambiguous broadcasts retain their reservation. An operator can
 // reconcile them against Arc receipts before releasing budget.
-export async function reserveSpend(pool, request, { fetchImpl = fetch, policyNames = JSON.parse(process.env.BARD_VCR_POLICIES || '{}'), verifierUrl = process.env.BARD_VCR_URL } = {}) {
+export async function reserveSpend(pool, request, options = {}) {
+  if (registryEnabled()) return reserveRegistrySpend(pool,request,options);
+  const { fetchImpl = fetch, policyNames = JSON.parse(process.env.BARD_VCR_POLICIES || '{}'), verifierUrl = process.env.BARD_VCR_URL } = options;
   const { wallet, recipient, operation } = request;
   if (!/^0x[0-9a-f]{40}$/i.test(wallet || '') || !/^0x[0-9a-f]{40}$/i.test(recipient || '') || !operation) throw new Error('Invalid spend coordinates.');
   const amount = String(request.amount);

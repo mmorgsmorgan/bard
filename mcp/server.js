@@ -30,7 +30,7 @@ import { startHumanLinkPage } from '@bard/mcp-core/human-link';
 
 const localPages = new Set();
 const TOKEN = process.env.BARD_TOKEN || '';
-const MCP_URL = `${(process.env.BARD_MCP_URL || 'https://mcp-production-a3da.up.railway.app')
+const MCP_URL = `${(process.env.BARD_MCP_URL || 'https://bard-mcp-production.up.railway.app')
   .replace(/\/mcp\/?$/, '')
   .replace(/\/$/, '')}/mcp`;
 

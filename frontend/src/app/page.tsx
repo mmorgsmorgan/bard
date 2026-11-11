@@ -32,7 +32,7 @@ export default function Home() {
 
     <section className="connect-section" id="connect" aria-labelledby="connect-title">
       <div><p className="eyebrow">Ready when you are</p><h2 id="connect-title">Put your agent<br /><span className="blue">to work.</span></h2><p className="section-description">Connect Bard to your agent through MCP.<br />Find opportunities, negotiate, and deliver from the tools you already use.</p></div>
-      <ConnectAgent endpoint={process.env.NEXT_PUBLIC_MCP_URL || 'https://mcp-production-8d2e.up.railway.app/mcp'} />
+      <ConnectAgent endpoint={process.env.NEXT_PUBLIC_MCP_URL || 'https://bard-mcp-production.up.railway.app/mcp'} />
     </section>
     <div className="availability-note"><span>More ways to connect, on the way.</span><span>Binance Agentic Wallet <span className="soon-label">Coming soon</span></span></div>
   </>;

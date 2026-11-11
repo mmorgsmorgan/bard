@@ -10,8 +10,9 @@
 
 import { Turnkey } from '@turnkey/sdk-server';
 import { createAccount } from '@turnkey/viem';
-import { createWalletClient, http, encodeFunctionData } from 'viem';
+import { encodeFunctionData } from 'viem';
 import { withMemo, MemoIds } from './arc-memo.js';
+import { registryEnabled, pendingPolicy, enrollAgentPolicy } from './vcr-registry.js';
 
 // ── Arc Testnet Chain Definition ──
 // Arc uses stablecoins (USDC) as gas, not ETH.
@@ -154,42 +155,35 @@ export async function createAgentWallet(agentId, agentName) {
  * `db` is the pg Pool exported from ./db.js.
  */
 export async function getOrCreateAgentWallet(db, agentId, agentName) {
-  // Check if agent already has a managed wallet (columns are named turnkey_* for
-  // history but hold whichever provider's wallet — Turnkey or self-hosted local).
-  const { rows } = await db.query(
-    'SELECT turnkey_wallet_id, turnkey_address FROM agents WHERE id = $1',
-    [agentId]
-  );
-  const agent = rows[0];
-
-  if (agent?.turnkey_wallet_id && agent?.turnkey_address) {
-    return { walletId: agent.turnkey_wallet_id, address: agent.turnkey_address };
-  }
-
-  // Create new wallet via the configured provider. Default (turnkey) path is
-  // unchanged; local/hybrid create a self-hosted encrypted wallet instead.
   const mode = (process.env.WALLET_PROVIDER || 'turnkey').toLowerCase();
-  let wallet;
+  let provider, wallet;
   if (mode === 'local' || mode === 'hybrid') {
     const { getWalletProvider } = await import('./wallet-provider.js');
-    try {
-      wallet = await getWalletProvider(db).createWallet(`bard-agent-${agentId}`);
-    } catch (err) {
-      return { error: 'local_create_wallet_failed', detail: err.message };
-    }
-  } else {
-    wallet = await createAgentWallet(agentId, agentName);
-    if (!wallet) return null;                // Turnkey not configured
-    if (wallet.error) return wallet;         // Turnkey API failed — pass through
+    provider = getWalletProvider(db);
+    await (provider.local || provider).init();
   }
-
-  // Store in DB (same columns regardless of provider)
-  await db.query(
-    'UPDATE agents SET turnkey_wallet_id = $1, turnkey_address = $2 WHERE id = $3',
-    [wallet.walletId, wallet.address, agentId]
-  );
-
-  return wallet;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const agent = (await client.query('SELECT * FROM agents WHERE id=$1 FOR UPDATE',[agentId])).rows[0];
+    if (!agent || agent.status !== 'active') throw new Error('An active agent is required to provision a wallet.');
+    if (agent.turnkey_wallet_id && agent.turnkey_address) {
+      wallet = { walletId: agent.turnkey_wallet_id, address: agent.turnkey_address };
+    } else {
+      if (agent.turnkey_wallet_id || agent.turnkey_address) throw new Error('Incomplete wallet binding requires operator reconciliation.');
+      wallet = provider ? await provider.createWallet(`bard-agent-${agentId}`,{ db: client }) : await createAgentWallet(agentId,agentName);
+      if (!wallet || wallet.error) { await client.query('ROLLBACK'); return wallet; }
+      await client.query(`UPDATE agents SET turnkey_wallet_id=$1,turnkey_address=$2,
+        owner_wallet=CASE WHEN owner_wallet=$4 THEN lower($2) ELSE owner_wallet END WHERE id=$3`,
+        [wallet.walletId,wallet.address,agentId,'0x'+'00'.repeat(20)]);
+    }
+    if (registryEnabled()) await pendingPolicy(client,agentId,wallet.address);
+    await client.query('COMMIT');
+  } catch (err) { await client.query('ROLLBACK'); throw err; }
+  finally { client.release(); }
+  // Network enrollment happens after the durable wallet binding commits. An
+  // outage leaves a recoverable pending policy, not an orphan wallet/key.
+  return { ...wallet, policy: await enrollAgentPolicy(db,agentId,wallet.address) };
 }
 
 /**
@@ -203,22 +197,6 @@ export async function mintERC8004Identity(db, agentId, agentName, metadataURI) {
   // Get or create wallet
   const wallet = await getOrCreateAgentWallet(db, agentId, agentName);
   if (!wallet) throw new Error('Failed to create Turnkey wallet for agent');
-
-  const apiClient = tk.apiClient();
-
-  // Create a viem-compatible Turnkey account
-  const turnkeyAccount = await createAccount({
-    client: apiClient,
-    organizationId: process.env.TURNKEY_ORGANIZATION_ID,
-    signWith: wallet.address,
-  });
-
-  // Create the signing client.
-  const walletClient = createWalletClient({
-    account: turnkeyAccount,
-    chain: arcTestnet,
-    transport: http(),
-  });
 
   // Encode the register(metadataURI) call
   const data = encodeFunctionData({
@@ -245,11 +223,8 @@ export async function mintERC8004Identity(db, agentId, agentName, metadataURI) {
   );
 
   // Send the transaction
-  const txHash = await walletClient.sendTransaction({
-    to: wrapped.to,
-    data: wrapped.data,
-    value: 0n,
-  });
+  const { sendAs } = await import('./escrow-service.js');
+  const { txHash } = await sendAs(wallet.address,wrapped,'identity-mint');
 
   console.log(`  ERC-8004 mint tx sent by agent ${agentName} [memo:identity]: ${txHash}`);
 

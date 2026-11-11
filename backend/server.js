@@ -1,5 +1,10 @@
 import 'dotenv/config';
 import { reserveSpend } from './vcr-spending.js';
+import { policyHash, usdcUnits, callVerifier } from './vcr-policy.js';
+import { policySummary, setPolicyState, registryEnabled } from './vcr-registry.js';
+import { executeManagedSend, sendOperation } from './managed-send.js';
+import { reservePlatformSpend } from './platform-budget.js';
+import { provisionVerifierRole } from './vcr-database-role.js';
 import { AGENTIC_COMMERCE_ADDRESS as commerceAddress, BARD_JOB_HOOK_ADDRESS as feeAddress } from './erc8183-client.js';
 import { jobTerms, typedAgreement, verifyAgreement, attestDelivery, verifyDelivery } from './agent-agreement.js';
 import { getWalletProvider } from './wallet-provider.js';
@@ -15,7 +20,7 @@ import { fileURLToPath } from 'url';
 import jwt from 'jsonwebtoken';
 import { formatUnits, verifyMessage, createPublicClient, http, parseUnits } from 'viem';
 import { isTurnkeyEnabled, mintERC8004Identity, getOrCreateAgentWallet, auditTurnkeyOrphans, deleteStrandedWallets, signMessageWithAgentWallet } from './turnkey-wallet.js';
-import { pool, initSchema, stmts } from './db.js';
+import { pool, walletOperationPool, policyOperationPool, initSchema, stmts } from './db.js';
 import { isR2Enabled, uploadToR2, deleteFromR2, generateFilename } from './r2-storage.js';
 import { NATIVE_TOKEN, ERC20_ABI, resolveToken, achswapCall } from './achswap.js';
 import { withMemo, MemoIds } from './arc-memo.js';
@@ -778,6 +783,11 @@ function requireTrustedServiceOrOperator(req, res, next) {
   });
 }
 
+function requireOperator(req,res,next) {
+  if (requestHasOperatorSecret(req)) return next();
+  return res.status(403).json({ error: 'Platform operator authentication required.' });
+}
+
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
@@ -927,6 +937,7 @@ app.get('/api/health', async (req, res) => {
       storage: isR2Enabled ? 'r2' : 'local',
       r2Bucket: isR2Enabled ? process.env.R2_BUCKET_NAME : null,
       turnkey: isTurnkeyEnabled(),
+      vcr: { mode:registryEnabled() ? 'registry' : 'external',verifierConfigured:Boolean(process.env.BARD_VCR_URL) },
       platformWallet: walletBalance,
     });
   } catch (err) {
@@ -1554,18 +1565,45 @@ app.post('/api/agents/:id/wallet', requireAuth, async (req, res) => {
         code: wallet.code,
       });
     }
-    if (wallet?.address && agent.owner_wallet === '0x0000000000000000000000000000000000000000') {
-      await pool.query('UPDATE agents SET owner_wallet = $1 WHERE id = $2', [wallet.address.toLowerCase(), agent.id]);
-    }
     res.json({
       turnkeyEnabled: true,
       address: wallet?.address || null,
       walletId: wallet?.walletId || null,
+      policy: wallet?.policy || null,
     });
   } catch (err) {
     console.error('Wallet provisioning error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+app.get('/api/agents/:id/wallet-policy',requireAuth,requireOwnAgent,async (req,res) => {
+  const row = (await pool.query('SELECT * FROM vcr_policies WHERE agent_id=$1',[req.params.id])).rows[0];
+  res.json({ policy: registryEnabled() ? policySummary(row) : { status:'external' } });
+});
+
+app.delete('/api/agents/:id/wallet-policy',requireAuth,requireOwnAgent,async (req,res) => {
+  try {
+    if (!registryEnabled()) return res.status(409).json({ error:'Policy revocation requires the managed VCR registry.',code:'vcr_registry_required' });
+    const agent = await stmts.getAgentById(req.params.id);
+    if (!agent?.turnkey_address) return res.status(404).json({ error:'Managed wallet not found.' });
+    const policy = await setPolicyState(policyOperationPool,{ agentId:agent.id,wallet:agent.turnkey_address,
+      action:'revoke',actor:agent.id,reason:'Agent requested revocation' });
+    res.json({ policy });
+  } catch (err) { res.status(err.status || 503).json({ error:err.message,code:err.code }); }
+});
+
+app.post('/api/admin/agents/:id/wallet-policy',requireOperator,async (req,res) => {
+  try {
+    if (!registryEnabled()) return res.status(409).json({ error:'Policy administration requires the managed VCR registry.',code:'vcr_registry_required' });
+    const { action,reason } = req.body || {};
+    if (!['revoke','activate'].includes(action) || typeof reason !== 'string' || !reason.trim()) return res.status(400).json({ error:'action (revoke or activate) and reason required.' });
+    const agent = await stmts.getAgentById(req.params.id);
+    if (!agent?.turnkey_address) return res.status(404).json({ error:'Managed wallet not found.' });
+    const request = { agentId:agent.id,wallet:agent.turnkey_address.toLowerCase(),action,actor:'operator',reason };
+    const policy = action === 'revoke' ? await setPolicyState(policyOperationPool,request) : await callVerifier('/v1/policies/state',request);
+    res.json({ policy });
+  } catch (err) { res.status(err.status || 503).json({ error:err.message,code:err.code }); }
 });
 
 // GET /api/agents/:id/wallet-balance — Authenticated agent wallet balance
@@ -1731,7 +1769,8 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Agent has no Turnkey wallet. Use bard_create_wallet first.' });
     }
 
-    const { to: rawTo, toUsername, toAgentName, amount } = req.body;
+    const { to: rawTo, toUsername, toAgentName, amount, idempotencyKey } = req.body;
+    const operation = sendOperation(agent.id,idempotencyKey || req.headers['idempotency-key']);
     if (!amount) {
       return res.status(400).json({ error: 'Missing required field: amount (USDC string e.g. "1.00")' });
     }
@@ -1771,11 +1810,9 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
     }
 
     // Parse amount (USDC has 6 decimals via ERC-20 interface)
-    const parsedAmount = parseFloat(amount);
-    if (isNaN(parsedAmount) || parsedAmount <= 0) {
-      return res.status(400).json({ error: 'Amount must be a positive number' });
-    }
-    if (parsedAmount > 100) {
+    const amountWei = usdcUnits(amount);
+    const parsedAmount = Number(formatUnits(amountWei,6));
+    if (amountWei > 100_000_000n) {
       return res.status(400).json({ error: 'Max transfer: 100 USDC per transaction (testnet safety cap)' });
     }
 
@@ -1788,8 +1825,7 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
     }
     const { encodeFunctionData } = await import('viem');
 
-    const ARC_USDC = '0x3600000000000000000000000000000000000000';
-    const amountWei = BigInt(Math.round(parsedAmount * 1_000_000)); // 6 decimals
+    const ARC_USDC = USDC_CONTRACT_ADDRESS;
 
     // ERC-20 transfer(address, uint256)
     const data = encodeFunctionData({
@@ -1822,8 +1858,16 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
     );
 
     // sendAs estimates and provisions the exact Arc gas requirement.
-    await reserveSpend(pool, { wallet: walletAddress, recipient: resolvedTo, amount: amountWei, operation: 'send:' + randomBytes(16).toString('hex') });
-    const { txHash } = await onchainEscrow.sendAs(walletAddress, wrapped, `send-usdc:${agent.agent_name}`);
+    const spendRequest = { agentId:agent.id,wallet:walletAddress.toLowerCase(),recipient:resolvedTo.toLowerCase(),
+      amount:String(amountWei),operation,purpose:'send',contextHash:policyHash({ to:wrapped.to.toLowerCase(),data:wrapped.data,value:'0' }) };
+    const { txHash,pending,replayed } = await executeManagedSend(pool,spendRequest,
+      hooks => onchainEscrow.sendAs(walletAddress,wrapped,`send-usdc:${agent.agent_name}`,{ ...hooks,spendRequest }),
+      { lockPool:walletOperationPool,receipt:hash => arcTestnetClient.getTransactionReceipt({ hash }) });
+    const result = { success:true,from:walletAddress,to:resolvedTo,toUsername:toUsername || null,
+      toAgentName:resolvedAgent?.agent_name || null,toAgentId:resolvedAgent?.id || null,amount:parsedAmount,
+      token:ARC_USDC,chain:'Arc Testnet',txHash,explorer:`https://testnet.arcscan.app/tx/${txHash}`,
+      idempotencyKey:idempotencyKey || req.headers['idempotency-key'],pending,replayed };
+    if (pending || replayed) return res.status(pending ? 202 : 200).json(result);
 
     const displayRecipient = toUsername
       ? `@${toUsername}`
@@ -1847,22 +1891,10 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
     await createNotification({ agentId: agent.id, type: 'send', title: 'USDC Sent', message: `${agent.agent_name} sent ${parsedAmount} USDC to ${displayRecipient}.`, from: walletAddress, amount: String(parsedAmount) });
     await createNotification({ wallet: resolvedTo, type: 'send', title: 'USDC Received', message: `Received ${parsedAmount} USDC from agent ${agent.agent_name}.`, from: walletAddress, amount: String(parsedAmount) });
 
-    res.json({
-      success: true,
-      from: walletAddress,
-      to: resolvedTo,
-      toUsername: toUsername || null,
-      toAgentName: resolvedAgent?.agent_name || null,
-      toAgentId: resolvedAgent?.id || null,
-      amount: parsedAmount,
-      token: ARC_USDC,
-      chain: 'Arc Testnet',
-      txHash,
-      explorer: `https://testnet.arcscan.app/tx/${txHash}`,
-    });
+    res.json(result);
   } catch (err) {
     console.error('Send USDC error:', err);
-    if (err.txHash) {
+    if (err.txHash && !err.reverted) {
       return res.status(202).json({
         success: true,
         pending: true,
@@ -1872,7 +1904,7 @@ app.post('/api/agents/:id/send-usdc', requireAuth, async (req, res) => {
         details: err.message,
       });
     }
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message,code:err.code });
   }
 });
 
@@ -3568,9 +3600,12 @@ async function fundSelectedProposalOnchain(
   let jobId;
   let txs;
   try {
-    await reserveSpend(pool, { wallet: eligibility.creatorWallet, recipient: commerceAddress, amount: terms.message.amount, operation: 'job:' + bounty.id });
-    if (BigInt(platformFee.amount) > 0n) await reserveSpend(pool, { wallet: eligibility.creatorWallet, recipient: feeAddress, amount: platformFee.amount, operation: 'fee:' + bounty.id });
+    const creator = (await pool.query('SELECT id FROM agents WHERE lower(turnkey_address)=lower($1)',[eligibility.creatorWallet])).rows[0];
+    const spend = { agentId:creator?.id,wallet:eligibility.creatorWallet,contextHash:policyHash(terms) };
+    const spendingPolicy = await reserveSpend(pool, { ...spend,recipient:commerceAddress,amount:terms.message.amount,operation:'job:'+bounty.id,purpose:'escrow' }, { lockPool:policyOperationPool });
+    if (BigInt(platformFee.amount) > 0n) await reserveSpend(pool, { ...spend,recipient:feeAddress,amount:platformFee.amount,operation:'fee:'+bounty.id,purpose:'fee' }, { lockPool:policyOperationPool });
     const fundingInput = {
+      spendingPolicy,
       creatorWallet: eligibility.creatorWallet,
       providerWallet: eligibility.providerWallet,
       earningsUsdc: amountUsdc,
@@ -4624,7 +4659,7 @@ app.delete('/api/admin/platform-verifiers/:wallet', requireTrustedServiceOrOpera
 // created in an environment where the DB isn't reachable from outside. Platform-
 // verifier-gated. After calling, set SELLER_ADDRESS / PLATFORM_OWNER_WALLET to the
 // returned address and redeploy.
-app.post('/api/admin/provision-platform-wallet', requireTrustedServiceOrOperator, async (req, res) => {
+app.post('/api/admin/provision-platform-wallet', requireOperator, async (req, res) => {
   const { callerWallet, faucet } = req.body || {};
   if (!callerWallet) return res.status(400).json({ error: 'callerWallet required' });
   if (!(await stmts.isPlatformVerifier(callerWallet))) {
@@ -4641,7 +4676,19 @@ app.post('/api/admin/provision-platform-wallet', requireTrustedServiceOrOperator
     const { getWalletProvider } = await import('./wallet-provider.js');
     const provider = getWalletProvider(pool);
     // Force local creation even in hybrid mode (hybrid.createWallet already goes local).
-    const wallet = await (provider.local ? provider.local.createWallet('platform') : provider.createWallet('platform'));
+    const local=provider.local || provider;
+    await local.init();
+    const connection=await policyOperationPool.connect();
+    let wallet;
+    try {
+      await connection.query('BEGIN');
+      await connection.query("SELECT pg_advisory_xact_lock(hashtextextended('bard:platform-wallet',0))");
+      const existing=(await connection.query("SELECT address,key_id FROM local_wallets WHERE label='platform' ORDER BY created_at LIMIT 1")).rows[0];
+      wallet=existing ? {address:existing.address,walletId:existing.key_id} : await local.createWallet('platform',{db:connection});
+      wallet.address=wallet.address.toLowerCase();
+      await connection.query('COMMIT');
+    } catch(err) { await connection.query('ROLLBACK');throw err; }
+    finally { connection.release(); }
 
     let faucetResult = null;
     if (faucet && process.env.CIRCLE_API_KEY) {
@@ -4659,7 +4706,7 @@ app.post('/api/admin/provision-platform-wallet', requireTrustedServiceOrOperator
       address: wallet.address,
       walletId: wallet.walletId,
       faucet: faucetResult,
-      next: `Set SELLER_ADDRESS=${wallet.address} and PLATFORM_OWNER_WALLET=${wallet.address} on this service, then redeploy.`,
+      next: `Set SELLER_ADDRESS=${wallet.address} on this service and retain the intended PLATFORM_OWNER_WALLET, then redeploy.`,
     });
   } catch (err) {
     console.error('[Admin] provision-platform-wallet failed:', err.message);
@@ -4671,7 +4718,7 @@ app.post('/api/admin/provision-platform-wallet', requireTrustedServiceOrOperator
 // to any address, signed via the configured wallet provider. Ops tool for seeding
 // agent budgets or withdrawing platform funds. Platform-verifier-gated. Requires the
 // platform wallet to be server-signable (local/hybrid provider or Turnkey).
-app.post('/api/admin/platform-send', requireTrustedServiceOrOperator, async (req, res) => {
+app.post('/api/admin/platform-send', requireOperator, async (req, res) => {
   const { callerWallet, to, amountUsdc } = req.body || {};
   if (!callerWallet || !to || !amountUsdc) return res.status(400).json({ error: 'callerWallet, to, amountUsdc required' });
   if (!/^0x[0-9a-fA-F]{40}$/.test(to)) return res.status(400).json({ error: 'to must be a 0x address' });
@@ -4679,21 +4726,25 @@ app.post('/api/admin/platform-send', requireTrustedServiceOrOperator, async (req
     return res.status(403).json({ error: 'Only a platform verifier can send from the platform wallet' });
   }
   try {
-    const amountWei = BigInt(Math.round(parseFloat(amountUsdc) * 1e6));
-    const { getWalletProvider } = await import('./wallet-provider.js');
-    const signer = await getWalletProvider(pool).getSigner(SELLER_ADDRESS);
+    const amountWei = usdcUnits(String(amountUsdc));
+    const operation = sendOperation('platform',req.body.idempotencyKey);
     const { encodeFunctionData } = await import('viem');
     const data = encodeFunctionData({
       abi: [{ name: 'transfer', type: 'function', stateMutability: 'nonpayable', inputs: [{ type: 'address' }, { type: 'uint256' }], outputs: [{ type: 'bool' }] }],
       functionName: 'transfer',
       args: [to, amountWei],
     });
-    const txHash = await signer.sendTransaction({ to: USDC_CONTRACT_ADDRESS, data, value: 0n });
+    const { txHash,pending,replayed } = await executeManagedSend(pool,
+      { operation,agentId:'platform',wallet:SELLER_ADDRESS.toLowerCase(),recipient:to.toLowerCase(),amount:String(amountWei),
+        contextHash:policyHash({to:USDC_CONTRACT_ADDRESS.toLowerCase(),data,value:'0',chain:'arc-testnet'}) },
+      hooks => onchainEscrow.sendAs(SELLER_ADDRESS,{ to:USDC_CONTRACT_ADDRESS,data },'platform-send',hooks),
+      { lockPool:walletOperationPool,reserve:() => reservePlatformSpend(pool,{ kind:'operator',wallet:to,amount:amountWei*1_000_000_000_000n,operation }),
+        receipt:hash => arcTestnetClient.getTransactionReceipt({ hash }) });
     console.log(`[Admin] platform-send ${amountUsdc} USDC ${SELLER_ADDRESS} → ${to} (tx ${txHash})`);
-    return res.json({ success: true, txHash, from: SELLER_ADDRESS, to, amountUsdc });
+    return res.json({ success:true,txHash,from:SELLER_ADDRESS,to,amountUsdc,pending,replayed,idempotencyKey:req.body.idempotencyKey });
   } catch (err) {
     console.error('[Admin] platform-send failed:', err.message);
-    return res.status(500).json({ error: err.message });
+    return res.status(err.status || 500).json({ error:err.message,code:err.code });
   }
 });
 
@@ -6072,8 +6123,12 @@ app.use((err, req, res, next) => {
 });
 
 // ── Graceful shutdown ──
-process.on('SIGINT', async () => { try { await pool.end(); } catch {} process.exit(0); });
-process.on('SIGTERM', async () => { try { await pool.end(); } catch {} process.exit(0); });
+async function closeDatabasePools() {
+  await Promise.allSettled([pool.end(), walletOperationPool.end(), policyOperationPool.end()]);
+  process.exit(0);
+}
+process.on('SIGINT', closeDatabasePools);
+process.on('SIGTERM', closeDatabasePools);
 
 // ══════════════════════════════════════════════════════
 // ── Startup ──
@@ -6098,6 +6153,10 @@ process.on('SIGTERM', async () => { try { await pool.end(); } catch {} process.e
   try {
     await initSchema();
     console.log('  ✓ Schema verified');
+    if (registryEnabled() && process.env.NODE_ENV === 'production') {
+      await provisionVerifierRole(pool, { password:process.env.BARD_VCR_DATABASE_PASSWORD });
+      console.log('  ✓ Restricted VCR database role verified');
+    }
 
     // Bootstrap: ensure PLATFORM_OWNER_WALLET is always a verifier.
     try {

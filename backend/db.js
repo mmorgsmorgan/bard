@@ -16,6 +16,9 @@
 
 import pg from 'pg';
 import { spendingSchema } from './vcr-spending.js';
+import { registrySchema } from './vcr-registry.js';
+import { managedSendSchema } from './managed-send.js';
+import { platformBudgetSchema } from './platform-budget.js';
 import { humanLinkSchema } from './human-link.js';
 
 const { Pool } = pg;
@@ -26,7 +29,7 @@ if (!process.env.DATABASE_URL) {
   console.error('  ✗ DATABASE_URL is not set. On Railway, attach the Postgres plugin to this service to inject it automatically. Locally, set it in backend/.env.');
 }
 
-export const pool = new Pool({
+const poolOptions = {
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   // Tuned for Railway hobby tier. Backend is one Node process serving mixed
@@ -35,7 +38,17 @@ export const pool = new Pool({
   max: 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
-});
+};
+export const pool = new Pool(poolOptions);
+// Waiting send retries must not occupy the query connections needed by the
+// send that holds the lock. This also serializes retries across API processes.
+export const walletOperationPool = new Pool({ ...poolOptions,max:4 });
+// Policy locks can wait through a broadcast or a competing revocation. Keep
+// those waiters off the query pool used to load signers and record job state.
+export const policyOperationPool = new Pool({ ...poolOptions,max:4 });
+for (const operationPool of [walletOperationPool, policyOperationPool]) {
+  operationPool.on('error', () => console.error('A wallet operation database connection closed.'));
+}
 
 pool.on('error', (err) => {
   // Idle client died — pg auto-reconnects on next acquire(). Log only.
@@ -321,6 +334,9 @@ export async function initSchema() {
 
     `ALTER TABLE bounty_proposals ADD COLUMN IF NOT EXISTS acl_offer JSONB`,
     spendingSchema,
+    registrySchema,
+    managedSendSchema,
+    platformBudgetSchema,
     // ── bounty_messages (creator <-> proposer thread) ──
     `CREATE TABLE IF NOT EXISTS bounty_messages (
       id TEXT PRIMARY KEY,

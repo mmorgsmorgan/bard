@@ -391,7 +391,7 @@ export const TOOLS = [
   },
   {
     name: 'bard_send_usdc',
-    description: 'Send testnet USDC from your Turnkey wallet on Arc Testnet (USDC is the native gas token, system contract 0x3600...0000). Provide exactly one of: `to` (raw 0x address), `toUsername` (BARD profile username, resolves via the profiles table), or `toAgentName` (case-insensitive BARD agent name, resolves to the agent\'s Turnkey wallet or owner wallet). Max 100 USDC per tx.',
+    description: 'Send testnet USDC from your managed wallet on Arc Testnet under its VCR policy. Provide one recipient and a stable idempotencyKey; reuse the same key and terms for every retry. Max 100 USDC per transaction; recipient and daily policy limits also apply.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -399,10 +399,13 @@ export const TOOLS = [
         toUsername: { type: 'string', description: 'BARD human profile username (without @). Mutually exclusive with to / toAgentName.' },
         toAgentName: { type: 'string', description: 'Recipient agent name on BARD (case-insensitive). Mutually exclusive with to / toUsername.' },
         amount: { type: 'string', description: 'Amount of USDC to send (e.g. "1.00", "10.50"). Max 100.' },
+        idempotencyKey: { type:'string',description:'Unique ID for this intended payment (8–100 letters, digits, _ or -). Save it before sending and reuse for all retries.' },
       },
-      required: ['amount'],
+      required: ['amount','idempotencyKey'],
     },
   },
+  { name:'bard_wallet_policy',description:'Read your managed wallet spending policy, limits and enrollment state.',inputSchema:{ type:'object',properties:{},required:[] } },
+  { name:'bard_revoke_wallet_policy',description:'Immediately revoke your managed wallet spending policy. New transactions stop; operator action is required to reactivate.',inputSchema:{ type:'object',properties:{},required:[] } },
   {
     name: 'bard_quote_swap',
     description: 'Get a swap quote on Achswap DEX (Arc Testnet). Returns expected output amount and the on-chain route across V2/V3/V4 pools. No transaction is sent. tokenIn/tokenOut accept a 0x address or symbol (USDC, WUSDC, ACHS). amountIn is a decimal-aware integer string in the input token\'s smallest units (e.g. "1000000000000000000" = 1 token for an 18-decimal token).',
@@ -1058,8 +1061,10 @@ async function handleTool(name, args, token) {
           return {
             success: true,
             walletAddress: data.address,
+            walletId: data.walletId,
             turnkeyEnabled: true,
-            message: `Turnkey wallet provisioned: ${data.address}`,
+            policy: data.policy,
+            message: `Managed wallet provisioned: ${data.address}. Spending policy: ${data.policy?.status || 'external'}.`,
           };
         }
         if (data.turnkeyEnabled) {
@@ -1231,6 +1236,14 @@ async function handleTool(name, args, token) {
         return { success: true, chain: data.chain, walletAddress: data.walletAddress, message: data.message };
       }
 
+      case 'bard_wallet_policy':
+      case 'bard_revoke_wallet_policy': {
+        const auth = await requireAgentId(token);
+        if (auth.error) return auth;
+        const res = await apiFetch(`/api/agents/${auth.agentId}/wallet-policy`,{ method: name === 'bard_revoke_wallet_policy' ? 'DELETE' : 'GET' },token);
+        return res.json();
+      }
+
       case 'bard_send_usdc': {
         const auth = await requireAgentId(token);
         if (auth.error) return auth;
@@ -1238,7 +1251,8 @@ async function handleTool(name, args, token) {
         const recipientFields = [args.to, args.toUsername, args.toAgentName].filter(Boolean);
         if (recipientFields.length === 0) return { error: 'Provide one of `to` (0x address), `toUsername` (BARD username), or `toAgentName` (BARD agent name)' };
         if (recipientFields.length > 1) return { error: 'Provide only one of: `to`, `toUsername`, or `toAgentName`' };
-        const body = { amount: args.amount };
+        if (typeof args.idempotencyKey !== 'string' || !/^[a-zA-Z0-9_-]{8,100}$/.test(args.idempotencyKey)) return { error:'idempotencyKey is required; save a unique payment ID and reuse it for retries.' };
+        const body = { amount: args.amount,idempotencyKey:args.idempotencyKey };
         if (args.to) body.to = args.to;
         if (args.toUsername) body.toUsername = args.toUsername;
         if (args.toAgentName) body.toAgentName = args.toAgentName;
@@ -1247,10 +1261,12 @@ async function handleTool(name, args, token) {
           body: JSON.stringify(body),
         }, token);
         const data = await res.json();
-        if (!res.ok) return { error: data.error };
+        if (!res.ok) return { error:data.error,code:data.code,idempotencyKey:args.idempotencyKey };
         return {
           success: true,
           pending: data.pending || false,
+          replayed: data.replayed || false,
+          idempotencyKey: args.idempotencyKey,
           from: data.from,
           to: data.to,
           toUsername: data.toUsername,

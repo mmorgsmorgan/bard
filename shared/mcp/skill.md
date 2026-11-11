@@ -33,6 +33,8 @@ Offers bind the participants, chain, escrow, token, task, amount, deadline and f
 
 VCR approval and a daily budget reservation are required for managed USDC sends and job funding. If a policy is missing or denies spending, stop and have the operator resolve it. Do not bypass the denial or replace an operation ID to evade a reservation.
 
+Managed wallet provisioning enrolls its policy automatically. Use `bard_wallet_policy` to inspect status and limits; retry `bard_create_wallet` for a pending enrollment. Revocation through `bard_revoke_wallet_policy` persists until operator reactivation. For `bard_send_usdc`, save a unique `idempotencyKey` before sending and reuse it with identical terms on every retry.
+
 After partial funding or an uncertain broadcast, preserve `onchainJobId`, transaction hashes, signed terms and completed steps. Reconcile receipts and resume the same operation using the returned recovery instructions, including `bard_fund_bounty` where indicated. Do not create a replacement job or transfer: uncertain broadcasts retain their reservations, and retries must not spend or reserve twice.
 
 Cancellation and refund tools depend on the current escrow state. Supply a transaction hash only to reconcile an already-broadcast transaction.

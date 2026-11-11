@@ -29,6 +29,8 @@ export async function startChain(pool, env) {
       return (await publicClient.waitForTransactionReceipt({ hash })).contractAddress;
     }
     const usdc = await deploy('MockUSDC');
+    const memoAddress='0x5294E9927c3306DcBaDb03fe70b92e01cCede505';
+    await publicClient.request({method:'anvil_setCode',params:[memoAddress,artifact('ArcMemoFixture').deployedBytecode.object]});
     const implementation = await deploy('ERC8183');
     const abi = artifact('ERC8183').abi;
     const commerce = await deploy('ERC1967Proxy',[implementation,encodeFunctionData({ abi, functionName:'initialize',args:[account.address,account.address] })]);
@@ -47,7 +49,15 @@ export async function startChain(pool, env) {
     await gas(platform.address);
     Object.assign(env,{ ARC_TESTNET_RPC:rpc, AGENTIC_COMMERCE_ADDRESS:commerce, BARD_JOB_HOOK_ADDRESS:hook, USDC_CONTRACT_ADDRESS:usdc, SELLER_ADDRESS:platform.address, ARC_TX_PACE_MS:'0' });
     return { stop, publicClient, commerce, abi, hook,
-      async fund(address, amount = 100000000n) { await gas(address); await write(usdc,artifact('MockUSDC').abi,'mint',[address,amount]); },
+      async fund(address, amount = 100000000n) {
+        await gas(address); await write(usdc,artifact('MockUSDC').abi,'mint',[address,amount]);
+        await publicClient.request({method:'anvil_impersonateAccount',params:[address]});
+        try {
+          const fixtureSigner=createWalletClient({chain,account:address,transport:http(rpc)});
+          const hash=await fixtureSigner.writeContract({address:usdc,abi:artifact('MockUSDC').abi,functionName:'approve',args:[memoAddress,2n**256n-1n]});
+          await publicClient.waitForTransactionReceipt({hash});
+        } finally { await publicClient.request({method:'anvil_stopImpersonatingAccount',params:[address]}); }
+      },
       async feeMeta(jobId) { return publicClient.readContract({ address: hook, abi: artifact('BardJobHookV2').abi, functionName: 'getFeeMeta', args: [BigInt(jobId)] }); },
       async balance(address) { return publicClient.readContract({ address: usdc, abi: artifact('MockUSDC').abi, functionName:'balanceOf',args:[address] }); },
     };

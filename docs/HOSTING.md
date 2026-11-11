@@ -1,6 +1,6 @@
 # Hosting Bard
 
-Use **Vercel for the Next.js website and Railway for the API, hosted MCP and PostgreSQL**. The backend runs escrow expiry, reconciliation, reputation and wallet audit workers, so it needs a persistent service. Keep one backend replica until worker coordination supports multiple instances. Public browsing and previews must remain accessible without a hosting-provider sign-in.
+Use **Vercel for the Next.js website and Railway for the API, hosted MCP, private VCR verifier and PostgreSQL**. The backend runs escrow expiry, reconciliation, reputation and wallet audit workers, so it needs a persistent service. Keep one backend replica until worker coordination supports multiple instances. Public browsing and previews must remain accessible without a hosting-provider sign-in.
 
 This guide prepares the application rollout. The [Arc Testnet contracts](../agent-handoff/DEPLOYMENT-2026-11-10.md) are already deployed and verified; use those addresses. Create a fresh database with no imported accounts, jobs or wallet keys.
 
@@ -13,6 +13,7 @@ The server workspaces and `.nvmrc` pin Node **24.x**, which is supported by both
 | Website | Vercel | `frontend` | `frontend/vercel.json`, Next.js preset, Node 24 | Managed by Vercel |
 | API and workers | Railway | `/` | `/backend/railway.json`, Railpack | `node backend/server.js`, `/api/health` |
 | Hosted MCP | Railway | `/` | `/railway.json`, Railpack | `node mcp-server/server.js`, `/health` |
+| Private VCR verifier | Railway | `/` | `/vcr-service/railway.json`, Railpack | `node vcr-service/server.js`, `/health` |
 | Database | Railway | Managed PostgreSQL service | Fresh database, retained storage and backups | Private connection from API |
 
 For Vercel, enable **Include source files outside of the Root Directory in the Build Step**. The checked-in install command runs `npm ci --prefix ..` from `frontend`, installing the complete workspace from its lockfile. The build command is `npm run build`. Disable deployment protection for any production or preview URL intended for public sharing.
@@ -55,10 +56,20 @@ AGENTIC_COMMERCE_ADDRESS=0x680e73Ff53981629b8B814cE9A69AD1347867606
 BARD_JOB_HOOK_ADDRESS=0x097eF956B18E20A8E9b509791c2a430b2750f32b
 PLATFORM_OWNER_WALLET=0xB804d506d5446b1A3BeBEfC903D84F754973C2D2
 SELLER_ADDRESS=<BACKEND_MANAGED_EVALUATOR_ADDRESS>
+BARD_VCR_MODE=registry
+BARD_VCR_URL=http://bard-vcr.railway.internal:8080
+BARD_VCR_SERVICE_SECRET=<NEW_RANDOM_SECRET_5>
+BARD_VCR_DATABASE_PASSWORD=<NEW_RANDOM_SECRET_6>
 BARD_VCR_POLICIES={}
+BARD_GAS_MAX_WEI=0
+BARD_GAS_DAILY_WEI=0
+BARD_GAS_WALLET_DAILY_WEI=0
+BARD_PLATFORM_MAX_WEI=0
+BARD_PLATFORM_DAILY_WEI=0
+BARD_PLATFORM_WALLET_DAILY_WEI=0
 ```
 
-Generate each of the four secrets independently, for example by running `openssl rand -hex 32` four times locally. Retain `WALLET_MASTER_KEY` with the database: changing it prevents the backend from decrypting existing managed wallets. Mount an API volume at `/data`, or configure the supported R2 variables in [backend/.env.example](../backend/.env.example). The API currently enables PostgreSQL TLS in production; verify connectivity with the selected database template.
+Generate the six secrets independently with `openssl rand -hex 32`. Retain `WALLET_MASTER_KEY` with the database: changing it prevents the backend from decrypting existing managed wallets. Mount an API volume at `/data`, or configure the supported R2 variables in [backend/.env.example](../backend/.env.example). The API currently enables PostgreSQL TLS in production; verify connectivity with the selected database template.
 
 `SELLER_ADDRESS` must be an evaluator that the selected wallet provider can sign for, funded with Arc Testnet gas. The contract admin address and local Foundry keystore do not automatically provision that backend signer. Operator provisioning through `/api/admin/provision-platform-wallet` creates a managed wallet in the new backend and returns its public address; fund it and set `SELLER_ADDRESS` before accepting funded work. The existing preview uses the admin as a placeholder and is not settlement-ready. Keep the intended operator in `PLATFORM_OWNER_WALLET`.
 
@@ -69,14 +80,31 @@ PASSPORT_API_KEY=<PASSPORT_API_KEY>
 PASSPORT_SCORER_ID=<PASSPORT_SCORER_ID>
 ```
 
-Ethos uses its public API and defaults to `ETHOS_CLIENT_NAME=bard`; it needs no Passport key. For managed funding and USDC sends, configure a trusted VCR verifier and policies:
+Ethos uses its public API and defaults to `ETHOS_CLIENT_NAME=bard`; it needs no Passport key. Registry mode automatically enrolls each active agent's managed wallet through the private verifier. Keep `BARD_VCR_POLICIES={}`; this mode needs no address-by-address map. The API provisions a restricted `bard_vcr` database role after schema bootstrap. Give the verifier that role's connection string and the same service authentication secret, plus the approved limits and contract addresses:
 
 ```dotenv
+NODE_ENV=production
+PORT=8080
+DATABASE_URL=postgresql://bard_vcr:<PRIVATE_VCR_DATABASE_PASSWORD>@<PRIVATE_POSTGRES_HOST>:5432/railway
+BARD_VCR_SERVICE_SECRET=<SAME_VALUE_AS_API_BARD_VCR_SERVICE_SECRET>
+BARD_VCR_MAX_TX_USDC=100
+BARD_VCR_DAILY_USDC=250
+BARD_VCR_ALLOWED_RECIPIENTS=[]
+AGENTIC_COMMERCE_ADDRESS=0x680e73Ff53981629b8B814cE9A69AD1347867606
+BARD_JOB_HOOK_ADDRESS=0x097eF956B18E20A8E9b509791c2a430b2750f32b
+```
+
+Keep this verifier on Railway's private network. It receives no wallet master key, agent tokens, operator secret or Passport key. Missing, pending, revoked or unreachable policies block spending. Sponsor limits are independent and initially zero; agents need their own Arc gas balance. See [managed wallet policies](MANAGED-WALLET-POLICIES.md) for recipient rules, durable send retries and revocation.
+
+An existing ENS/IPFS verifier remains supported with explicit external mode:
+
+```dotenv
+BARD_VCR_MODE=external
 BARD_VCR_URL=https://<YOUR_VCR_SERVICE_DOMAIN>
 BARD_VCR_POLICIES={"<LOWERCASE_AGENT_WALLET>":"<POLICY_ENS_NAME>"}
 ```
 
-The backend calls `/api/verify` on that VCR origin. The empty `{}` map in the initial block permits browsing but blocks managed spending; replace it with approved policies before testing payments. Turnkey credentials are unnecessary for the `local` provider. Circle faucet and R2 credentials are optional integrations; Binance stays disabled.
+External mode calls `/api/verify` on that origin and requires its approved wallet-to-policy map. Registry mode uses Bard's authenticated database policy profile; it does not publish policies to ENS or IPFS. Turnkey credentials are unnecessary for the `local` provider. Circle faucet and R2 credentials are optional integrations; Binance stays disabled.
 
 ### Railway MCP service
 
@@ -100,7 +128,7 @@ Set these for the Vercel environment being deployed, then create a new build. Bo
 
 ## Rollout and verification
 
-1. Select the reviewed GitHub revision. Create the fresh Railway PostgreSQL, API and MCP services; configure storage, variables and public domains.
+1. Select the reviewed GitHub revision. Create the fresh Railway PostgreSQL, API, MCP and private VCR services; configure storage, variables and public API/MCP domains.
 2. Verify API `/api/health` and MCP `/health`. Confirm authenticated MCP can reach the API with the matching shared secret.
 3. Import the frontend into Vercel, apply the settings above and deploy with the new public API/MCP URLs.
 4. Set the final website origin in backend CORS. Visit `/`, `/agents` and `/bounties` in a signed-out browser. Verify the fixed animated background remains visible while scrolling and navigating.

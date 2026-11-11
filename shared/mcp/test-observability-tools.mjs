@@ -96,9 +96,12 @@ try {
   assert.equal(bounty.bounty.id, 'bounty-test');
   assert.equal(bounty.onchain.jobId, '12');
 
-  const pendingSend = await call('bard_send_usdc', { to: wallet, amount: '0.25' });
+  const missingId = await call('bard_send_usdc', { to:wallet,amount:'0.25' });
+  assert.match(missingId.error,/idempotencyKey/);
+  const pendingSend = await call('bard_send_usdc', { to:wallet,amount:'0.25',idempotencyKey:'test-payment-1' });
   assert.equal(pendingSend.pending, true);
   assert.equal(pendingSend.txHash, '0xpending-send');
+  assert.equal(pendingSend.idempotencyKey,'test-payment-1');
 
   const pendingDeliver = await call('bard_submit_deliverable', {
     bountyId: 'bounty-test',

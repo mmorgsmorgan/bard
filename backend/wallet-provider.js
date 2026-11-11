@@ -103,7 +103,7 @@ class LocalWalletProvider {
   }
 
   /** Generate a fresh EOA, store its encrypted key, return { walletId, address }. */
-  async createWallet(label = 'bard-wallet') {
+  async createWallet(label = 'bard-wallet', { db = this.pool } = {}) {
     if (!this.enabled()) throw new Error('LocalWalletProvider disabled: WALLET_MASTER_KEY not set');
     await this.init();
     const pk = generatePrivateKey();
@@ -111,12 +111,11 @@ class LocalWalletProvider {
     const address = account.address;
     const keyId = `lw-${Date.now()}-${randomBytes(4).toString('hex')}`;
     const enc = encryptSecret(pk);
-    await this.pool.query(
+    await db.query(
       `INSERT INTO local_wallets (address, key_id, label, enc_salt, enc_iv, enc_tag, enc_ct, created_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [address.toLowerCase(), keyId, label, enc.salt, enc.iv, enc.tag, enc.ct, new Date().toISOString()]
     );
-    this._cache.set(address.toLowerCase(), account);
     return { walletId: keyId, address };
   }
 
@@ -235,7 +234,7 @@ class HybridWalletProvider {
   }
   enabled() { return this.local.enabled() || this.turnkey.enabled(); }
   // New wallets go local (Turnkey-free by default).
-  createWallet(label) { return this.local.createWallet(label); }
+  createWallet(label, options) { return this.local.createWallet(label, options); }
   async _providerFor(address) {
     try {
       const { rows } = await this.local.pool.query('SELECT 1 FROM local_wallets WHERE address = $1', [address.toLowerCase()]);
